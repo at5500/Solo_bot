@@ -18,6 +18,8 @@ from api.v2.routes import (
     payment_links,
     identities,
     web,
+    me,
+    miniapp_auth,
 )
 
 router = APIRouter()
@@ -40,3 +42,5 @@ router.include_router(modules.router, prefix="/api")
 router.include_router(management.router, prefix="/api/management", tags=["Management"])
 router.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 router.include_router(web.router, prefix="", tags=["Web"])
+router.include_router(me.router, prefix="/api", tags=["Me (Public)"])
+router.include_router(miniapp_auth.router, prefix="/api")
