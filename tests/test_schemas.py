@@ -26,7 +26,10 @@ MeRenewResponse = _me.MeRenewResponse
 MeProfileResponse = _me.MeProfileResponse
 MeKeyShort = _me.MeKeyShort
 MeKeyDetails = _me.MeKeyDetails
-MeTariffResponse = _me.MeTariffResponse
+MeTariffItem = _me.MeTariffItem
+MeTariffGroup = _me.MeTariffGroup
+MeTariffsResponse = _me.MeTariffsResponse
+MeDiscountInfo = _me.MeDiscountInfo
 MeReferralStats = _me.MeReferralStats
 MePaymentResponse = _me.MePaymentResponse
 MiniAppLoginRequest = _me.MiniAppLoginRequest
@@ -73,12 +76,62 @@ class TestMeKeyDetails:
         assert d.link == "vless://server"
 
 
-class TestMeTariffResponse:
+class TestMeTariffItem:
     def test_creation(self):
-        t = MeTariffResponse(id=1, name="Basic", duration_days=30, price_rub=200)
+        t = MeTariffItem(id=1, name="Basic", duration_days=30, price_rub=200)
         assert t.vless is False
         assert t.configurable is False
         assert t.group_code is None
+
+
+class TestMeTariffsResponse:
+    def test_empty(self):
+        r = MeTariffsResponse()
+        assert r.groups == {}
+        assert r.discount is None
+
+    def test_with_groups(self):
+        t1 = MeTariffItem(id=1, name="30 days", duration_days=30, price_rub=200, group_code="standard")
+        t2 = MeTariffItem(id=2, name="30 days -50%", duration_days=30, price_rub=100, group_code="discounts")
+        r = MeTariffsResponse(
+            groups={
+                "standard": MeTariffGroup(tariffs=[t1]),
+                "discounts": MeTariffGroup(tariffs=[t2]),
+            },
+            discount=MeDiscountInfo(
+                type="hot_lead_step_2",
+                tariff_group="discounts",
+                expires_at=datetime(2026, 3, 18, 12, 0),
+            ),
+        )
+        assert len(r.groups) == 2
+        assert r.discount is not None
+        assert r.discount.tariff_group == "discounts"
+        assert len(r.groups["standard"].tariffs) == 1
+
+    def test_no_discount(self):
+        t1 = MeTariffItem(id=1, name="30 days", duration_days=30, price_rub=200)
+        r = MeTariffsResponse(
+            groups={"standard": MeTariffGroup(tariffs=[t1])},
+            discount=None,
+        )
+        assert r.discount is None
+        assert len(r.groups["standard"].tariffs) == 1
+
+
+class TestMeDiscountInfo:
+    def test_creation(self):
+        d = MeDiscountInfo(
+            type="hot_lead_step_3",
+            tariff_group="discounts_max",
+            expires_at=datetime(2026, 3, 18),
+        )
+        assert d.type == "hot_lead_step_3"
+        assert d.tariff_group == "discounts_max"
+
+    def test_missing_fields(self):
+        with pytest.raises(ValidationError):
+            MeDiscountInfo()
 
 
 class TestMeReferralStats:

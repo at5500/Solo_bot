@@ -52,8 +52,8 @@ class MeKeyDetails(BaseModel):
     current_traffic_limit: int | None = None
 
 
-class MeTariffResponse(BaseModel):
-    """Active tariff available for purchase."""
+class MeTariffItem(BaseModel):
+    """Single tariff entry."""
 
     id: int
     name: str
@@ -65,6 +65,27 @@ class MeTariffResponse(BaseModel):
     subgroup_title: str | None = None
     vless: bool = False
     configurable: bool = False
+
+
+class MeDiscountInfo(BaseModel):
+    """Active discount details (hot lead step)."""
+
+    type: str = Field(..., description="hot_lead_step_2 or hot_lead_step_3")
+    tariff_group: str = Field(..., description="discounts or discounts_max")
+    expires_at: datetime
+
+
+class MeTariffGroup(BaseModel):
+    """Tariffs grouped by subgroup within a group_code."""
+
+    tariffs: list[MeTariffItem] = []
+
+
+class MeTariffsResponse(BaseModel):
+    """Grouped tariffs with optional discount section."""
+
+    groups: dict[str, MeTariffGroup] = {}
+    discount: MeDiscountInfo | None = None
 
 
 class MeReferralStats(BaseModel):

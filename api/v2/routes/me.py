@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_token
 from api.v2.schemas.me import (
+    MeDiscountInfo,
     MeKeyDetails,
     MeKeyShort,
     MePaymentResponse,
@@ -17,7 +18,9 @@ from api.v2.schemas.me import (
     MeReferralStats,
     MeRenewRequest,
     MeRenewResponse,
-    MeTariffResponse,
+    MeTariffGroup,
+    MeTariffItem,
+    MeTariffsResponse,
 )
 from config import USERNAME_BOT
 from database import keys as kdb, payments as pdb, referrals as rdb
@@ -143,31 +146,144 @@ async def get_my_key_details(
     )
 
 
-@router.get("/tariffs", response_model=list[MeTariffResponse])
+HIDDEN_GROUPS = {"trial", "gifts"}
+DISCOUNT_GROUPS = {"discounts", "discounts_max"}
+
+
+async def _check_hot_lead_discount_eager(session: AsyncSession, tg_id: int) -> dict:
+    """Check hot lead discount, looking ahead if bot hasn't sent a notification yet.
+
+    First uses the standard check (bot already wrote step_2/step_3).
+    If nothing found, computes whether the user *would* qualify based on
+    step_1 timing — without writing anything to DB, so the bot still
+    sends the Telegram notification on its own schedule.
+    """
+    from datetime import timedelta
+
+    from config import DISCOUNT_ACTIVE_HOURS, HOT_LEAD_INTERVAL_HOURS
+    from core.bootstrap import NOTIFICATIONS_CONFIG
+    from database.hot_leads import get_hot_leads
+    from database.models import Notification
+    from database.notifications import check_hot_lead_discount
+
+    discount = await check_hot_lead_discount(session, tg_id)
+    if discount.get("available"):
+        return discount
+
+    leads = await get_hot_leads(session)
+    if tg_id not in leads:
+        return {"available": False}
+
+    interval_hours = int(NOTIFICATIONS_CONFIG.get("HOT_LEADS_INTERVAL_HOURS", HOT_LEAD_INTERVAL_HOURS))
+    discount_hours = int(NOTIFICATIONS_CONFIG.get("DISCOUNT_ACTIVE_HOURS", DISCOUNT_ACTIVE_HOURS))
+    now = datetime.utcnow()
+
+    step1_row = await session.execute(
+        select(Notification.last_notification_time)
+        .where(Notification.tg_id == tg_id, Notification.notification_type == "hot_lead_step_1")
+    )
+    step1_time = step1_row.scalar_one_or_none()
+    if not step1_time:
+        return {"available": False}
+
+    step2_row = await session.execute(
+        select(Notification.last_notification_time)
+        .where(Notification.tg_id == tg_id, Notification.notification_type == "hot_lead_step_2")
+    )
+    step2_time = step2_row.scalar_one_or_none()
+
+    if step2_time is None:
+        virtual_start = step1_time + timedelta(hours=interval_hours)
+        virtual_end = virtual_start + timedelta(hours=discount_hours)
+        if virtual_start <= now <= virtual_end:
+            return {
+                "available": True,
+                "type": "hot_lead_step_2",
+                "tariff_group": "discounts",
+                "expires_at": virtual_end,
+            }
+        return {"available": False}
+
+    step3_row = await session.execute(
+        select(Notification.last_notification_time)
+        .where(Notification.tg_id == tg_id, Notification.notification_type == "hot_lead_step_3")
+    )
+    step3_time = step3_row.scalar_one_or_none()
+
+    if step3_time is None:
+        step2_expired = now > step2_time + timedelta(hours=discount_hours)
+        virtual_start = step2_time + timedelta(hours=interval_hours)
+        virtual_end = virtual_start + timedelta(hours=discount_hours)
+        if step2_expired and virtual_start <= now <= virtual_end:
+            return {
+                "available": True,
+                "type": "hot_lead_step_3",
+                "tariff_group": "discounts_max",
+                "expires_at": virtual_end,
+            }
+
+    return {"available": False}
+
+
+def _tariff_to_item(t) -> MeTariffItem:
+    return MeTariffItem(
+        id=t.id,
+        name=t.name,
+        group_code=t.group_code,
+        duration_days=t.duration_days,
+        price_rub=t.price_rub,
+        traffic_limit=t.traffic_limit,
+        device_limit=t.device_limit,
+        subgroup_title=t.subgroup_title,
+        vless=bool(t.vless),
+        configurable=bool(t.configurable),
+    )
+
+
+@router.get("/tariffs", response_model=MeTariffsResponse)
 async def get_available_tariffs(
     session: AsyncSession = Depends(get_session),
     identity=Depends(verify_identity_token),
 ):
-    """Returns active tariffs available for purchase."""
+    """Returns active tariffs grouped by group_code.
+
+    Discount tariffs (``discounts``, ``discounts_max``) are only included
+    when the user has an active hot-lead discount.  ``trial`` and ``gifts``
+    groups are always excluded.
+    """
+    from collections import defaultdict
+
+    tg_id = await _resolve_tg_id(identity)
+
     result = await session.execute(
         select(Tariff).where(Tariff.is_active.is_(True)).order_by(Tariff.sort_order.asc().nullslast(), Tariff.id)
     )
-    tariffs = result.scalars().all()
-    return [
-        MeTariffResponse(
-            id=t.id,
-            name=t.name,
-            group_code=t.group_code,
-            duration_days=t.duration_days,
-            price_rub=t.price_rub,
-            traffic_limit=t.traffic_limit,
-            device_limit=t.device_limit,
-            subgroup_title=t.subgroup_title,
-            vless=bool(t.vless),
-            configurable=bool(t.configurable),
+    all_tariffs = result.scalars().all()
+
+    discount_info = await _check_hot_lead_discount_eager(session, tg_id)
+    active_discount_group = discount_info.get("tariff_group") if discount_info.get("available") else None
+
+    groups: dict[str, list[MeTariffItem]] = defaultdict(list)
+    for t in all_tariffs:
+        gc = (t.group_code or "").lower()
+        if gc in HIDDEN_GROUPS:
+            continue
+        if gc in DISCOUNT_GROUPS and gc != active_discount_group:
+            continue
+        groups[gc].append(_tariff_to_item(t))
+
+    discount = None
+    if discount_info.get("available"):
+        discount = MeDiscountInfo(
+            type=discount_info["type"],
+            tariff_group=discount_info["tariff_group"],
+            expires_at=discount_info["expires_at"],
         )
-        for t in tariffs
-    ]
+
+    return MeTariffsResponse(
+        groups={k: MeTariffGroup(tariffs=v) for k, v in groups.items()},
+        discount=discount,
+    )
 
 
 @router.get("/referrals", response_model=MeReferralStats)
@@ -239,6 +355,14 @@ async def purchase_key(
     tariff = await get_tariff_by_id(session, body.tariff_id)
     if not tariff or not tariff.get("is_active"):
         raise HTTPException(status_code=400, detail="Tariff not found or inactive")
+
+    gc = (tariff.get("group_code") or "").lower()
+    if gc in DISCOUNT_GROUPS:
+        discount_info = await _check_hot_lead_discount_eager(session, tg_id)
+        if not discount_info.get("available") or discount_info.get("tariff_group") != gc:
+            raise HTTPException(status_code=403, detail="Discount not available")
+    if gc in HIDDEN_GROUPS:
+        raise HTTPException(status_code=403, detail="This tariff group is not available for purchase")
 
     cost = float(tariff["price_rub"])
     balance = await get_balance(session, tg_id)
@@ -334,6 +458,14 @@ async def renew_my_key(
     tariff = await get_tariff_by_id(session, body.tariff_id)
     if not tariff or not tariff.get("is_active"):
         raise HTTPException(status_code=400, detail="Tariff not found or inactive")
+
+    gc = (tariff.get("group_code") or "").lower()
+    if gc in DISCOUNT_GROUPS:
+        disc = await _check_hot_lead_discount_eager(session, tg_id)
+        if not disc.get("available") or disc.get("tariff_group") != gc:
+            raise HTTPException(status_code=403, detail="Discount not available")
+    if gc in HIDDEN_GROUPS:
+        raise HTTPException(status_code=403, detail="This tariff group is not available for renewal")
 
     cost = float(tariff["price_rub"])
     balance = await get_balance(session, tg_id)
