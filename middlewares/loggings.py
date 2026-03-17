@@ -5,6 +5,14 @@ from typing import Any, TypedDict
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject, User
 
+from audit import (
+    ensure_telegram_context,
+    log_telegram_access,
+    record_telegram_access_event,
+    record_telegram_access_event_background,
+    set_telegram_actor,
+    _telegram_access_payload,
+)
 from logger import logger
 
 
@@ -25,7 +33,12 @@ def _log_activity_sync(user_info: UserInfo) -> None:
 
 
 class LoggingMiddleware(BaseMiddleware):
-    """Middleware для логирования действий пользователя. Лог пишется в фоне, не задерживая обработчик."""
+    """Middleware для логирования действий пользователя. Лог пишется в фоне, не задерживая обработчик.
+    Если передан sessionmaker — аудит пишется в отдельной сессии в фоне (не блокирует ответ)."""
+
+    def __init__(self, sessionmaker=None):
+        super().__init__()
+        self._sessionmaker = sessionmaker
 
     async def __call__(
         self,
@@ -33,12 +46,75 @@ class LoggingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        audit_context = ensure_telegram_context(data, event)
         user_info = self._extract_user_info(event)
 
         if user_info["user_id"]:
             asyncio.create_task(asyncio.to_thread(_log_activity_sync, user_info))
 
-        return await handler(event, data)
+        try:
+            result = await handler(event, data)
+            db_user = data.get("user")
+            if isinstance(db_user, dict):
+                set_telegram_actor(
+                    audit_context,
+                    identity_id=db_user.get("identity_id"),
+                    tg_id=db_user.get("tg_id"),
+                )
+            if self._sessionmaker is not None:
+                payload = _telegram_access_payload(audit_context, event, result="success")
+                asyncio.create_task(
+                    record_telegram_access_event_background(self._sessionmaker, **payload)
+                )
+            else:
+                session = data.get("session")
+                if session is not None:
+                    await record_telegram_access_event(
+                        session,
+                        audit_context,
+                        event,
+                        result="success",
+                    )
+            asyncio.create_task(
+                asyncio.to_thread(
+                    log_telegram_access,
+                    event,
+                    audit_context=audit_context,
+                    result="success",
+                )
+            )
+            return result
+        except Exception as exc:
+            reason = type(exc).__name__
+            if self._sessionmaker is not None:
+                payload = _telegram_access_payload(
+                    audit_context, event, result="fail", reason=reason
+                )
+                asyncio.create_task(
+                    record_telegram_access_event_background(
+                        self._sessionmaker, **payload
+                    )
+                )
+            else:
+                session = data.get("session")
+                if session is not None:
+                    await record_telegram_access_event(
+                        session,
+                        audit_context,
+                        event,
+                        result="fail",
+                        reason=reason,
+                    )
+            asyncio.create_task(
+                asyncio.to_thread(
+                    log_telegram_access,
+                    event,
+                    audit_context=audit_context,
+                    result="fail",
+                    reason=reason,
+                )
+            )
+            raise
 
     def _extract_user_info(self, event: TelegramObject) -> UserInfo:
         """Извлекает информацию о пользователе из различных типов событий."""

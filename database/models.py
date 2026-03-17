@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -301,6 +302,34 @@ class TrackingSource(DictLikeMixin, Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AuditEvent(DictLikeMixin, Base):
+    """События аудита (флоу пользователя)."""
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("ix_audit_events_tg_created", "actor_tg_id", "created_at"),
+        Index("ix_audit_events_identity_created", "actor_identity_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    channel = Column(String(32), nullable=False, index=True)
+    actor_identity_id = Column(
+        String(36),
+        ForeignKey("identities.id", ondelete="SET NULL", onupdate="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    actor_tg_id = Column(BigInteger, nullable=True, index=True)
+    path_or_handler = Column(String(255), nullable=False)
+    entity_type = Column(String(64), nullable=True, index=True)
+    entity_id = Column(String(255), nullable=True, index=True)
+    result = Column(String(32), nullable=False, server_default=text("'success'"))
+    reason = Column(Text, nullable=True)
+    metadata_ = Column("metadata", JSONB, nullable=True)
+    request_id = Column(String(64), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Admin(Base):
     __tablename__ = "admins"
 
@@ -323,3 +352,27 @@ class Setting(DictLikeMixin, Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WebPage(DictLikeMixin, Base):
+    __tablename__ = "web_pages"
+
+    slug = Column(String(64), primary_key=True)
+    title = Column(String(255), nullable=True)
+
+
+class WebTheme(DictLikeMixin, Base):
+    __tablename__ = "web_themes"
+
+    page_slug = Column(String(64), ForeignKey("web_pages.slug", ondelete="CASCADE"), primary_key=True)
+    tokens = Column(JSONB, nullable=False, default=dict)
+
+
+class WebBlock(DictLikeMixin, Base):
+    __tablename__ = "web_blocks"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    page_slug = Column(String(64), ForeignKey("web_pages.slug", ondelete="CASCADE"), index=True, nullable=False)
+    order = Column(Integer, nullable=False, default=0)
+    type = Column(String(64), nullable=False)
+    data = Column(JSONB, nullable=False, default=dict)

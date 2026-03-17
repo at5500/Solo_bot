@@ -60,7 +60,6 @@ def register_middleware(
     if PROBE_LOGGING:
         dispatcher.update.outer_middleware(StreamProbeMiddleware("global"))
 
-    # Первым делом отвечаем на callback, чтобы не уйти в «query is too old» при очереди
     dispatcher.update.outer_middleware(EarlyCallbackAnswerMiddleware())
 
     if middleware_enabled("runtime_config_sync"):
@@ -81,7 +80,7 @@ def register_middleware(
         available_middlewares = {
             "admin": AdminMiddleware(),
             "maintenance": MaintenanceModeMiddleware(),
-            "logging": LoggingMiddleware(),
+            "logging": LoggingMiddleware(sessionmaker) if sessionmaker else LoggingMiddleware(),
             "throttling": ThrottlingMiddleware(),
             "user": UserMiddleware(),
             "answer": CallbackAnswerMiddleware(),

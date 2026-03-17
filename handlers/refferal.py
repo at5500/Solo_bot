@@ -190,7 +190,6 @@ async def show_referral_qr(callback_query: CallbackQuery):
             reply_markup=builder.as_markup(),
             media_path=qr_path,
         )
-
         os.remove(qr_path)
 
     except Exception as error:

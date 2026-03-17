@@ -137,3 +137,68 @@ async def cache_delete_pattern(pattern: str) -> int:
     except Exception:
         return deleted
     return deleted
+
+
+async def cache_rpush(key: str, *values: Any) -> int:
+    """Добавляет значения в хвост списка. Значения сериализуются в JSON. Возвращает длину списка после или 0 при ошибке."""
+    if not values:
+        return 0
+    client = await _get_redis()
+    if client is None:
+        return 0
+    try:
+        raw = [json.dumps(v, ensure_ascii=False) for v in values]
+        return int(await client.rpush(key, *raw))
+    except Exception:
+        return 0
+
+
+async def cache_expire(key: str, ttl_sec: int) -> bool:
+    """Устанавливает TTL для ключа. Возвращает True при успехе."""
+    client = await _get_redis()
+    if client is None:
+        return False
+    try:
+        return await client.expire(key, max(1, int(ttl_sec)))
+    except Exception:
+        return False
+
+
+async def cache_lrange(key: str, start: int, end: int) -> list[Any]:
+    """Возвращает срез списка. end=-1 — до конца. Элементы десериализуются из JSON."""
+    client = await _get_redis()
+    if client is None:
+        return []
+    try:
+        raw_list = await client.lrange(key, start, end)
+        out = []
+        for raw in raw_list:
+            try:
+                out.append(json.loads(raw))
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
+
+async def cache_lpop_batch(key: str, count: int) -> list[Any]:
+    """Забирает до count элементов с головы списка (FIFO). Совместимо с Redis < 6.2."""
+    if count <= 0:
+        return []
+    client = await _get_redis()
+    if client is None:
+        return []
+    out = []
+    try:
+        for _ in range(count):
+            raw = await client.lpop(key)
+            if raw is None:
+                break
+            try:
+                out.append(json.loads(raw))
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return out

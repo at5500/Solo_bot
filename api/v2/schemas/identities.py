@@ -40,6 +40,15 @@ class LoginResponse(BaseModel):
     token: str
 
 
+class SendLoginCodeRequest(BaseModel):
+    email: str = Field(..., min_length=1)
+
+
+class LoginByCodeRequest(BaseModel):
+    email: str = Field(..., min_length=1)
+    code: str = Field(..., min_length=1)
+
+
 class LoginTelegramRequest(BaseModel):
     """Данные от Telegram Login Widget (кнопка «Войти через Telegram»)."""
 
@@ -53,7 +62,15 @@ class LoginTelegramRequest(BaseModel):
 
 
 class LinkTelegramRequest(BaseModel):
-    tg_id: int = Field(...)
+    """Данные от Telegram Login Widget — обязательны для доказательства владения аккаунтом при привязке."""
+
+    id: int = Field(..., description="Telegram user id (tg_id)")
+    first_name: str = Field("")
+    last_name: str | None = None
+    username: str | None = None
+    photo_url: str | None = None
+    auth_date: int = Field(..., description="Unix timestamp от Telegram")
+    hash: str = Field(..., description="HMAC подпись для проверки на бэкенде")
 
 
 class IdentityAttachEmail(BaseModel):

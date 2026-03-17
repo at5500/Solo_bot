@@ -59,5 +59,7 @@ setup.py
 .github/workflows/
 modules/
 storage/
+static/web_uploads/
+/web-app/
 
 .license_state

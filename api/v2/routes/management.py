@@ -9,12 +9,14 @@ import psutil
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import distinct, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_admin, verify_identity_admin_short
+from api.v2.schemas.audit import AuditEventListResponse, AuditEventResponse
+from audit import drain_audit_redis_to_db, list_audit_events
 from config import API_TOKEN, BOT_SERVICE
 from database import async_session_maker, save_blocked_user_ids
 from core.bootstrap import MANAGEMENT_CONFIG
@@ -173,6 +175,65 @@ async def get_broadcast_clusters(
     result = await session.execute(select(distinct(Server.cluster_name)).where(Server.cluster_name.is_not(None)))
     clusters = sorted([row[0] for row in result.all() if row and row[0]])
     return {"clusters": clusters}
+
+
+@router.get("/audit-events", response_model=AuditEventListResponse)
+async def get_audit_events_history(
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+    identity_id: str | None = Query(None, description="Фильтр по identity_id"),
+    tg_id: int | None = Query(None, description="Фильтр по Telegram user id"),
+    channel: str | None = Query(None, description="api или telegram"),
+    event_type: str | None = Query(None, description="Точный event_type"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """История аудита клиента по identity_id и/или tg_id."""
+    if identity_id is None and tg_id is None:
+        raise HTTPException(status_code=400, detail="Укажите identity_id или tg_id")
+
+    events = await list_audit_events(
+        session,
+        identity_id=identity_id,
+        tg_id=tg_id,
+        channel=channel,
+        event_type=event_type,
+        limit=limit,
+        offset=offset,
+    )
+    return AuditEventListResponse(
+        items=[
+            AuditEventResponse(
+                id=getattr(event, "id", None),
+                event_type=event.event_type,
+                channel=event.channel,
+                actor_identity_id=event.actor_identity_id,
+                actor_tg_id=event.actor_tg_id,
+                path_or_handler=event.path_or_handler,
+                entity_type=event.entity_type,
+                entity_id=event.entity_id,
+                result=event.result,
+                reason=event.reason,
+                metadata=event.metadata_,
+                request_id=event.request_id,
+                created_at=event.created_at,
+            )
+            for event in events
+        ],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post("/audit-drain")
+async def post_audit_drain(identity=Depends(verify_identity_admin_short)):
+    """Выгружает буфер аудита из Redis в БД. Для вызова по крону (например 0 0 * * * в 00:00)."""
+    try:
+        count = await drain_audit_redis_to_db(async_session_maker)
+        return {"success": True, "drained": count}
+    except Exception as exc:
+        logger.warning("audit-drain failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/broadcast")

@@ -18,7 +18,7 @@ from database import (
     get_key_details,
     update_trial,
 )
-from database.models import Key, ManualBan, Payment, Referral, User
+from database.models import Admin, Key, ManualBan, Payment, Referral, User
 from filters.admin import IsAdminFilter
 from handlers.utils import sanitize_key_name
 from utils.csv_export import export_referrals_csv
@@ -88,7 +88,7 @@ async def handle_key_name_input(message: Message, state: FSMContext, session: As
         )
         return
 
-    await process_user_search(message, state, session, key_details["tg_id"])
+    await process_user_search(message, state, session, key_details["tg_id"], actor_tg_id=message.from_user.id)
 
 
 @router.message(UserEditorState.waiting_for_user_data, IsAdminFilter())
@@ -97,7 +97,7 @@ async def handle_user_data_input(message: Message, state: FSMContext, session: A
 
     if message.forward_from:
         tg_id = message.forward_from.id
-        await process_user_search(message, state, session, tg_id)
+        await process_user_search(message, state, session, tg_id, actor_tg_id=message.from_user.id)
         return
 
     if not message.text:
@@ -124,7 +124,7 @@ async def handle_user_data_input(message: Message, state: FSMContext, session: A
             )
             return
 
-    await process_user_search(message, state, session, tg_id)
+    await process_user_search(message, state, session, tg_id, actor_tg_id=message.from_user.id)
 
 
 @router.callback_query(
@@ -336,6 +336,7 @@ async def process_user_search(
     session: AsyncSession,
     tg_id: int,
     edit: bool = False,
+    actor_tg_id: int | None = None,
 ) -> None:
     await state.clear()
 
@@ -435,7 +436,12 @@ async def process_user_search(
 
     text = text_builder.as_html()
 
-    kb = await build_user_edit_kb(tg_id, key_records, is_banned=is_banned)
+    effective_actor_tg_id = actor_tg_id or (message.from_user.id if message.from_user else None)
+    admin_role = None
+    if effective_actor_tg_id is not None:
+        admin_role = await session.scalar(select(Admin.role).where(Admin.tg_id == effective_actor_tg_id))
+
+    kb = await build_user_edit_kb(tg_id, key_records, is_banned=is_banned, admin_role=admin_role)
 
     if edit:
         try:
@@ -462,4 +468,5 @@ async def handle_users_editor(
         session=session,
         tg_id=callback_data.tg_id,
         edit=callback_data.edit,
+        actor_tg_id=callback.from_user.id,
     )

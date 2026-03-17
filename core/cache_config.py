@@ -1,3 +1,42 @@
+"""
+Сводка по Redis: префиксы ключей и окна жизни (TTL).
+
+Ключ/префикс              │ TTL (сек) │ Назначение
+──────────────────────────┼───────────┼────────────────────────────────────────
+throttle_counter          │ 1         │ Счётчик троттлинга (окно сброса)
+throttle_notice           │ 1         │ Показ уведомления «подождите»
+concurrency_notice       │ 5         │ Сообщение «слишком много запросов»
+utm_exists                │ 300      │ UTM-код уже обработан (старт)
+user_middleware           │ 60       │ Снапшот пользователя (debounce*2)
+user_snapshot             │ 30       │ Снапшот пользователя
+user_exists               │ 60       │ Пользователь есть в БД
+balance                   │ 25       │ Баланс в профиле
+profile_data              │ 25       │ Данные профиля
+key_count                 │ 25       │ Количество ключей
+ban_status                │ 60       │ Статус бана
+direct_start_user_exists  │ 20       │ Пользователь есть (direct start blocker)
+admin_access              │ 60       │ Доступ в админку (да/нет)
+remna_server              │ 300      │ URL сервера Remnawave
+remna_profile             │ 20/45    │ Профиль Remnawave (45 при ошибке)
+runtime_configs           │ 86400    │ Рантайм-конфиг (1 сутки)
+sub_response              │ 20       │ Ответ подписки (subscription)
+servers                   │ 60       │ Список серверов
+tariff                    │ 120      │ Тариф по ID
+tariffs_cluster           │ 120      │ Тарифы по кластеру
+keys_list                 │ 25       │ Список ключей
+key_details               │ 45       │ Детали ключа
+key_email                 │ 45       │ email по client_id
+payment_pending           │ 3600     │ Ожидающий платёж (1 ч)
+audit_history             │ 300      │ История действий клиента (админка)
+audit:flush               │ —        │ Буфер аудита (список для выгрузки в БД в 00:00)
+audit:user:tg:*           │ 25 ч     │ События по tg_id для чтения до выгрузки
+audit:user:identity:*     │ 25 ч     │ События по identity для чтения до выгрузки
+webhook_abuse_fail        │ 60       │ Счётчик неудачных вебхуков по IP
+webhook_abuse_block       │ 300      │ Блокировка IP по злоупотреблению
+
+При недоступности Redis: повторная попытка подключения через 5 сек
+(REDIS_BACKOFF_SEC в redis_cache).
+"""
 UPDATE_STALE_AGE_SEC = 60
 
 CONCURRENCY_MAX_WAIT_SEC = 300
@@ -61,6 +100,16 @@ BALANCE_CACHE_TTL_SEC = 25
 PROFILE_DATA_CACHE_TTL_SEC = 25
 
 PAYMENT_PENDING_CACHE_TTL_SEC = 3600
+
+
+AUDIT_HISTORY_CACHE_TTL_SEC = 300
+
+AUDIT_REDIS_BUFFER_ENABLED = True
+AUDIT_REDIS_FLUSH_KEY = "audit:flush"
+AUDIT_REDIS_USER_PREFIX = "audit:user:tg:"
+AUDIT_REDIS_IDENTITY_PREFIX = "audit:user:identity:"
+AUDIT_REDIS_USER_TTL_SEC = 25 * 3600
+AUDIT_REDIS_DRAIN_BATCH = 1000
 
 ERROR_THROTTLE_WINDOW_SEC = 60
 ERROR_THROTTLE_MAX_KEYS = 500

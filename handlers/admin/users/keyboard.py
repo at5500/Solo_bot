@@ -33,7 +33,12 @@ class AdminUserKeyEditorCallback(CallbackData, prefix="admin_users_key"):
     edit: bool = False
 
 
-async def build_user_edit_kb(tg_id: int, key_records: list, is_banned: bool = False) -> InlineKeyboardMarkup:
+async def build_user_edit_kb(
+    tg_id: int,
+    key_records: list,
+    is_banned: bool = False,
+    admin_role: str | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     current_time = datetime.now(tz=timezone.utc)
 
@@ -79,6 +84,13 @@ async def build_user_edit_kb(tg_id: int, key_records: list, is_banned: bool = Fa
 
     builder.row(
         InlineKeyboardButton(
+            text="🕘 История действий",
+            callback_data=AdminUserEditorCallback(action="users_audit", tg_id=tg_id, data="all|all|0").pack(),
+        )
+    )
+
+    builder.row(
+        InlineKeyboardButton(
             text="♻️ Восстановить триал",
             callback_data=AdminUserEditorCallback(action="users_trial_restore", tg_id=tg_id).pack(),
         )
@@ -97,7 +109,7 @@ async def build_user_edit_kb(tg_id: int, key_records: list, is_banned: bool = Fa
         ),
     )
 
-    hook_buttons = await run_hooks("admin_user_edit", tg_id=tg_id, is_banned=is_banned)
+    hook_buttons = await run_hooks("admin_user_edit", tg_id=tg_id, is_banned=is_banned, admin_role=admin_role)
     builder = insert_hook_buttons(builder, hook_buttons)
 
     builder.row(build_editor_btn("🔄 Обновить данные", tg_id, edit=True))
@@ -513,6 +525,88 @@ def build_user_gifts_kb(tg_id: int, gifts: list, page: int = 0) -> InlineKeyboar
         builder.row(*nav_buttons)
 
     builder.row(build_editor_back_btn(tg_id, True))
+    return builder.as_markup()
+
+
+def build_user_audit_kb(
+    tg_id: int,
+    channel_filter: str = "all",
+    category_filter: str = "all",
+    page: int = 0,
+    has_prev: bool = False,
+    has_next: bool = False,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(
+            text="Все",
+            callback_data=AdminUserEditorCallback(action="users_audit", tg_id=tg_id, data=f"all|{category_filter}|0").pack(),
+        ),
+        InlineKeyboardButton(
+            text="API",
+            callback_data=AdminUserEditorCallback(action="users_audit", tg_id=tg_id, data=f"api|{category_filter}|0").pack(),
+        ),
+        InlineKeyboardButton(
+            text="Telegram",
+            callback_data=AdminUserEditorCallback(action="users_audit", tg_id=tg_id, data=f"telegram|{category_filter}|0").pack(),
+        ),
+    )
+
+    category_labels = {
+        "all": "Все",
+        "auth": "Auth",
+        "payments": "Платежи",
+        "subscriptions": "Подписки",
+        "marketing": "Маркетинг",
+    }
+    category_row = [
+        InlineKeyboardButton(
+            text=category_labels[category_key],
+            callback_data=AdminUserEditorCallback(
+                action="users_audit",
+                tg_id=tg_id,
+                data=f"{channel_filter}|{category_key}|0",
+            ).pack(),
+        )
+        for category_key in ("all", "auth", "payments", "subscriptions", "marketing")
+    ]
+    builder.row(*category_row[:3])
+    builder.row(*category_row[3:])
+
+    if has_prev or has_next:
+        nav_buttons = []
+        if has_prev:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="<",
+                    callback_data=AdminUserEditorCallback(
+                        action="users_audit_page",
+                        tg_id=tg_id,
+                        data=f"{channel_filter}|{category_filter}|{page - 1}",
+                    ).pack(),
+                )
+            )
+        nav_buttons.append(InlineKeyboardButton(text=str(page + 1), callback_data="noop"))
+        if has_next:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text=">",
+                    callback_data=AdminUserEditorCallback(
+                        action="users_audit_page",
+                        tg_id=tg_id,
+                        data=f"{channel_filter}|{category_filter}|{page + 1}",
+                    ).pack(),
+                )
+            )
+        builder.row(*nav_buttons)
+
+    builder.row(
+        InlineKeyboardButton(
+            text="Назад",
+            callback_data=AdminUserEditorCallback(action="users_editor", tg_id=tg_id, edit=True).pack(),
+        )
+    )
     return builder.as_markup()
 
 

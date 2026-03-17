@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_token
@@ -28,12 +28,16 @@ async def _resolve_tg_id(body: PaymentLinkCreateRequest, session: AsyncSession) 
 @router.post("/", response_model=PaymentLinkCreateResponse)
 async def create_link(
     body: PaymentLinkCreateRequest,
+    http_request: Request,
     session: AsyncSession = Depends(get_session),
     identity=Depends(verify_identity_token),
 ):
     """Создаёт платёжную ссылку через выбранную кассу (единая точка входа). Принимает identity_id или tg_id."""
-    tg_id = await _resolve_tg_id(body, session)
-    request = PaymentLinkRequest(
+    try:
+        tg_id = await _resolve_tg_id(body, session)
+    except HTTPException:
+        raise
+    payment_request = PaymentLinkRequest(
         tg_id=tg_id,
         amount=body.amount,
         currency=body.currency or "RUB",
@@ -42,7 +46,7 @@ async def create_link(
         failure_url=body.failure_url,
         metadata=body.metadata,
     )
-    result = await create_payment_link(session, request)
+    result = await create_payment_link(session, payment_request)
     return PaymentLinkCreateResponse(
         success=result.success,
         payment_id=result.payment_id,

@@ -151,7 +151,6 @@ async def _build_pay_menu_for_currency(currency: str) -> InlineKeyboardBuilder:
 @router.callback_query(F.data.startswith("pay_currency|"))
 async def handle_pay_currency(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
     currency = callback_query.data.split("|")[1]
-
     if currency == "STARS":
         return await process_callback_pay_stars(callback_query, state, session)
 

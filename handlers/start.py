@@ -26,7 +26,6 @@ from core.cache_config import START_UTM_EXISTS_TTL_SEC
 from core.redis_cache import cache_get, cache_key, cache_set
 from database import (
     add_user,
-    get_coupon_by_code,
     get_user_snapshot,
     upsert_source_if_empty,
 )
@@ -94,7 +93,6 @@ async def start_entry(
     captcha: bool = True,
 ):
     message = event.message if isinstance(event, CallbackQuery) else event
-
     try:
         await run_hooks("start_entry", message=message, event=event, state=state, session=session, admin=admin)
     except Exception as e:

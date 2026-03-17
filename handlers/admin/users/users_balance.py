@@ -280,4 +280,5 @@ async def handle_balance_input(message: Message, state: FSMContext, session: Asy
                 status="success",
             )
 
+    await state.clear()
     await message.answer(text=text, reply_markup=build_users_balance_change_kb(tg_id))
