@@ -8,26 +8,33 @@ from handlers.buttons import BACK
 import pytz
 
 from aiogram import F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD, REMNAWAVE_TOKEN_LOGIN_ENABLED, USE_COUNTRY_SELECTION
 from core.bootstrap import MODES_CONFIG
 from database import (
+    check_server_name_by_cluster,
     delete_key,
     delete_user_data,
+    get_active_tariffs_by_group_code,
+    get_key_by_email,
     get_key_details,
+    get_keys,
+    get_server_names,
     get_servers,
     get_tariff_by_id,
     get_tariffs_for_cluster,
     mark_key_as_frozen,
     mark_key_as_unfrozen,
+    save_admin_key_config,
+    update_key_subscription_links,
     update_key_expiry,
 )
-from database.models import Key, Server, Tariff
+from database.models import Key
 from filters.admin import IsAdminFilter
 from middlewares.session import release_session_early
 from handlers.keys.operations import (
@@ -58,12 +65,21 @@ from .keyboard import (
     build_users_key_expiry_kb,
     build_users_key_show_kb,
 )
+from .utils import resolve_admin_key
 from .users_states import RenewTariffState, UserEditorState
 
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
 router = Router()
+
+
+async def _resolve_callback_key(
+    session: AsyncSession,
+    tg_id: int,
+    key_ref: str | int | None,
+) -> Key | None:
+    return await resolve_admin_key(session, tg_id, key_ref)
 
 
 @router.callback_query(
@@ -76,9 +92,8 @@ async def handle_key_edit(
     session: AsyncSession,
     update: bool = False,
 ):
-    email = callback_data.data
-    result = await session.execute(select(Key).where(Key.email == email))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_ref = callback_data.data
+    key_obj = await _resolve_callback_key(session, callback_data.tg_id, key_ref)
 
     if not key_obj:
         await callback_query.message.edit_text(
@@ -86,6 +101,10 @@ async def handle_key_edit(
             reply_markup=build_editor_kb(callback_data.tg_id),
         )
         return
+
+    email = key_obj.email
+    key_details = await get_key_details(session, email)
+    is_frozen = bool(key_details.get("is_frozen")) if key_details else bool(getattr(key_obj, "is_frozen", False))
 
     key_value = key_obj.key or key_obj.remnawave_link or "—"
     alias_part = f" (<i>{key_obj.alias}</i>)" if key_obj.alias else ""
@@ -96,10 +115,26 @@ async def handle_key_edit(
     else:
         created_at = "—"
 
-    if key_obj.expiry_time:
+    if is_frozen:
+        frozen_left_ms = int((key_details or {}).get("expiry_time") or 0)
+        total_minutes = max(frozen_left_ms // 60000, 0)
+        days, rem_minutes = divmod(total_minutes, 24 * 60)
+        hours, minutes = divmod(rem_minutes, 60)
+        frozen_parts: list[str] = []
+        if days:
+            frozen_parts.append(f"{days} дн.")
+        if hours:
+            frozen_parts.append(f"{hours} ч.")
+        if minutes or not frozen_parts:
+            frozen_parts.append(f"{minutes} мин.")
+        expiry_label = "⏳ <b>Остаток:</b>"
+        expiry_date = " ".join(frozen_parts)
+    elif key_obj.expiry_time:
         expiry_dt = datetime.fromtimestamp(int(key_obj.expiry_time) / 1000, tz=MOSCOW_TZ)
+        expiry_label = "⏰ <b>Истекает:</b>"
         expiry_date = expiry_dt.strftime("%d %B %Y года %H:%M")
     else:
+        expiry_label = "⏰ <b>Истекает:</b>"
         expiry_date = "—"
 
     tariff_name = "—"
@@ -109,24 +144,14 @@ async def handle_key_edit(
     base_traffic = None
     is_configurable = False
     if key_obj.tariff_id:
-        result = await session.execute(
-            select(
-                Tariff.name,
-                Tariff.subgroup_title,
-                Tariff.group_code,
-                Tariff.device_limit,
-                Tariff.traffic_limit,
-                Tariff.configurable,
-            ).where(Tariff.id == key_obj.tariff_id)
-        )
-        row = result.first()
-        if row:
-            tariff_name = row[0]
-            subgroup_title = row[1] or "—"
-            group_code = row[2] or "—"
-            base_devices = row[3]
-            base_traffic = row[4]
-            is_configurable = bool(row[5])
+        tariff = await get_tariff_by_id(session, key_obj.tariff_id)
+        if tariff:
+            tariff_name = tariff.get("name", "—")
+            subgroup_title = tariff.get("subgroup_title") or "—"
+            group_code = tariff.get("group_code") or "—"
+            base_devices = tariff.get("device_limit")
+            base_traffic = tariff.get("traffic_limit")
+            is_configurable = bool(tariff.get("configurable"))
 
     devices_line = ""
     traffic_line = ""
@@ -156,7 +181,8 @@ async def handle_key_edit(
         "<blockquote>"
         f"🔗 <b>Ключ{alias_part}:</b> <code>{key_value}</code>\n"
         f"📆 <b>Создан:</b> {created_at} (МСК)\n"
-        f"⏰ <b>Истекает:</b> {expiry_date} (МСК)\n"
+        f"{'⛔ <b>Статус:</b> отключена\n' if is_frozen else ''}"
+        f"{expiry_label} {expiry_date}{' (МСК)' if not is_frozen and expiry_date != '—' else ''}\n"
         f"🌐 <b>Кластер:</b> {key_obj.server_id or '—'}\n"
         f"🆔 <b>ID клиента:</b> {key_obj.tg_id or '—'}\n"
         f"🏷️ <b>Тарифная группа:</b> {group_code}\n"
@@ -168,7 +194,9 @@ async def handle_key_edit(
     )
 
     if not update or not getattr(callback_data, "edit", False):
-        kb_markup = build_key_edit_kb(key_obj.__dict__, email, is_configurable=is_configurable)
+        kb_key_details = dict(key_obj.__dict__)
+        kb_key_details["is_frozen"] = is_frozen
+        kb_markup = build_key_edit_kb(kb_key_details, email, is_configurable=is_configurable, key_ref=str(key_ref))
         kb_builder = InlineKeyboardBuilder.from_markup(kb_markup)
         hook_buttons = await process_admin_key_edit_menu(
             email=email,
@@ -177,15 +205,28 @@ async def handle_key_edit(
             tg_id=key_obj.tg_id,
         )
         kb_builder = insert_hook_buttons(kb_builder, hook_buttons)
-        await callback_query.message.edit_text(
-            text=text,
-            reply_markup=kb_builder.as_markup(),
-        )
+        try:
+            await callback_query.message.edit_text(
+                text=text,
+                reply_markup=kb_builder.as_markup(),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
     else:
-        await callback_query.message.edit_text(
-            text=text,
-            reply_markup=await build_users_key_expiry_kb(session, callback_data.tg_id, email),
-        )
+        try:
+            await callback_query.message.edit_text(
+                text=text,
+                reply_markup=await build_users_key_expiry_kb(
+                    session,
+                    callback_data.tg_id,
+                    email,
+                    key_ref=str(key_ref),
+                ),
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
 
 
 @router.callback_query(
@@ -198,9 +239,19 @@ async def handle_change_expiry(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
 
-    await callback_query.message.edit_reply_markup(reply_markup=await build_users_key_expiry_kb(session, tg_id, email))
+    await callback_query.message.edit_reply_markup(
+        reply_markup=await build_users_key_expiry_kb(session, tg_id, email, key_ref=key_ref)
+    )
 
 
 @router.callback_query(
@@ -214,7 +265,15 @@ async def handle_expiry_add(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
     days = callback_data.month
 
     key_details = await get_key_details(session, email)
@@ -231,12 +290,12 @@ async def handle_expiry_add(
         await handle_key_edit(callback_query, callback_data, session, True)
         return
 
-    await state.update_data(tg_id=tg_id, email=email, op_type="add")
+    await state.update_data(tg_id=tg_id, email=email, key_ref=key_ref, op_type="add")
     await state.set_state(UserEditorState.waiting_for_expiry_time)
 
     await callback_query.message.edit_text(
         text="✍️ Введите количество дней, которое хотите добавить к времени действия ключа:",
-        reply_markup=build_users_key_show_kb(tg_id, email),
+        reply_markup=build_users_key_show_kb(tg_id, key_ref),
     )
 
 
@@ -248,16 +307,25 @@ async def handle_expiry_take(
     callback_query: CallbackQuery,
     callback_data: AdminUserKeyEditorCallback,
     state: FSMContext,
+    session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
 
-    await state.update_data(tg_id=tg_id, email=email, op_type="take")
+    await state.update_data(tg_id=tg_id, email=email, key_ref=key_ref, op_type="take")
     await state.set_state(UserEditorState.waiting_for_expiry_time)
 
     await callback_query.message.edit_text(
         text="✍️ Введите количество дней, которое хотите вычесть из времени действия ключа:",
-        reply_markup=build_users_key_show_kb(tg_id, email),
+        reply_markup=build_users_key_show_kb(tg_id, key_ref),
     )
 
 
@@ -272,7 +340,15 @@ async def handle_expiry_set(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
 
     key_details = await get_key_details(session, email)
 
@@ -283,7 +359,7 @@ async def handle_expiry_set(
         )
         return
 
-    await state.update_data(tg_id=tg_id, email=email, op_type="set")
+    await state.update_data(tg_id=tg_id, email=email, key_ref=key_ref, op_type="set")
     await state.set_state(UserEditorState.waiting_for_expiry_time)
 
     text = (
@@ -294,7 +370,7 @@ async def handle_expiry_set(
 
     await callback_query.message.edit_text(
         text=text,
-        reply_markup=build_users_key_show_kb(tg_id, email),
+        reply_markup=build_users_key_show_kb(tg_id, key_ref),
     )
 
 
@@ -303,12 +379,13 @@ async def handle_expiry_time_input(message: Message, state: FSMContext, session:
     data = await state.get_data()
     tg_id = data.get("tg_id")
     email = data.get("email")
+    key_ref = data.get("key_ref")
     op_type = data.get("op_type")
 
     if op_type != "set" and (not message.text.isdigit() or int(message.text) < 0):
         await message.answer(
             text="🚫 Пожалуйста, введите корректное количество дней!",
-            reply_markup=build_users_key_show_kb(tg_id, email),
+            reply_markup=build_users_key_show_kb(tg_id, key_ref) if key_ref else build_editor_kb(tg_id),
         )
         return
 
@@ -347,7 +424,10 @@ async def handle_expiry_time_input(message: Message, state: FSMContext, session:
     except Exception as e:
         text = f"❗ Произошла ошибка во время изменения времени действия ключа: {e}"
 
-    await message.answer(text=text, reply_markup=build_users_key_show_kb(tg_id, email))
+    await message.answer(
+        text=text,
+        reply_markup=build_users_key_show_kb(tg_id, key_ref) if key_ref else build_editor_kb(tg_id),
+    )
 
 
 @router.callback_query(
@@ -357,9 +437,14 @@ async def handle_expiry_time_input(message: Message, state: FSMContext, session:
 async def handle_reissue_menu(
     callback_query: CallbackQuery,
     callback_data: AdminUserEditorCallback,
+    session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
 
     text = (
         "<b>🔄 Перевыпуск подписки</b>\n\n"
@@ -373,7 +458,7 @@ async def handle_reissue_menu(
 
     await callback_query.message.edit_text(
         text=text,
-        reply_markup=build_reissue_menu_kb(email, tg_id),
+        reply_markup=build_reissue_menu_kb(key_ref, tg_id),
     )
 
 
@@ -387,14 +472,19 @@ async def handle_update_key(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
+    email = key_obj.email
 
     await callback_query.message.edit_text(
         text=f"📡 Выберите кластер, на котором пересоздать ключ <b>{email}</b>:",
         reply_markup=await build_cluster_selection_kb(
             session,
             tg_id,
-            email,
+            key_ref,
             action="confirm_admin_key_reissue",
         ),
     )
@@ -402,8 +492,13 @@ async def handle_update_key(
 
 @router.callback_query(F.data.startswith("confirm_admin_key_reissue|"), IsAdminFilter())
 async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: AsyncSession, state: FSMContext):
-    _, tg_id, email, cluster_id = callback_query.data.split("|")
+    _, tg_id, key_ref, cluster_id = callback_query.data.split("|")
     tg_id = int(tg_id)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
+    email = key_obj.email
 
     try:
         servers = await get_servers(session)
@@ -424,7 +519,7 @@ async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: Asyn
                     callback_data=AdminUserEditorCallback(
                         action="users_key_edit",
                         tg_id=tg_id,
-                        data=email,
+                        data=key_ref,
                     ).pack(),
                 )
             )
@@ -442,17 +537,21 @@ async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: Asyn
 
         if use_country_selection:
             unique_countries = {srv["server_name"] for srv in cluster_servers}
-            await state.update_data(tg_id=tg_id, email=email, cluster_id=cluster_id)
+            await state.update_data(tg_id=tg_id, email=email, key_ref=key_ref, cluster_id=cluster_id)
             builder = InlineKeyboardBuilder()
             for country in sorted(unique_countries):
                 builder.button(
                     text=country,
-                    callback_data=f"admin_reissue_country|{tg_id}|{email}|{country}",
+                    callback_data=f"admin_reissue_country|{tg_id}|{key_ref}|{country}",
                 )
             builder.row(
                 InlineKeyboardButton(
                     text=BACK,
-                    callback_data=f"users_key_edit|{email}",
+                    callback_data=AdminUserEditorCallback(
+                        action="users_key_edit",
+                        tg_id=tg_id,
+                        data=key_ref,
+                    ).pack(),
                 )
             )
             await callback_query.message.edit_text(
@@ -461,8 +560,8 @@ async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: Asyn
             )
             return
 
-        result = await session.execute(select(Key.remnawave_link).where(Key.email == email))
-        remnawave_link = result.scalar_one_or_none()
+        key_link = await get_key_by_email(session, email)
+        remnawave_link = key_link.remnawave_link if key_link else None
 
         await update_subscription(
             tg_id,
@@ -474,7 +573,7 @@ async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: Asyn
 
         await handle_key_edit(
             callback_query,
-            AdminUserEditorCallback(tg_id=tg_id, data=email, action="view_key"),
+            AdminUserEditorCallback(tg_id=tg_id, data=key_ref, action="view_key"),
             session,
             True,
         )
@@ -485,8 +584,13 @@ async def confirm_admin_key_reissue(callback_query: CallbackQuery, session: Asyn
 
 @router.callback_query(F.data.startswith("admin_reissue_country|"), IsAdminFilter())
 async def admin_reissue_country(callback_query: CallbackQuery, session: AsyncSession, state: FSMContext):
-    _, tg_id, email, country = callback_query.data.split("|")
+    _, tg_id, key_ref, country = callback_query.data.split("|")
     tg_id = int(tg_id)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
+    email = key_obj.email
 
     try:
         data = await state.get_data()
@@ -508,7 +612,7 @@ async def admin_reissue_country(callback_query: CallbackQuery, session: AsyncSes
                         callback_data=AdminUserEditorCallback(
                             action="users_key_edit",
                             tg_id=tg_id,
-                            data=email,
+                            data=key_ref,
                         ).pack(),
                     )
                 )
@@ -522,8 +626,8 @@ async def admin_reissue_country(callback_query: CallbackQuery, session: AsyncSes
                 )
                 return
 
-        result = await session.execute(select(Key.remnawave_link, Key.tariff_id).where(Key.email == email))
-        remnawave_link, _tariff_id = result.one_or_none() or (None, None)
+        key_link = await get_key_by_email(session, email)
+        remnawave_link = key_link.remnawave_link if key_link else None
 
         await update_subscription(
             tg_id=tg_id,
@@ -535,7 +639,7 @@ async def admin_reissue_country(callback_query: CallbackQuery, session: AsyncSes
 
         await handle_key_edit(
             callback_query,
-            AdminUserEditorCallback(tg_id=tg_id, data=email, action="view_key"),
+            AdminUserEditorCallback(tg_id=tg_id, data=key_ref, action="view_key"),
             session,
             True,
         )
@@ -554,10 +658,8 @@ async def handle_recreate_key_start(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
-
-    result = await session.execute(select(Key).where(Key.email == email))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_ref = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
 
     if not key_obj:
         await callback_query.message.edit_text(
@@ -565,6 +667,8 @@ async def handle_recreate_key_start(
             reply_markup=build_editor_kb(tg_id),
         )
         return
+
+    email = key_obj.email
 
     tariff_name = "—"
     if key_obj.tariff_id:
@@ -584,13 +688,13 @@ async def handle_recreate_key_start(
     builder.row(
         InlineKeyboardButton(
             text="✅ Пересоздать",
-            callback_data=f"confirm_recreate|{tg_id}|{email}",
+            callback_data=f"confirm_recreate|{tg_id}|{key_ref}",
         )
     )
     builder.row(
         InlineKeyboardButton(
             text=BACK,
-            callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=email).pack(),
+            callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=key_ref).pack(),
         )
     )
 
@@ -602,12 +706,11 @@ async def handle_recreate_key_confirm(
     callback_query: CallbackQuery,
     session: AsyncSession,
 ):
-    _, tg_id, old_email = callback_query.data.split("|")
+    _, tg_id, key_ref = callback_query.data.split("|")
     tg_id = int(tg_id)
 
     try:
-        result = await session.execute(select(Key).where(Key.email == old_email))
-        key_obj: Key | None = result.scalar_one_or_none()
+        key_obj = await _resolve_callback_key(session, tg_id, key_ref)
 
         if not key_obj:
             await callback_query.message.edit_text(
@@ -615,6 +718,8 @@ async def handle_recreate_key_confirm(
                 reply_markup=build_editor_kb(tg_id),
             )
             return
+
+        old_email = key_obj.email
 
         await callback_query.message.edit_text("⏳ Пересоздание ссылки подписки...")
 
@@ -683,15 +788,7 @@ async def handle_recreate_key_confirm(
             )
             return
 
-        await session.execute(
-            update(Key)
-            .where(Key.email == old_email)
-            .values(
-                key=new_link,
-                remnawave_link=new_link,
-            )
-        )
-        await session.commit()
+        await update_key_subscription_links(session, old_email, new_link)
 
         try:
             user_text = (
@@ -740,7 +837,7 @@ async def handle_recreate_key_confirm(
                 callback_data=AdminUserEditorCallback(
                     action="users_key_edit",
                     tg_id=tg_id,
-                    data=old_email,
+                    data=key_ref,
                 ).pack(),
             )
         )
@@ -768,10 +865,16 @@ async def handle_delete_key(
     state: FSMContext,
     session: AsyncSession,
 ):
-    email = callback_data.data
+    key_obj = await _resolve_callback_key(session, callback_data.tg_id, callback_data.data)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Ключ не найден!",
+            reply_markup=build_editor_kb(callback_data.tg_id),
+        )
+        return
 
-    result = await session.execute(select(Key.client_id).where(Key.email == email))
-    client_id = result.scalar_one_or_none()
+    email = key_obj.email
+    client_id = key_obj.client_id
 
     if client_id is None:
         await callback_query.message.edit_text(
@@ -809,8 +912,7 @@ async def handle_delete_key_confirm(
         await callback_query.answer("Данные устарели", show_alert=True)
         return
 
-    result = await session.execute(select(Key.client_id).where(Key.email == email))
-    client_id = result.scalar_one_or_none()
+    client_id = key_obj.client_id
 
     kb = build_editor_kb(callback_data.tg_id)
 
@@ -862,8 +964,7 @@ async def handle_delete_user_confirm(
 ):
     tg_id = callback_data.tg_id
 
-    result = await session.execute(select(Key.email, Key.client_id).where(Key.tg_id == tg_id))
-    key_records = result.all()
+    key_records = [(row.email, row.client_id) for row in await get_keys(session, tg_id)]
     await release_session_early(session)
 
     async def delete_keys_from_servers():
@@ -903,7 +1004,11 @@ async def handle_user_traffic(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
+    key_obj = await _resolve_callback_key(session, tg_id, callback_data.data)
+    if not key_obj:
+        await callback_query.message.edit_text("❌ Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
+    email = key_obj.email
 
     await callback_query.message.edit_text("⏳ Получаем данные о трафике, пожалуйста, подождите...")
 
@@ -952,9 +1057,7 @@ async def handle_create_key_start(
     if use_country_selection:
         await state.set_state(UserEditorState.selecting_country)
 
-        stmt = select(Server.server_name).distinct().order_by(Server.server_name)
-        result = await session.execute(stmt)
-        countries = [row[0] for row in result.all()]
+        countries = await get_server_names(session)
 
         if not countries:
             await callback_query.message.edit_text(
@@ -1007,14 +1110,13 @@ async def handle_create_key_country(callback_query: CallbackQuery, state: FSMCon
 
     builder = InlineKeyboardBuilder()
 
-    result = await session.execute(select(Server.cluster_name).where(Server.server_name == country))
-    row = result.mappings().first()
+    cluster_info = await check_server_name_by_cluster(session, country)
 
-    if not row:
+    if not cluster_info:
         await callback_query.message.edit_text("❌ Сервер не найден.")
         return
 
-    cluster_name = row["cluster_name"]
+    cluster_name = cluster_info["cluster_name"]
     await state.update_data(cluster_name=cluster_name)
 
     tariffs = await get_tariffs_for_cluster(session, cluster_name)
@@ -1146,20 +1248,16 @@ async def handle_reset_traffic(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = callback_data.data
-
-    stmt = select(Key.server_id, Key.client_id).where((Key.tg_id == tg_id) & (Key.email == email))
-    result = await session.execute(stmt)
-    record = result.first()
-
-    if not record:
+    key_obj = await _resolve_callback_key(session, tg_id, callback_data.data)
+    if not key_obj:
         await callback_query.message.edit_text(
             "❌ Ключ не найден в базе данных.",
             reply_markup=build_editor_kb(tg_id),
         )
         return
 
-    cluster_id, _client_id = record
+    email = key_obj.email
+    cluster_id = key_obj.server_id
 
     try:
         await reset_traffic_in_cluster(cluster_id, email, session)
@@ -1185,7 +1283,14 @@ async def handle_admin_freeze_subscription(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, callback_data.data)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
 
     try:
         record = await get_key_details(session, email)
@@ -1202,7 +1307,7 @@ async def handle_admin_freeze_subscription(
         result = await toggle_client_on_cluster(cluster_id, email, client_id, enable=False, session=session)
         if result["status"] != "success":
             text_error = (
-                f"Произошла ошибка при заморозке подписки.\nДетали: {result.get('error') or result.get('results')}"
+                f"Произошла ошибка при отключении подписки.\nДетали: {result.get('error') or result.get('results')}"
             )
             await callback_query.message.edit_text(
                 text_error,
@@ -1217,8 +1322,9 @@ async def handle_admin_freeze_subscription(
 
         await mark_key_as_frozen(session, record["tg_id"], client_id, time_left)
         await session.commit()
+        session.expire_all()
 
-        await callback_query.answer("✅ Подписка заморожена")
+        await callback_query.answer("✅ Подписка отключена")
 
         await handle_key_edit(
             callback_query=callback_query,
@@ -1227,7 +1333,7 @@ async def handle_admin_freeze_subscription(
             update=False,
         )
     except Exception as e:
-        await handle_error(tg_id, callback_query, f"Ошибка при заморозке подписки: {e}")
+        await handle_error(tg_id, callback_query, f"Ошибка при отключении подписки: {e}")
 
 
 @router.callback_query(
@@ -1240,7 +1346,14 @@ async def handle_admin_unfreeze_subscription(
     session: AsyncSession,
 ):
     tg_id = callback_data.tg_id
-    email = str(callback_data.data)
+    key_obj = await _resolve_callback_key(session, tg_id, callback_data.data)
+    if not key_obj:
+        await callback_query.message.edit_text(
+            text="🚫 Информация о ключе не найдена.",
+            reply_markup=build_editor_kb(tg_id),
+        )
+        return
+    email = key_obj.email
 
     try:
         record = await get_key_details(session, email)
@@ -1286,6 +1399,7 @@ async def handle_admin_unfreeze_subscription(
 
         await mark_key_as_unfrozen(session, record["tg_id"], client_id, new_expiry_time)
         await session.commit()
+        session.expire_all()
         await release_session_early(session)
 
         await renew_key_in_cluster(
@@ -1300,7 +1414,7 @@ async def handle_admin_unfreeze_subscription(
             plan=record.get("tariff_id"),
         )
 
-        await callback_query.answer("✅ Подписка разморожена")
+        await callback_query.answer("✅ Подписка включена")
 
         await handle_key_edit(
             callback_query=callback_query,
@@ -1313,20 +1427,15 @@ async def handle_admin_unfreeze_subscription(
 
 
 async def change_expiry_time(expiry_time: int, email: str, session: AsyncSession) -> Exception | None:
-    result = await session.execute(
-        select(
-            Key.client_id,
-            Key.tariff_id,
-            Key.server_id,
-            Key.current_device_limit,
-            Key.current_traffic_limit,
-        ).where(Key.email == email)
-    )
-    row = result.first()
-    if not row:
+    key_obj = await get_key_by_email(session, email)
+    if not key_obj:
         return ValueError(f"User with email {email} was not found")
 
-    client_id, tariff_id, server_id, key_device_limit, key_traffic_limit = row
+    client_id = key_obj.client_id
+    tariff_id = key_obj.tariff_id
+    server_id = key_obj.server_id
+    key_device_limit = key_obj.current_device_limit
+    key_traffic_limit = key_obj.current_traffic_limit
     if server_id is None:
         return ValueError(f"Key with client_id {client_id} was not found")
 
@@ -1334,17 +1443,12 @@ async def change_expiry_time(expiry_time: int, email: str, session: AsyncSession
     device_limit = None
     key_subgroup = None
     if tariff_id:
-        result = await session.execute(
-            select(Tariff.traffic_limit, Tariff.device_limit, Tariff.subgroup_title).where(
-                Tariff.id == tariff_id,
-                Tariff.is_active.is_(True),
-            )
-        )
-        tariff = result.first()
+        tariff = await get_tariff_by_id(session, tariff_id)
         if tariff:
-            traffic_limit = int(tariff[0]) if tariff[0] is not None else 0
-            device_limit = int(tariff[1]) if tariff[1] is not None else 0
-            key_subgroup = tariff[2]
+            traffic_limit = int(tariff.get("traffic_limit") or 0)
+            raw_device_limit = tariff.get("device_limit")
+            device_limit = int(raw_device_limit) if raw_device_limit is not None else 0
+            key_subgroup = tariff.get("subgroup_title")
 
     if key_device_limit is not None:
         device_limit = key_device_limit
@@ -1395,15 +1499,16 @@ async def handle_edit_config_start(
     state: FSMContext,
     session: AsyncSession,
 ):
-    email = callback_data.data
+    key_ref = str(callback_data.data)
     tg_id = callback_data.tg_id
 
-    result = await session.execute(select(Key).where(Key.email == email))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_obj = await _resolve_callback_key(session, tg_id, key_ref)
 
     if not key_obj:
         await callback_query.message.edit_text("❌ Ключ не найден.", reply_markup=build_editor_kb(tg_id))
         return
+
+    email = key_obj.email
 
     if not key_obj.tariff_id:
         await callback_query.message.edit_text(
@@ -1431,6 +1536,7 @@ async def handle_edit_config_start(
     await state.set_state(UserEditorState.config_menu)
     await state.update_data(
         email=email,
+        key_ref=key_ref,
         tg_id=tg_id,
         tariff_id=key_obj.tariff_id,
         cfg_base_devices=base_devices,
@@ -1445,6 +1551,7 @@ async def handle_edit_config_start(
 async def render_config_menu(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
     data = await state.get_data()
     email = data.get("email")
+    key_ref = data.get("key_ref")
     tg_id = data.get("tg_id")
     tariff_id = data.get("tariff_id")
 
@@ -1461,8 +1568,7 @@ async def render_config_menu(callback_query: CallbackQuery, state: FSMContext, s
 
     traffic_to_show = base_traffic
     if traffic_to_show is None and email:
-        result = await session.execute(select(Key).where(Key.email == email))
-        key_obj = result.scalar_one_or_none()
+        key_obj = await get_key_by_email(session, email)
         if key_obj:
             traffic_to_show = key_obj.selected_traffic_limit or key_obj.current_traffic_limit
     if traffic_to_show is None and tariff:
@@ -1501,7 +1607,7 @@ async def render_config_menu(callback_query: CallbackQuery, state: FSMContext, s
     builder.row(
         InlineKeyboardButton(
             text=BACK,
-            callback_data=AdminUserEditorCallback(action="users_key_edit", data=email, tg_id=tg_id).pack(),
+            callback_data=AdminUserEditorCallback(action="users_key_edit", data=key_ref, tg_id=tg_id).pack(),
         )
     )
 
@@ -1668,6 +1774,7 @@ async def handle_cfg_input_addon(message: Message, state: FSMContext, session: A
     data = await state.get_data()
     param = data.get("cfg_param")
     email = data.get("email")
+    key_ref = data.get("key_ref")
     tg_id = data.get("tg_id")
     tariff_id = data.get("tariff_id")
 
@@ -1721,7 +1828,7 @@ async def handle_cfg_input_addon(message: Message, state: FSMContext, session: A
     builder.row(
         InlineKeyboardButton(
             text=BACK,
-            callback_data=AdminUserEditorCallback(action="users_key_edit", data=email, tg_id=tg_id).pack(),
+            callback_data=AdminUserEditorCallback(action="users_key_edit", data=key_ref, tg_id=tg_id).pack(),
         )
     )
 
@@ -1760,8 +1867,7 @@ async def handle_cfg_save(callback_query: CallbackQuery, state: FSMContext, sess
 
         selected_price = base_price + devices_extra_price + traffic_extra_price
 
-    result = await session.execute(select(Key).where(Key.email == email))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_obj = await get_key_by_email(session, email)
 
     if not key_obj:
         await callback_query.message.edit_text("❌ Ключ не найден.", reply_markup=build_editor_kb(tg_id))
@@ -1782,18 +1888,15 @@ async def handle_cfg_save(callback_query: CallbackQuery, state: FSMContext, sess
             plan=tariff_id,
         )
 
-        await session.execute(
-            update(Key)
-            .where(Key.email == email)
-            .values(
-                selected_device_limit=base_devices,
-                current_device_limit=total_devices,
-                selected_traffic_limit=base_traffic,
-                current_traffic_limit=total_traffic,
-                selected_price_rub=selected_price,
-            )
+        await save_admin_key_config(
+            session,
+            email=email,
+            base_devices=base_devices,
+            total_devices=total_devices,
+            base_traffic=base_traffic,
+            total_traffic=total_traffic,
+            selected_price=selected_price,
         )
-        await session.commit()
 
         await state.clear()
         await callback_query.answer("✅ Конфигурация сохранена", show_alert=True)

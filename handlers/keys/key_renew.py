@@ -56,7 +56,7 @@ from hooks.processors import (
 )
 from logger import logger
 
-from .utils import add_tariff_button_generic, key_owned_by_user
+from .utils import add_tariff_button_generic, build_key_callback, key_owned_by_user, resolve_key
 
 
 router = Router()
@@ -79,7 +79,9 @@ def normalize_expiry_ms(raw_value: int | float | None) -> int:
 async def process_callback_renew_key(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
     """Обрабатывает нажатие кнопки продления конкретного ключа."""
     tg_id = callback_query.message.chat.id
-    key_name = callback_query.data.split("|")[1]
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    key_name = key_obj.email if key_obj else key_ref
 
     try:
         record = await get_key_details(session, key_name)
@@ -103,7 +105,7 @@ async def process_callback_renew_key(callback_query: CallbackQuery, state: FSMCo
         if now_utc < available_from_utc:
             dt_msk = available_from_utc.astimezone(moscow_tz).strftime("%d.%m.%Y %H:%M")
             kb = InlineKeyboardBuilder()
-            kb.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_name}"))
+            kb.row(InlineKeyboardButton(text=BACK, callback_data=build_key_callback("view_key", client_id, key_name)))
 
             hook_commands = await process_process_callback_renew_key(
                 callback_query=callback_query, state=state, session=session
@@ -118,7 +120,7 @@ async def process_callback_renew_key(callback_query: CallbackQuery, state: FSMCo
             )
             return
 
-        await state.update_data(renew_key_name=key_name, renew_client_id=client_id)
+        await state.update_data(renew_key_name=key_name, renew_client_id=client_id, renew_key_ref=key_ref)
 
         logger.info(f"[RENEW] Получение тарифов для server_id={server_id}")
 
@@ -218,7 +220,7 @@ async def process_callback_renew_key(callback_query: CallbackQuery, state: FSMCo
                 )
             )
 
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_name}"))
+        builder.row(InlineKeyboardButton(text=BACK, callback_data=build_key_callback("view_key", client_id, key_name)))
 
         hook_builder = InlineKeyboardBuilder()
         hook_builder.attach(builder)
@@ -372,7 +374,12 @@ async def show_tariffs_in_renew_subgroup(callback: CallbackQuery, state: FSMCont
                 callback_prefix="renew_plan",
             )
 
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"renew_key|{key_name}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=BACK,
+                callback_data=build_key_callback("renew_key", data.get("renew_client_id"), key_name),
+            )
+        )
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
         hook_builder = InlineKeyboardBuilder()
@@ -884,7 +891,7 @@ async def complete_key_renewal(
                 await reset_key_current_limits_to_selected(session, effective_client_id)
 
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=f"view_key|{email}"))
+        builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=build_key_callback("view_key", client_id, email)))
         hook_commands = await process_renewal_complete(
             chat_id=tg_id, admin=False, session=session, email=email, client_id=client_id
         )

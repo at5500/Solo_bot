@@ -33,6 +33,7 @@ from handlers.buttons import (
     TV_BUTTON,
 )
 from handlers.keys.operations import create_key_on_cluster
+from handlers.keys.utils import build_key_callback
 from database import get_vless_enabled
 from handlers.tariffs.tariff_display import (
     build_key_created_message,
@@ -214,7 +215,7 @@ async def key_cluster_mode(
 
     builder = InlineKeyboardBuilder()
     if vless_enabled:
-        builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=f"connect_router|{key_name}"))
+        builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=build_key_callback("connect_router", client_id, key_name)))
     else:
         if await is_full_remnawave_cluster(least_loaded_cluster, session):
             use_webapp = bool(MODES_CONFIG.get("REMNAWAVE_WEBAPP_ENABLED", REMNAWAVE_WEBAPP))
@@ -239,13 +240,13 @@ async def key_cluster_mode(
                 else:
                     builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, web_app=WebAppInfo(url=final_link)))
                 if tv_button_enabled:
-                    builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=f"connect_tv|{email}"))
+                    builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=build_key_callback("connect_tv", client_id, email)))
             else:
-                builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{key_name}"))
+                builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=build_key_callback("connect_device", client_id, key_name)))
         else:
-            builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{key_name}"))
+            builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=build_key_callback("connect_device", client_id, key_name)))
 
-    builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=f"view_key|{key_name}"))
+    builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=build_key_callback("view_key", client_id, key_name)))
     builder.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 

@@ -37,6 +37,7 @@ from hooks.processors import process_addon_purchase_complete, process_addons_men
 from logger import logger
 
 from ..buy.key_tariffs import calculate_config_price
+from ...keys.utils import build_key_callback, resolve_key
 from .utils import (
     KeyAddonConfigState,
     build_addons_pack_screen_text,
@@ -373,7 +374,12 @@ async def render_addons_screen(callback: CallbackQuery, state: FSMContext, sessi
             callback_data="key_addons_confirm",
         )
     )
-    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{email}"))
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=build_key_callback("view_key", data.get("addon_key_client_id"), email),
+        )
+    )
 
     module_buttons = await process_addons_menu(email=email, session=session)
     builder = insert_hook_buttons(builder, module_buttons)
@@ -388,7 +394,9 @@ async def render_addons_screen(callback: CallbackQuery, state: FSMContext, sessi
 
 @router.callback_query(F.data.startswith("key_addons|"))
 async def start_key_addons(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
-    email = callback.data.split("|")[1]
+    key_ref = callback.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback.from_user.id, key_ref)
+    email = key_obj.email if key_obj else key_ref
     logger.debug(f"[ADDONS] PACK_MODE start_key_addons: tg_id={callback.from_user.id} email={email}")
 
     record = await get_key_details(session, email)
@@ -546,6 +554,7 @@ async def start_key_addons(callback: CallbackQuery, state: FSMContext, session: 
 
     await state.update_data(
         addon_key_email=email,
+        addon_key_client_id=record.get("client_id"),
         addon_tariff_id=int(tariff_id),
         addon_tariff_config=cfg_for_state,
         addon_current_device_limit=current_devices,

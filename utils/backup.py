@@ -42,9 +42,6 @@ async def backup_database() -> Exception | None:
     """
     from core.executor import run_io
 
-    # Создаём бэкап в пуле потоков (run_io), а не процессов (run_cpu), чтобы файл
-    # создавался в том же процессе, что и отправка — иначе путь может быть недоступен
-    # (воркер уведомлений и воркер пула процессов могут иметь разный cwd/окружение).
     if BACKUP_CREATE_ARCHIVE:
         if not any([BACKUP_INCLUDE_DB, BACKUP_INCLUDE_CONFIG, BACKUP_INCLUDE_TEXTS, BACKUP_INCLUDE_IMG]):
             backup_file_path, exception = await run_io(_create_database_backup)

@@ -12,7 +12,7 @@ from core.cache_config import (
     KEYS_LIST_CACHE_TTL_SEC,
 )
 from core.redis_cache import cache_delete, cache_get, cache_key, cache_set
-from database.models import Key, User
+from database.models import Key, Tariff, User
 from database.users import invalidate_profile_cache, invalidate_user_snapshot
 from logger import logger
 
@@ -164,6 +164,51 @@ async def get_key_by_server(session: AsyncSession, tg_id: int, client_id: str):
     stmt = select(Key).where(Key.tg_id == tg_id, Key.client_id == client_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def get_key_by_email(session: AsyncSession, email: str, tg_id: int | None = None) -> Key | None:
+    stmt = select(Key).where(Key.email == email)
+    if tg_id is not None:
+        stmt = stmt.where(Key.tg_id == tg_id)
+    result = await session.execute(stmt.limit(1))
+    return result.scalar_one_or_none()
+
+
+async def get_key_by_client_id(session: AsyncSession, client_id: str, tg_id: int | None = None) -> Key | None:
+    stmt = select(Key).where(Key.client_id == client_id)
+    if tg_id is not None:
+        stmt = stmt.where(Key.tg_id == tg_id)
+    result = await session.execute(stmt.limit(1))
+    return result.scalar_one_or_none()
+
+
+async def get_key_expiry_presets(session: AsyncSession, email: str) -> tuple[str | None, list[int]]:
+    key_obj = await get_key_by_email(session, email)
+    if not key_obj:
+        return None, []
+
+    if not key_obj.tariff_id:
+        return key_obj.client_id, []
+
+    tariff = await session.execute(select(Tariff.group_code).where(Tariff.id == key_obj.tariff_id))
+    group_code = tariff.scalar_one_or_none()
+    if not group_code:
+        return key_obj.client_id, []
+
+    result = await session.execute(
+        select(Tariff.duration_days)
+        .where(Tariff.group_code == group_code, Tariff.is_active.is_(True))
+        .order_by(Tariff.duration_days)
+    )
+    unique_durations: list[int] = []
+    seen: set[int] = set()
+    for (days,) in result.all():
+        if days is None or days < 1 or days in seen:
+            continue
+        seen.add(int(days))
+        unique_durations.append(int(days))
+
+    return key_obj.client_id, unique_durations
 
 
 async def get_key_details(session: AsyncSession, email: str) -> dict | None:
@@ -347,6 +392,24 @@ async def update_key_link(session: AsyncSession, email: str, link: str) -> bool:
     return ok
 
 
+async def update_key_subscription_links(session: AsyncSession, email: str, link: str) -> bool:
+    stmt = (
+        update(Key)
+        .where(Key.email == email)
+        .values(
+            key=link,
+            remnawave_link=link,
+        )
+        .returning(Key.client_id)
+    )
+    res = await session.execute(stmt)
+    await session.commit()
+    ok = res.scalar_one_or_none() is not None
+    if ok:
+        await invalidate_key_details(email)
+    return ok
+
+
 async def save_key_config_with_mode(
     session: AsyncSession,
     email: str,
@@ -378,6 +441,76 @@ async def save_key_config_with_mode(
         return
 
     await session.execute(update(Key).where(Key.email == email).values(**values))
+    await invalidate_key_details(email)
+
+
+async def reset_key_tariff_state(session: AsyncSession, tg_id: int, email: str, tariff_id: int) -> None:
+    await session.execute(
+        update(Key)
+        .where(Key.tg_id == tg_id, Key.email == email)
+        .values(
+            tariff_id=tariff_id,
+            selected_device_limit=None,
+            current_device_limit=None,
+            selected_traffic_limit=None,
+            current_traffic_limit=None,
+            selected_price_rub=None,
+        )
+    )
+    await session.commit()
+    await invalidate_keys_list(tg_id)
+    await invalidate_key_details(email)
+
+
+async def save_key_tariff_selection(
+    session: AsyncSession,
+    tg_id: int,
+    email: str,
+    tariff_id: int,
+    selected_devices: int | None,
+    selected_traffic_gb: int | None,
+) -> None:
+    selected_devices_val = int(selected_devices) if selected_devices is not None else None
+    selected_traffic_val = int(selected_traffic_gb) if selected_traffic_gb is not None and int(selected_traffic_gb) > 0 else None
+
+    await session.execute(
+        update(Key)
+        .where(Key.tg_id == tg_id, Key.email == email)
+        .values(
+            tariff_id=tariff_id,
+            selected_device_limit=selected_devices_val,
+            current_device_limit=selected_devices_val,
+            selected_traffic_limit=selected_traffic_val,
+            current_traffic_limit=selected_traffic_val,
+            selected_price_rub=None,
+        )
+    )
+    await session.commit()
+    await invalidate_keys_list(tg_id)
+    await invalidate_key_details(email)
+
+
+async def save_admin_key_config(
+    session: AsyncSession,
+    email: str,
+    base_devices: int,
+    total_devices: int,
+    base_traffic: int | None,
+    total_traffic: int | None,
+    selected_price: int | None,
+) -> None:
+    await session.execute(
+        update(Key)
+        .where(Key.email == email)
+        .values(
+            selected_device_limit=base_devices,
+            current_device_limit=total_devices,
+            selected_traffic_limit=base_traffic,
+            current_traffic_limit=total_traffic,
+            selected_price_rub=selected_price,
+        )
+    )
+    await session.commit()
     await invalidate_key_details(email)
 
 

@@ -5,19 +5,26 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from handlers.buttons import BACK
 
 from core.settings.tariffs_config import normalize_tariff_config
-from database import get_tariff_by_id
-from database.models import Key, Tariff
+from database import (
+    get_active_tariffs_by_group_code,
+    get_key_by_email,
+    get_tariff_by_id,
+    get_tariff_group_codes,
+    reset_key_tariff_state,
+    save_key_tariff_selection,
+)
+from database.models import Tariff
 from filters.admin import IsAdminFilter
 from middlewares.session import release_session_early
 from handlers.keys.operations import renew_key_in_cluster
 from logger import logger
 
-from .keyboard import AdminUserEditorCallback
+from .keyboard import AdminUserEditorCallback, build_editor_kb
+from .utils import resolve_admin_key
 from .users_states import RenewTariffState
 from .users_keys import handle_key_edit
 
@@ -60,14 +67,17 @@ async def handle_user_choose_tariff_group(
     session: AsyncSession,
     state: FSMContext,
 ):
-    email = callback_data.data
     tg_id = callback_data.tg_id
+    key_obj = await resolve_admin_key(session, tg_id, callback_data.data)
+    if not key_obj:
+        await callback_query.message.edit_text("❌ Ключ не найден.", reply_markup=build_editor_kb(tg_id))
+        return
+    email = key_obj.email
 
     await state.set_state(RenewTariffState.selecting_group)
     await state.update_data(email=email, tg_id=tg_id)
 
-    result = await session.execute(select(Tariff.group_code).distinct())
-    groups = [row[0] for row in result.fetchall()]
+    groups = await get_tariff_group_codes(session)
 
     builder = InlineKeyboardBuilder()
     for group_code in groups:
@@ -91,10 +101,7 @@ async def handle_user_choose_tariff(
     await state.update_data(group_code=group_code)
     await state.set_state(RenewTariffState.selecting_tariff)
 
-    result = await session.execute(
-        select(Tariff).where(Tariff.group_code == group_code, Tariff.is_active.is_(True)).order_by(Tariff.id)
-    )
-    tariffs = result.scalars().all()
+    tariffs = await get_active_tariffs_by_group_code(session, group_code)
 
     if not tariffs:
         await callback_query.message.edit_text("❌ Нет активных тарифов в группе.")
@@ -134,8 +141,7 @@ async def handle_user_renew_confirm(
         await state.clear()
         return
 
-    result = await session.execute(select(Key).where(Key.email == email, Key.tg_id == tg_id))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_obj = await get_key_by_email(session, email, tg_id)
     if not key_obj:
         await callback_query.message.edit_text("❌ Ключ не найден.")
         await state.clear()
@@ -311,29 +317,15 @@ async def handle_user_renew_confirm(
     old_tariff_id = key_obj.tariff_id
     old_subgroup = None
     if old_tariff_id:
-        old_subgroup = (
-            await session.execute(select(Tariff.subgroup_title).where(Tariff.id == old_tariff_id))
-        ).scalar_one_or_none()
+        old_tariff = await get_tariff_by_id(session, old_tariff_id)
+        old_subgroup = old_tariff.get("subgroup_title") if old_tariff else None
 
-    new_subgroup = (
-        await session.execute(select(Tariff.subgroup_title).where(Tariff.id == tariff_id))
-    ).scalar_one_or_none()
+    new_tariff = await get_tariff_by_id(session, tariff_id)
+    new_subgroup = new_tariff.get("subgroup_title") if new_tariff else None
 
     new_expiry_time = int(key_obj.expiry_time or 0) or int(datetime.utcnow().timestamp() * 1000)
 
-    await session.execute(
-        update(Key)
-        .where(Key.tg_id == tg_id, Key.email == email)
-        .values(
-            tariff_id=tariff_id,
-            selected_device_limit=None,
-            current_device_limit=None,
-            selected_traffic_limit=None,
-            current_traffic_limit=None,
-            selected_price_rub=None,
-        )
-    )
-    await session.commit()
+    await reset_key_tariff_state(session, tg_id, email, tariff_id)
     await release_session_early(session)
 
     try:
@@ -629,8 +621,7 @@ async def handle_cfg_renew_apply(callback_query: CallbackQuery, session: AsyncSe
         await state.clear()
         return
 
-    result = await session.execute(select(Key).where(Key.email == email, Key.tg_id == tg_id))
-    key_obj: Key | None = result.scalar_one_or_none()
+    key_obj = await get_key_by_email(session, email, tg_id)
     if not key_obj:
         await callback_query.message.edit_text("❌ Ключ не найден.")
         await state.clear()
@@ -639,33 +630,15 @@ async def handle_cfg_renew_apply(callback_query: CallbackQuery, session: AsyncSe
     old_tariff_id = key_obj.tariff_id
     old_subgroup = None
     if old_tariff_id:
-        old_subgroup = (
-            await session.execute(select(Tariff.subgroup_title).where(Tariff.id == old_tariff_id))
-        ).scalar_one_or_none()
+        old_tariff = await get_tariff_by_id(session, old_tariff_id)
+        old_subgroup = old_tariff.get("subgroup_title") if old_tariff else None
 
-    new_subgroup = (
-        await session.execute(select(Tariff.subgroup_title).where(Tariff.id == tariff_id))
-    ).scalar_one_or_none()
+    new_tariff = await get_tariff_by_id(session, tariff_id)
+    new_subgroup = new_tariff.get("subgroup_title") if new_tariff else None
 
     new_expiry_time = int(key_obj.expiry_time or 0) or int(datetime.utcnow().timestamp() * 1000)
 
-    await session.execute(
-        update(Key)
-        .where(Key.tg_id == tg_id, Key.email == email)
-        .values(
-            tariff_id=tariff_id,
-            selected_device_limit=int(selected_devices) if selected_devices is not None else None,
-            current_device_limit=int(selected_devices) if selected_devices is not None else None,
-            selected_traffic_limit=int(selected_traffic_gb)
-            if (selected_traffic_gb is not None and int(selected_traffic_gb) > 0)
-            else None,
-            current_traffic_limit=int(selected_traffic_gb)
-            if (selected_traffic_gb is not None and int(selected_traffic_gb) > 0)
-            else None,
-            selected_price_rub=None,
-        )
-    )
-    await session.commit()
+    await save_key_tariff_selection(session, tg_id, email, tariff_id, selected_devices, selected_traffic_gb)
     await release_session_early(session)
 
     try:
@@ -706,8 +679,7 @@ async def handle_back_to_group(
     state: FSMContext,
     session: AsyncSession,
 ):
-    result = await session.execute(select(Tariff.group_code).distinct())
-    groups = [row[0] for row in result.fetchall()]
+    groups = await get_tariff_group_codes(session)
 
     builder = InlineKeyboardBuilder()
     for group_code in groups:

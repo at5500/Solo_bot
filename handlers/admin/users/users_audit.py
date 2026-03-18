@@ -205,7 +205,6 @@ def _resolve_event_types(category_filter: str) -> list[str] | None:
     return sorted(category_events)
 
 
-# Порядок и подписи блоков при показе «все» категории
 CATEGORY_BLOCK_ORDER = ("auth", "subscriptions", "payments", "marketing", "other")
 CATEGORY_BLOCK_LABELS = {
     "auth": "Авторизация",
@@ -258,7 +257,6 @@ def _event_label(event_type: str) -> str:
     return EVENT_TYPE_LABELS.get(event_type, event_type)
 
 
-# Отступ для строки события под статусом (чтобы не слипалось)
 _FLOW_INDENT = "   "
 
 
@@ -266,7 +264,6 @@ def _humanize_path(path: str) -> str:
     """Сокращает типичные callback для админки до читаемого вида."""
     if not path or "callback:" not in path:
         return path
-    # callback:admin_users:users_audit:476217106:telegram | all | 0:0
     if "users_audit:" in path:
         rest = path.split("users_audit:", 1)[-1].strip()
         parts = [p.strip() for p in rest.split("|")[:2] if p.strip()]
@@ -335,7 +332,6 @@ def _format_event_status(event) -> str:
     return f"<code>{created_at}</code> {result_text}"
 
 
-# Разделитель между событиями — сразу видно границу "что где"
 _FLOW_SEP = "—"
 
 def _render_events_as_flow(events: list) -> list[str]:
@@ -421,7 +417,7 @@ async def _render_user_audit(
         lines.append("\n<i>Событий пока нет.</i>")
     else:
         lines.append("")
-        rev = list(reversed(events))  # хронология сверху вниз
+        rev = list(reversed(events))
         if full_flow:
             by_cat: dict[str, list] = {}
             for e in rev:

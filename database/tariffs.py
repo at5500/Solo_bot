@@ -147,6 +147,18 @@ async def get_tariff_by_id(session: AsyncSession, tariff_id: int):
         return None
 
 
+async def get_tariff_group_codes(session: AsyncSession) -> list[str]:
+    result = await session.execute(select(Tariff.group_code).distinct().order_by(Tariff.group_code))
+    return [row[0] for row in result.fetchall() if row[0]]
+
+
+async def get_active_tariffs_by_group_code(session: AsyncSession, group_code: str) -> list[Tariff]:
+    result = await session.execute(
+        select(Tariff).where(Tariff.group_code == group_code, Tariff.is_active.is_(True)).order_by(Tariff.id)
+    )
+    return result.scalars().all()
+
+
 async def get_tariffs_for_cluster(session: AsyncSession, cluster_name: str):
     key = cache_key("tariffs_cluster", cluster_name)
     cached = await cache_get(key)

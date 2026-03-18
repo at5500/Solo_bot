@@ -124,6 +124,12 @@ async def get_clusters(session: AsyncSession) -> list[str]:
     return [r[0] for r in result.all()]
 
 
+async def get_server_names(session: AsyncSession) -> list[str]:
+    stmt = select(Server.server_name).distinct().order_by(Server.server_name)
+    result = await session.execute(stmt)
+    return [r[0] for r in result.all()]
+
+
 async def check_unique_server_name(session: AsyncSession, server_name: str, cluster_name: str | None = None) -> bool:
     stmt = select(Server).where(Server.server_name == server_name)
     if cluster_name:

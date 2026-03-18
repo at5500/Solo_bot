@@ -22,7 +22,6 @@ from config import (
     QRCODE,
     REMNAWAVE_WEBAPP,
     REMNAWAVE_WEBAPP_OPEN_IN_BROWSER,
-    TOGGLE_CLIENT,
     USE_COUNTRY_SELECTION,
 )
 from core.bootstrap import BUTTONS_CONFIG, MODES_CONFIG
@@ -43,14 +42,12 @@ from handlers.buttons import (
     CHANGE_LOCATION,
     CONNECT_DEVICE,
     DELETE,
-    FREEZE,
     HWID_BUTTON,
     MAIN_MENU,
     QR,
     RENEW_KEY,
     ROUTER_BUTTON,
     TV_BUTTON,
-    UNFREEZE,
 )
 from database import get_vless_enabled_batch
 from handlers.tariffs.tariff_display import GB, get_key_tariff_addons_state
@@ -63,7 +60,7 @@ from handlers.texts import (
     RENAME_KEY_PROMPT,
     key_message,
 )
-from handlers.keys.utils import key_owned_by_user
+from handlers.keys.utils import build_key_callback, build_key_ref, key_owned_by_user, resolve_key
 from handlers.utils import (
     edit_or_send_message,
     format_days,
@@ -106,9 +103,9 @@ async def process_callback_or_message_view_keys(
         records = await get_keys(session, tg_id)
 
         if records and len(records) == 1:
-            key_name = records[0].email
+            key_ref = build_key_ref(records[0].client_id, records[0].email)
             image_path = os.path.join("img", "pic_view.jpg")
-            await render_key_info(target_message, session, key_name, image_path)
+            await render_key_info(target_message, session, key_ref, image_path)
             return
 
         inline_keyboard, response_message = await build_keys_response(records, session, page=page)
@@ -186,7 +183,7 @@ async def build_keys_response(records: list[Key] | None, session: AsyncSession, 
 
             key_button = InlineKeyboardButton(
                 text=f"{icon} {key_display}",
-                callback_data=f"view_key|{email}",
+                callback_data=build_key_callback("view_key", client_id, email),
             )
             rename_button = InlineKeyboardButton(
                 text=ALIAS,
@@ -292,24 +289,26 @@ async def handle_new_alias_input(message: Message, state: FSMContext, session: A
 
 @router.callback_query(F.data.startswith("view_key|"))
 async def process_callback_view_key(callback_query: CallbackQuery, session: AsyncSession):
-    key_name = callback_query.data.split("|")[1]
-    record = await get_key_details(session, key_name)
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    record = await get_key_details(session, key_obj.email) if key_obj else None
     if not key_owned_by_user(record, callback_query.from_user.id):
         await safe_answer_callback(callback_query, "Доступ запрещён.", show_alert=True)
         return
     image_path = os.path.join("img", "pic_view.jpg")
-    await render_key_info(callback_query.message, session, key_name, image_path)
+    await render_key_info(callback_query.message, session, key_ref, image_path)
 
 
-async def build_key_view_payload(session: AsyncSession, key_name: str):
+async def build_key_view_payload(session: AsyncSession, tg_id: int, key_ref_or_email: str):
+    key_obj = await resolve_key(session, tg_id, key_ref_or_email)
+    key_name = key_obj.email if key_obj else key_ref_or_email
     record = await get_key_details(session, key_name)
     if not record:
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
         return "<b>Информация о подписке не найдена.</b>", builder.as_markup(), False
 
-    db_key_result = await session.execute(select(Key).where(Key.email == key_name))
-    db_key: Key | None = db_key_result.scalar_one_or_none()
+    db_key = key_obj
 
     is_frozen = record["is_frozen"]
     client_id = record.get("client_id")
@@ -318,7 +317,6 @@ async def build_key_view_payload(session: AsyncSession, key_name: str):
     builder = InlineKeyboardBuilder()
 
     if is_frozen:
-        builder.row(InlineKeyboardButton(text=UNFREEZE, callback_data=f"unfreeze_subscription|{key_name}"))
         builder.row(InlineKeyboardButton(text=BACK, callback_data="view_keys"))
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
         return FROZEN_SUBSCRIPTION_MSG, builder.as_markup(), True
@@ -420,22 +418,47 @@ async def build_key_view_payload(session: AsyncSession, key_name: str):
 
     if is_full_remnawave and final_link and use_webapp and not happ_cryptolink_enabled:
         if vless_enabled:
-            builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=f"connect_router|{key_name}"))
+            builder.row(
+                InlineKeyboardButton(
+                    text=ROUTER_BUTTON,
+                    callback_data=build_key_callback("connect_router", client_id, key_name),
+                )
+            )
         elif open_in_browser:
             builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, url=final_link))
             if tv_button_enabled:
-                builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=f"connect_tv|{key_name}"))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=TV_BUTTON,
+                        callback_data=build_key_callback("connect_tv", client_id, key_name),
+                    )
+                )
         else:
             builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, web_app=WebAppInfo(url=final_link)))
             if tv_button_enabled:
-                builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=f"connect_tv|{key_name}"))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=TV_BUTTON,
+                        callback_data=build_key_callback("connect_tv", client_id, key_name),
+                    )
+                )
     else:
         if vless_enabled:
-            builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=f"connect_router|{key_name}"))
+            builder.row(
+                InlineKeyboardButton(
+                    text=ROUTER_BUTTON,
+                    callback_data=build_key_callback("connect_router", client_id, key_name),
+                )
+            )
         else:
-            builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{key_name}"))
+            builder.row(
+                InlineKeyboardButton(
+                    text=CONNECT_DEVICE,
+                    callback_data=build_key_callback("connect_device", client_id, key_name),
+                )
+            )
 
-    builder.row(InlineKeyboardButton(text=RENEW_KEY, callback_data=f"renew_key|{key_name}"))
+    builder.row(InlineKeyboardButton(text=RENEW_KEY, callback_data=build_key_callback("renew_key", client_id, key_name)))
 
     if is_tariff_configurable and (addons_devices_enabled or addons_traffic_enabled):
         if addons_devices_enabled and addons_traffic_enabled:
@@ -444,27 +467,24 @@ async def build_key_view_payload(session: AsyncSession, key_name: str):
             addons_text = ADDONS_BUTTON_DEVICES
         else:
             addons_text = ADDONS_BUTTON_TRAFFIC
-        builder.row(InlineKeyboardButton(text=addons_text, callback_data=f"key_addons|{key_name}"))
+        builder.row(InlineKeyboardButton(text=addons_text, callback_data=build_key_callback("key_addons", client_id, key_name)))
 
     hwid_reset_enabled = bool(BUTTONS_CONFIG.get("HWID_RESET_BUTTON_ENABLE", HWID_RESET_BUTTON))
     qrcode_enabled = bool(BUTTONS_CONFIG.get("QRCODE_BUTTON_ENABLE", QRCODE))
     delete_key_enabled = bool(BUTTONS_CONFIG.get("DELETE_KEY_BUTTON_ENABLE", ENABLE_DELETE_KEY_BUTTON))
-    toggle_client_enabled = bool(BUTTONS_CONFIG.get("TOGGLE_CLIENT_BUTTON_ENABLE", TOGGLE_CLIENT))
-
     if hwid_reset_enabled and hwid_count > 0:
-        builder.row(InlineKeyboardButton(text=HWID_BUTTON, callback_data=f"reset_hwid|{key_name}"))
+        builder.row(InlineKeyboardButton(text=HWID_BUTTON, callback_data=build_key_callback("reset_hwid", client_id, key_name)))
 
     if qrcode_enabled:
-        builder.row(InlineKeyboardButton(text=QR, callback_data=f"show_qr|{key_name}"))
+        builder.row(InlineKeyboardButton(text=QR, callback_data=build_key_callback("show_qr", client_id, key_name)))
 
     if delete_key_enabled:
-        builder.row(InlineKeyboardButton(text=DELETE, callback_data=f"delete_key|{key_name}"))
+        builder.row(InlineKeyboardButton(text=DELETE, callback_data=build_key_callback("delete_key", client_id, key_name)))
 
     if country_selection_enabled:
-        builder.row(InlineKeyboardButton(text=CHANGE_LOCATION, callback_data=f"change_location|{key_name}"))
-
-    if toggle_client_enabled:
-        builder.row(InlineKeyboardButton(text=FREEZE, callback_data=f"freeze_subscription|{key_name}"))
+        builder.row(
+            InlineKeyboardButton(text=CHANGE_LOCATION, callback_data=build_key_callback("change_location", client_id, key_name))
+        )
 
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
@@ -475,12 +495,12 @@ async def build_key_view_payload(session: AsyncSession, key_name: str):
 
 
 async def build_key_view_message(session: AsyncSession, email: str):
-    text, reply_markup, _ = await build_key_view_payload(session, email)
+    text, reply_markup, _ = await build_key_view_payload(session, 0, email)
     return text, reply_markup
 
 
-async def render_key_info(message: Message, session: AsyncSession, key_name: str, image_path: str):
-    text, reply_markup, _ = await build_key_view_payload(session, key_name)
+async def render_key_info(message: Message, session: AsyncSession, key_ref_or_email: str, image_path: str):
+    text, reply_markup, _ = await build_key_view_payload(session, message.chat.id, key_ref_or_email)
     await edit_or_send_message(
         target_message=message,
         text=text,
@@ -491,8 +511,9 @@ async def render_key_info(message: Message, session: AsyncSession, key_name: str
 
 @router.callback_query(F.data.startswith("reset_hwid|"))
 async def handle_reset_hwid(callback_query: CallbackQuery, session: AsyncSession):
-    key_name = callback_query.data.split("|")[1]
-
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    key_name = key_obj.email if key_obj else key_ref
     record = await get_key_details(session, key_name)
     if not record:
         await safe_answer_callback(callback_query, "❌ Ключ не найден.", show_alert=True)
@@ -562,4 +583,4 @@ async def handle_reset_hwid(callback_query: CallbackQuery, session: AsyncSession
         return
 
     image_path = os.path.join("img", "pic_view.jpg")
-    await render_key_info(callback_query.message, session, key_name, image_path)
+    await render_key_info(callback_query.message, session, key_ref, image_path)

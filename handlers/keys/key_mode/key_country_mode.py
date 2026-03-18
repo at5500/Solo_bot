@@ -47,6 +47,7 @@ from handlers.buttons import (
     SUPPORT,
     TV_BUTTON,
 )
+from handlers.keys.utils import build_key_callback, resolve_key
 from handlers.keys.operations import create_client_on_server
 from handlers.keys.operations.aggregated_links import make_aggregated_link
 from handlers.tariffs.tariff_display import (
@@ -258,7 +259,9 @@ async def change_location_callback(callback_query: CallbackQuery, session: Any):
             await callback_query.answer("❌ Некорректные данные", show_alert=True)
             return
 
-        old_key_name = data[1]
+        old_key_ref = data[1]
+        key_obj = await resolve_key(session, callback_query.from_user.id, old_key_ref)
+        old_key_name = key_obj.email if key_obj else old_key_ref
         record = await get_key_details(session, old_key_name)
         if not record:
             await callback_query.answer("❌ Ключ не найден", show_alert=True)
@@ -351,7 +354,12 @@ async def change_location_callback(callback_query: CallbackQuery, session: Any):
                 available_servers = [s["server_name"] for s in filtered_servers]
             else:
                 builder = InlineKeyboardBuilder()
-                builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{old_key_name}"))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=BACK,
+                        callback_data=build_key_callback("view_key", record.get("client_id"), old_key_name),
+                    )
+                )
                 await edit_or_send_message(
                     target_message=callback_query.message,
                     text="❌ Нет доступных стран для смены локации.",
@@ -373,7 +381,12 @@ async def change_location_callback(callback_query: CallbackQuery, session: Any):
 
         if not available_servers:
             builder = InlineKeyboardBuilder()
-            builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{old_key_name}"))
+            builder.row(
+                InlineKeyboardButton(
+                    text=BACK,
+                    callback_data=build_key_callback("view_key", record.get("client_id"), old_key_name),
+                )
+            )
             await edit_or_send_message(
                 target_message=callback_query.message,
                 text="❌ Нет доступных стран для смены локации.",
@@ -386,11 +399,16 @@ async def change_location_callback(callback_query: CallbackQuery, session: Any):
         for i in range(0, len(available_servers), 2):
             row_buttons = []
             for country in available_servers[i : i + 2]:
-                callback_data = f"select_country|{country}|{ts}|{old_key_name}"
+                callback_data = f"select_country|{country}|{ts}|{old_key_ref}"
                 row_buttons.append(InlineKeyboardButton(text=country, callback_data=callback_data))
             builder.row(*row_buttons)
 
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{old_key_name}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=BACK,
+                callback_data=build_key_callback("view_key", record.get("client_id"), old_key_name),
+            )
+        )
 
         await edit_or_send_message(
             target_message=callback_query.message,
@@ -487,6 +505,8 @@ async def finalize_key_creation(
 
     old_key_details: dict[str, Any] | None = None
     if old_key_name:
+        key_obj = await resolve_key(session, tg_id, old_key_name)
+        old_key_name = key_obj.email if key_obj else old_key_name
         old_key_details = await get_key_details(session, old_key_name)
         if not old_key_details:
             await callback_query.message.answer("❌ Ключ не найден. Попробуйте снова.")
@@ -769,7 +789,7 @@ async def finalize_key_creation(
 
     if panel_type == "remnawave" or is_full_remnawave:
         if is_vless:
-            builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=f"connect_router|{key_name}"))
+            builder.row(InlineKeyboardButton(text=ROUTER_BUTTON, callback_data=build_key_callback("connect_router", client_id, key_name)))
         else:
             if use_webapp and webapp_url:
                 if open_in_browser:
@@ -777,13 +797,23 @@ async def finalize_key_creation(
                 else:
                     builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, web_app=WebAppInfo(url=webapp_url)))
                 if tv_button_enabled:
-                    builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=f"connect_tv|{email}"))
+                    builder.row(InlineKeyboardButton(text=TV_BUTTON, callback_data=build_key_callback("connect_tv", client_id, key_name)))
             else:
-                builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{key_name}"))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=CONNECT_DEVICE,
+                        callback_data=build_key_callback("connect_device", client_id, key_name),
+                    )
+                )
     else:
-        builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{key_name}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=CONNECT_DEVICE,
+                callback_data=build_key_callback("connect_device", client_id, key_name),
+            )
+        )
 
-    builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=f"view_key|{key_name}"))
+    builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=build_key_callback("view_key", client_id, key_name)))
     builder.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 

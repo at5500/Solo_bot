@@ -8,7 +8,6 @@ import qrcode
 from aiogram import F, Router, types
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import (
@@ -19,7 +18,7 @@ from config import (
     DOWNLOAD_IOS,
     INSTRUCTIONS_BUTTON,
 )
-from database import Key, get_key_details, get_subscription_link
+from database import get_key_details, get_subscription_link
 from handlers.buttons import (
     ANDROID,
     BACK,
@@ -39,7 +38,7 @@ from handlers.texts import (
     IOS_DESCRIPTION_TEMPLATE,
     SUBSCRIPTION_DESCRIPTION,
 )
-from handlers.keys.utils import key_owned_by_user
+from handlers.keys.utils import build_key_callback, key_owned_by_user, resolve_key
 from handlers.utils import edit_or_send_message
 from hooks.hook_buttons import insert_hook_buttons
 from hooks.processors import process_connect_device_menu
@@ -67,18 +66,23 @@ def generate_key_qr_file(qr_data: str, email: str) -> str:
 @router.callback_query(F.data.startswith("connect_device|"))
 async def handle_connect_device(callback_query: CallbackQuery, session: AsyncSession):
     try:
-        key_name = callback_query.data.split("|")[1]
+        key_ref = callback_query.data.split("|", 1)[1]
+        key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+        key_name = key_obj.email if key_obj else key_ref
         record = await get_key_details(session, key_name)
         if not key_owned_by_user(record, callback_query.from_user.id):
             await callback_query.answer("Доступ запрещён.", show_alert=True)
             return
 
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=IPHONE, callback_data=f"connect_ios|{key_name}"))
-        builder.row(InlineKeyboardButton(text=ANDROID, callback_data=f"connect_android|{key_name}"))
-        builder.row(InlineKeyboardButton(text=PC, callback_data=f"connect_pc|{key_name}"))
-        builder.row(InlineKeyboardButton(text=TV, callback_data=f"connect_tv|{key_name}"))
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_name}"))
+        client_id = record.get("client_id")
+        builder.row(InlineKeyboardButton(text=IPHONE, callback_data=build_key_callback("connect_ios", client_id, key_name)))
+        builder.row(
+            InlineKeyboardButton(text=ANDROID, callback_data=build_key_callback("connect_android", client_id, key_name))
+        )
+        builder.row(InlineKeyboardButton(text=PC, callback_data=build_key_callback("connect_pc", client_id, key_name)))
+        builder.row(InlineKeyboardButton(text=TV, callback_data=build_key_callback("connect_tv", client_id, key_name)))
+        builder.row(InlineKeyboardButton(text=BACK, callback_data=build_key_callback("view_key", client_id, key_name)))
 
         hook_builder = InlineKeyboardBuilder()
         hook_builder.attach(builder)
@@ -104,7 +108,9 @@ async def handle_connect_device(callback_query: CallbackQuery, session: AsyncSes
 
 @router.callback_query(F.data.startswith("connect_phone|"))
 async def process_callback_connect_phone(callback_query: CallbackQuery, session: AsyncSession):
-    email = callback_query.data.split("|")[1]
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    email = key_obj.email if key_obj else key_ref
 
     try:
         record = await get_key_details(session, email)
@@ -142,7 +148,7 @@ async def process_callback_connect_phone(callback_query: CallbackQuery, session:
         )
     if INSTRUCTIONS_BUTTON:
         builder.row(InlineKeyboardButton(text=MANUAL_INSTRUCTIONS, callback_data="instructions"))
-    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{email}"))
+    builder.row(InlineKeyboardButton(text=BACK, callback_data=build_key_callback("view_key", record.get("client_id"), email)))
 
     await edit_or_send_message(
         target_message=callback_query.message,
@@ -154,7 +160,9 @@ async def process_callback_connect_phone(callback_query: CallbackQuery, session:
 
 @router.callback_query(F.data.startswith("connect_ios|"))
 async def process_callback_connect_ios(callback_query: CallbackQuery, session: AsyncSession):
-    email = callback_query.data.split("|")[1]
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    email = key_obj.email if key_obj else key_ref
 
     try:
         record = await get_key_details(session, email)
@@ -185,7 +193,9 @@ async def process_callback_connect_ios(callback_query: CallbackQuery, session: A
     builder.row(InlineKeyboardButton(text=IMPORT_IOS, url=ios_url))
     if INSTRUCTIONS_BUTTON:
         builder.row(InlineKeyboardButton(text=MANUAL_INSTRUCTIONS, callback_data="instructions"))
-    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"connect_device|{email}"))
+    builder.row(
+        InlineKeyboardButton(text=BACK, callback_data=build_key_callback("connect_device", record.get("client_id"), email))
+    )
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
     await edit_or_send_message(
@@ -198,7 +208,9 @@ async def process_callback_connect_ios(callback_query: CallbackQuery, session: A
 
 @router.callback_query(F.data.startswith("connect_android|"))
 async def process_callback_connect_android(callback_query: CallbackQuery, session: AsyncSession):
-    email = callback_query.data.split("|")[1]
+    key_ref = callback_query.data.split("|", 1)[1]
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    email = key_obj.email if key_obj else key_ref
 
     try:
         record = await get_key_details(session, email)
@@ -229,7 +241,9 @@ async def process_callback_connect_android(callback_query: CallbackQuery, sessio
     builder.row(InlineKeyboardButton(text=IMPORT_ANDROID, url=android_url))
     if INSTRUCTIONS_BUTTON:
         builder.row(InlineKeyboardButton(text=MANUAL_INSTRUCTIONS, callback_data="instructions"))
-    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"connect_device|{email}"))
+    builder.row(
+        InlineKeyboardButton(text=BACK, callback_data=build_key_callback("connect_device", record.get("client_id"), email))
+    )
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
     await edit_or_send_message(
@@ -243,11 +257,8 @@ async def process_callback_connect_android(callback_query: CallbackQuery, sessio
 @router.callback_query(F.data.startswith("show_qr|"))
 async def show_qr_code(callback_query: types.CallbackQuery, session: AsyncSession):
     try:
-        key_name = callback_query.data.split("|")[1]
-
-        stmt = select(Key).where(Key.email == key_name)
-        result = await session.execute(stmt)
-        record = result.scalars().first()
+        key_ref = callback_query.data.split("|", 1)[1]
+        record = await resolve_key(session, callback_query.from_user.id, key_ref)
 
         if not record:
             await callback_query.message.answer("❌ Подписка не найдена.")
@@ -266,7 +277,12 @@ async def show_qr_code(callback_query: types.CallbackQuery, session: AsyncSessio
         qr_path = await run_cpu(generate_key_qr_file, qr_data, record.email)
 
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{record.email}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=BACK,
+                callback_data=build_key_callback("view_key", record.client_id, record.email),
+            )
+        )
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
         await edit_or_send_message(

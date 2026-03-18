@@ -8,7 +8,6 @@ BUTTON_TITLES: Final[dict[str, str]] = {
     "REFERRAL_QR_BUTTON_ENABLE": "QR реф.меню",
     "DELETE_KEY_BUTTON_ENABLE": "Удалить подп-ку",
     "INSTRUCTIONS_BUTTON_ENABLE": "Инструкции",
-    "TOGGLE_CLIENT_BUTTON_ENABLE": "Заморозка подписки",
     "GIFT_BUTTON_ENABLE": "Подарки",
     "REFERRAL_BUTTON_ENABLE": "Реф.система",
     "TOP_REFERRAL_BUTTON_ENABLE": "Топ-5 рефералов",

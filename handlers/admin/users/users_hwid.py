@@ -7,10 +7,10 @@ from panels.remnawave_runtime import (
     resolve_remnawave_api_url,
     with_remnawave_api,
 )
-from database import get_client_id_by_email
 from filters.admin import IsAdminFilter
 
 from .keyboard import AdminUserEditorCallback, build_editor_kb, build_hwid_menu_kb
+from .utils import resolve_admin_key
 
 
 router = Router()
@@ -25,13 +25,14 @@ async def handle_hwid_menu(
     callback_data: AdminUserEditorCallback,
     session: AsyncSession,
 ):
-    email = callback_data.data
+    key_ref = str(callback_data.data)
     tg_id = callback_data.tg_id
 
-    client_id = await get_client_id_by_email(session, email)
-    if not client_id:
-        await callback_query.message.edit_text("🚫 Не удалось найти client_id по email.")
+    key_obj = await resolve_admin_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Не удалось найти ключ.", reply_markup=build_editor_kb(tg_id))
         return
+    client_id = key_obj.client_id
 
     remna_api_url = await resolve_remnawave_api_url(session, "", fallback_any=True)
     if not remna_api_url:
@@ -109,7 +110,7 @@ async def handle_hwid_menu(
                 f"└ 🔄 <b>Обновлено:</b> {updated}\n\n"
             )
 
-    await callback_query.message.edit_text(text, reply_markup=build_hwid_menu_kb(email, tg_id))
+    await callback_query.message.edit_text(text, reply_markup=build_hwid_menu_kb(key_ref, tg_id))
 
 
 @router.callback_query(
@@ -121,13 +122,14 @@ async def handle_hwid_reset(
     callback_data: AdminUserEditorCallback,
     session: AsyncSession,
 ):
-    email = callback_data.data
+    key_ref = str(callback_data.data)
     tg_id = callback_data.tg_id
 
-    client_id = await get_client_id_by_email(session, email)
-    if not client_id:
-        await callback_query.message.edit_text("🚫 Не удалось найти client_id по email.")
+    key_obj = await resolve_admin_key(session, tg_id, key_ref)
+    if not key_obj:
+        await callback_query.message.edit_text("🚫 Не удалось найти ключ.", reply_markup=build_editor_kb(tg_id))
         return
+    client_id = key_obj.client_id
 
     remna_api_url = await resolve_remnawave_api_url(session, "", fallback_any=True)
     if not remna_api_url:

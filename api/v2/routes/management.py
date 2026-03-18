@@ -210,7 +210,6 @@ def _parse_date_range(
             return start, end
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Неверный формат дат: {e}")
-    # по умолчанию — вчера
     end = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     start = end - timedelta(days=1)
     return start, end

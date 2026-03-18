@@ -21,6 +21,7 @@ from database import add_notification, check_notifications_bulk
 from database.models import Key, User
 from database.tariffs import get_tariffs
 from handlers.buttons import CONNECT_DEVICE, MAIN_MENU, SUPPORT, TRIAL_BONUS
+from handlers.keys.utils import build_key_callback
 from handlers.keys.operations import get_user_traffic
 from handlers.notifications.notify_utils import send_messages_with_limit
 from handlers.texts import (
@@ -209,10 +210,20 @@ async def notify_users_no_traffic(bot: Bot, session: AsyncSession, current_time:
                     else:
                         builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, web_app=WebAppInfo(url=final_link)))
                 else:
-                    builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{email}"))
+                    builder.row(
+                        InlineKeyboardButton(
+                            text=CONNECT_DEVICE,
+                            callback_data=build_key_callback("connect_device", key.client_id, email),
+                        )
+                    )
             except Exception as error:
                 logger.error(f"Ошибка при определении типа панели для {email}: {error}")
-                builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, callback_data=f"connect_device|{email}"))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=CONNECT_DEVICE,
+                        callback_data=build_key_callback("connect_device", key.client_id, email),
+                    )
+                )
 
             builder.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
             builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))

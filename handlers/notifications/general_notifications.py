@@ -215,7 +215,7 @@ async def send_expiry_warning(ctx: NotificationContext, key, hours_left: int, ph
         tariff_details=expiry_data["tariff_details"],
     )
 
-    keyboard = build_notification_kb(email)
+    keyboard = build_notification_kb(email, getattr(key, "client_id", None))
     return await send_notification(ctx.bot, tg_id, photo, message_text, keyboard)
 
 
@@ -233,7 +233,7 @@ async def send_cannot_renew(ctx: NotificationContext, key, photo: str) -> bool:
         tariff_details=expiry_data["tariff_details"],
     )
 
-    keyboard = build_change_tariff_kb(email)
+    keyboard = build_change_tariff_kb(email, getattr(key, "client_id", None))
     return await send_notification(ctx.bot, tg_id, photo, message_text, keyboard)
 
 
@@ -254,7 +254,7 @@ async def send_expired_notification(ctx: NotificationContext, key, delay_minutes
     else:
         message_text = KEY_EXPIRED_NO_DELAY_MSG.format(email=email)
 
-    keyboard = build_notification_kb(email)
+    keyboard = build_notification_kb(email, getattr(key, "client_id", None))
     return await send_notification(ctx.bot, tg_id, "notify_expired.jpg", message_text, keyboard)
 
 
@@ -498,7 +498,7 @@ async def notify_expiring_keys(
                 tariff_name=expiry_data["tariff_name"],
                 tariff_details=expiry_data["tariff_details"],
             )
-            keyboard = build_notification_kb(email)
+            keyboard = build_notification_kb(email, getattr(key, "client_id", None))
             messages.append({
                 "tg_id": tg_id,
                 "text": notification_text,

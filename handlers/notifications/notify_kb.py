@@ -1,9 +1,10 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from handlers.buttons import CHANGE_TARIFF, DISCOUNT_TARIFF, MAIN_MENU, MAX_DISCOUNT_TARIFF, RENEW_KEY_NOTIFICATION
+from handlers.keys.utils import build_key_callback
 
 
-def build_notification_kb(email: str) -> InlineKeyboardMarkup:
+def build_notification_kb(email: str, client_id: str | None = None) -> InlineKeyboardMarkup:
     """
     Формирует inline-клавиатуру для уведомлений.
     Кнопки: "🔄 Продлить VPN" (callback_data содержит email) и "👤 Личный кабинет".
@@ -11,13 +12,13 @@ def build_notification_kb(email: str) -> InlineKeyboardMarkup:
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=RENEW_KEY_NOTIFICATION, callback_data=f"renew_key|{email}")
+    builder.button(text=RENEW_KEY_NOTIFICATION, callback_data=build_key_callback("renew_key", client_id, email))
     builder.button(text=MAIN_MENU, callback_data="profile")
     builder.adjust(1)
     return builder.as_markup()
 
 
-def build_change_tariff_kb(email: str) -> InlineKeyboardMarkup:
+def build_change_tariff_kb(email: str, client_id: str | None = None) -> InlineKeyboardMarkup:
     """
     Формирует inline-клавиатуру для смены тарифа.
     Кнопки: "🔄 Сменить тариф" (callback_data содержит email) и "👤 Личный кабинет".
@@ -25,7 +26,7 @@ def build_change_tariff_kb(email: str) -> InlineKeyboardMarkup:
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 
     builder = InlineKeyboardBuilder()
-    builder.button(text=CHANGE_TARIFF, callback_data=f"renew_key|{email}")
+    builder.button(text=CHANGE_TARIFF, callback_data=build_key_callback("renew_key", client_id, email))
     builder.button(text=MAIN_MENU, callback_data="profile")
     builder.adjust(1)
     return builder.as_markup()

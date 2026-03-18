@@ -20,7 +20,7 @@ from utils.telegram_login import verify_telegram_login
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 TOKEN_TTL_HINT = "бессрочно" if API_TOKEN_TTL_DAYS is None else f"{API_TOKEN_TTL_DAYS} дн."
-TELEGRAM_LOGIN_MAX_AGE = 86400  # 24 часа
+TELEGRAM_LOGIN_MAX_AGE = 86400
 
 
 @router.post("/register", response_model=RegisterResponse)
@@ -66,7 +66,7 @@ async def login(
 
 
 _LOGIN_CODES: dict[str, tuple[str, float]] = {}
-_LOGIN_CODE_TTL = 600.0  # 10 min
+_LOGIN_CODE_TTL = 600.0
 
 
 def _clean_login_codes() -> None:

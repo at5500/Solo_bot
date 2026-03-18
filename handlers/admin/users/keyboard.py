@@ -3,19 +3,18 @@ from datetime import datetime, timezone
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from handlers.buttons import BACK
 
 from config import HWID_RESET_BUTTON
-from database import get_clusters
-from database.models import Key, Tariff
+from database import get_clusters, get_key_expiry_presets
 from handlers.buttons import BACK, FREEZE, UNFREEZE
 from handlers.utils import format_days
 from hooks.hook_buttons import insert_hook_buttons
 from hooks.hooks import run_hooks
 
 from ..panel.keyboard import build_admin_back_btn
+from .utils import build_admin_key_ref
 
 
 class AdminUserEditorCallback(CallbackData, prefix="admin_users"):
@@ -51,12 +50,13 @@ async def build_user_edit_kb(
 
     for record in key_records:
         email = record.email
+        key_ref = build_admin_key_ref(record.client_id, email)
         expiry = datetime.fromtimestamp(record.expiry_time / 1000, tz=timezone.utc)
         days = (expiry - current_time).days
         builder.row(
             InlineKeyboardButton(
                 text=f"🔑 {email} ({'<1' if days < 1 else days} дн.)",
-                callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=str(email)).pack(),
+                callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=key_ref).pack(),
             )
         )
 
@@ -191,74 +191,63 @@ async def build_users_balance_kb(
     return builder.as_markup()
 
 
-def build_users_key_show_kb(tg_id: int, email: str) -> InlineKeyboardMarkup:
+def build_users_key_show_kb(tg_id: int, key_ref: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text=BACK,
-        callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=email, edit=True).pack(),
+        callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=key_ref, edit=True).pack(),
     )
     return builder.as_markup()
 
 
-async def build_users_key_expiry_kb(session: AsyncSession, tg_id: int, email: str) -> InlineKeyboardMarkup:
+async def build_users_key_expiry_kb(
+    session: AsyncSession,
+    tg_id: int,
+    email: str,
+    key_ref: str | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    client_id, preset_durations = await get_key_expiry_presets(session, email)
+    resolved_key_ref = key_ref or build_admin_key_ref(client_id, email)
 
-    result = await session.execute(select(Key.server_id, Key.tariff_id).where(Key.email == email))
-    row = result.first()
-    _server_id, tariff_id = row if row else (None, None)
-
-    if tariff_id:
-        result = await session.execute(select(Tariff.group_code).where(Tariff.id == tariff_id))
-        row = result.first()
-        if row and row[0]:
-            group_code = row[0]
-            result = await session.execute(
-                select(Tariff).where(Tariff.group_code == group_code, Tariff.is_active.is_(True))
-            )
-            tariffs = result.scalars().all()
-            unique_durations = set()
-            for tariff in tariffs:
-                days = tariff.duration_days
-                if days < 1 or days in unique_durations:
-                    continue
-                unique_durations.add(days)
-                label = format_days(days)
-                builder.row(
-                    InlineKeyboardButton(
-                        text=f"+ {label}",
-                        callback_data=AdminUserKeyEditorCallback(
-                            action="add", tg_id=tg_id, data=email, month=days
-                        ).pack(),
-                    ),
-                    InlineKeyboardButton(
-                        text=f"- {label}",
-                        callback_data=AdminUserKeyEditorCallback(
-                            action="add", tg_id=tg_id, data=email, month=-days
-                        ).pack(),
-                    ),
-                )
+    for days in preset_durations:
+        label = format_days(days)
+        builder.row(
+            InlineKeyboardButton(
+                text=f"+ {label}",
+                callback_data=AdminUserKeyEditorCallback(
+                    action="add", tg_id=tg_id, data=resolved_key_ref, month=days
+                ).pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"- {label}",
+                callback_data=AdminUserKeyEditorCallback(
+                    action="add", tg_id=tg_id, data=resolved_key_ref, month=-days
+                ).pack(),
+            ),
+        )
 
     builder.row(
         InlineKeyboardButton(
             text="⏳ Добавить дни",
-            callback_data=AdminUserKeyEditorCallback(action="add", tg_id=tg_id, data=email).pack(),
+            callback_data=AdminUserKeyEditorCallback(action="add", tg_id=tg_id, data=resolved_key_ref).pack(),
         ),
         InlineKeyboardButton(
             text="⏳ Вычесть дни",
-            callback_data=AdminUserKeyEditorCallback(action="take", tg_id=tg_id, data=email).pack(),
+            callback_data=AdminUserKeyEditorCallback(action="take", tg_id=tg_id, data=resolved_key_ref).pack(),
         ),
     )
 
     builder.row(
         InlineKeyboardButton(
             text="⏳ Установить дату истечения",
-            callback_data=AdminUserKeyEditorCallback(action="set", tg_id=tg_id, data=email).pack(),
+            callback_data=AdminUserKeyEditorCallback(action="set", tg_id=tg_id, data=resolved_key_ref).pack(),
         )
     )
     builder.row(
         InlineKeyboardButton(
             text=BACK,
-            callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=email).pack(),
+            callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=resolved_key_ref).pack(),
         )
     )
 
@@ -276,18 +265,24 @@ def build_user_delete_kb(tg_id: int):
     return builder.as_markup()
 
 
-def build_user_key_kb(tg_id: int, email: str) -> InlineKeyboardMarkup:
+def build_user_key_kb(tg_id: int, key_ref: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text=BACK,
-        callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=email).pack(),
+        callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=key_ref).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()
 
 
-def build_key_edit_kb(key_details: dict, email: str, is_configurable: bool = False) -> InlineKeyboardMarkup:
+def build_key_edit_kb(
+    key_details: dict,
+    email: str,
+    is_configurable: bool = False,
+    key_ref: str | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    resolved_key_ref = key_ref or build_admin_key_ref(key_details.get("client_id"), email)
 
     is_frozen = (
         key_details.get("is_frozen") if isinstance(key_details, dict) else getattr(key_details, "is_frozen", False)
@@ -296,38 +291,44 @@ def build_key_edit_kb(key_details: dict, email: str, is_configurable: bool = Fal
     builder.button(
         text="⏳ Время истечения",
         callback_data=AdminUserEditorCallback(
-            action="users_expiry_edit", data=email, tg_id=key_details["tg_id"]
+            action="users_expiry_edit", data=resolved_key_ref, tg_id=key_details["tg_id"]
         ).pack(),
     )
     builder.button(
         text="🔄 Перевыпуск подписки",
         callback_data=AdminUserEditorCallback(
-            action="users_reissue_menu", data=email, tg_id=key_details["tg_id"]
+            action="users_reissue_menu", data=resolved_key_ref, tg_id=key_details["tg_id"]
         ).pack(),
     )
     builder.button(
         text="📦 Тариф",
-        callback_data=AdminUserEditorCallback(action="users_renew", data=email, tg_id=key_details["tg_id"]).pack(),
+        callback_data=AdminUserEditorCallback(
+            action="users_renew", data=resolved_key_ref, tg_id=key_details["tg_id"]
+        ).pack(),
     )
     if is_configurable:
         builder.button(
             text="📱 Конфигурация",
             callback_data=AdminUserEditorCallback(
-                action="users_edit_config", data=email, tg_id=key_details["tg_id"]
+                action="users_edit_config", data=resolved_key_ref, tg_id=key_details["tg_id"]
             ).pack(),
         )
     builder.button(
         text="❌ Удалить",
-        callback_data=AdminUserEditorCallback(action="users_delete_key", data=email, tg_id=key_details["tg_id"]).pack(),
+        callback_data=AdminUserEditorCallback(
+            action="users_delete_key", data=resolved_key_ref, tg_id=key_details["tg_id"]
+        ).pack(),
     )
     builder.button(
         text="📊 Трафик",
-        callback_data=AdminUserEditorCallback(action="users_traffic", data=email, tg_id=key_details["tg_id"]).pack(),
+        callback_data=AdminUserEditorCallback(
+            action="users_traffic", data=resolved_key_ref, tg_id=key_details["tg_id"]
+        ).pack(),
     )
     builder.button(
         text="♻️ Сбросить трафик",
         callback_data=AdminUserEditorCallback(
-            action="users_reset_traffic", data=email, tg_id=key_details["tg_id"]
+            action="users_reset_traffic", data=resolved_key_ref, tg_id=key_details["tg_id"]
         ).pack(),
     )
 
@@ -335,20 +336,22 @@ def build_key_edit_kb(key_details: dict, email: str, is_configurable: bool = Fal
         builder.button(
             text=UNFREEZE,
             callback_data=AdminUserEditorCallback(
-                action="users_unfreeze", data=email, tg_id=key_details["tg_id"]
+                action="users_unfreeze", data=resolved_key_ref, tg_id=key_details["tg_id"]
             ).pack(),
         )
     else:
         builder.button(
             text=FREEZE,
-            callback_data=AdminUserEditorCallback(action="users_freeze", data=email, tg_id=key_details["tg_id"]).pack(),
+            callback_data=AdminUserEditorCallback(
+                action="users_freeze", data=resolved_key_ref, tg_id=key_details["tg_id"]
+            ).pack(),
         )
 
     if HWID_RESET_BUTTON:
         builder.button(
             text="💻 HWID",
             callback_data=AdminUserEditorCallback(
-                action="users_hwid_menu", data=email, tg_id=key_details["tg_id"]
+                action="users_hwid_menu", data=resolved_key_ref, tg_id=key_details["tg_id"]
             ).pack(),
         )
 
@@ -357,33 +360,33 @@ def build_key_edit_kb(key_details: dict, email: str, is_configurable: bool = Fal
     return builder.as_markup()
 
 
-def build_reissue_menu_kb(email: str, tg_id: int) -> InlineKeyboardMarkup:
+def build_reissue_menu_kb(key_ref: str, tg_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="📦 Полный перевыпуск",
-        callback_data=AdminUserEditorCallback(action="users_update_key", data=email, tg_id=tg_id).pack(),
+        callback_data=AdminUserEditorCallback(action="users_update_key", data=key_ref, tg_id=tg_id).pack(),
     )
     builder.button(
         text="🔗 Сменить ссылку",
-        callback_data=AdminUserEditorCallback(action="users_recreate_key", data=email, tg_id=tg_id).pack(),
+        callback_data=AdminUserEditorCallback(action="users_recreate_key", data=key_ref, tg_id=tg_id).pack(),
     )
     builder.button(
         text=BACK,
-        callback_data=AdminUserEditorCallback(action="users_key_edit", data=email, tg_id=tg_id).pack(),
+        callback_data=AdminUserEditorCallback(action="users_key_edit", data=key_ref, tg_id=tg_id).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()
 
 
-def build_hwid_menu_kb(email: str, tg_id: int) -> InlineKeyboardMarkup:
+def build_hwid_menu_kb(key_ref: str, tg_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="♻️ Сбросить HWID",
-        callback_data=AdminUserEditorCallback(action="users_hwid_reset", data=email, tg_id=tg_id).pack(),
+        callback_data=AdminUserEditorCallback(action="users_hwid_reset", data=key_ref, tg_id=tg_id).pack(),
     )
     builder.button(
         text=BACK,
-        callback_data=AdminUserEditorCallback(action="users_key_edit", data=email, tg_id=tg_id).pack(),
+        callback_data=AdminUserEditorCallback(action="users_key_edit", data=key_ref, tg_id=tg_id).pack(),
     )
     builder.adjust(1)
     return builder.as_markup()
@@ -427,15 +430,15 @@ def build_editor_btn(text: str, tg_id: int, edit: bool = False) -> InlineKeyboar
     )
 
 
-async def build_cluster_selection_kb(session, tg_id: int, email: str, action: str) -> InlineKeyboardMarkup:
+async def build_cluster_selection_kb(session, tg_id: int, key_ref: str, action: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     clusters = await get_clusters(session)
 
     for cluster_id in clusters:
-        builder.button(text=cluster_id, callback_data=f"{action}|{tg_id}|{email}|{cluster_id}")
+        builder.button(text=cluster_id, callback_data=f"{action}|{tg_id}|{key_ref}|{cluster_id}")
 
     builder.button(
-        text=BACK, callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=email).pack()
+        text=BACK, callback_data=AdminUserEditorCallback(action="users_key_edit", tg_id=tg_id, data=key_ref).pack()
     )
     builder.adjust(1)
     return builder.as_markup()

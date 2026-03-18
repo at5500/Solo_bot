@@ -12,6 +12,7 @@ from core.bootstrap import NOTIFICATIONS_CONFIG
 from database import get_keys, get_tariffs, get_tariffs_for_cluster
 from database.models import Notification
 from handlers.buttons import MAIN_MENU, RENEW_KEY_NOTIFICATION
+from handlers.keys.utils import build_key_callback
 from handlers.notifications.notify_kb import build_tariffs_keyboard
 from handlers.tariffs.buy.key_tariffs import select_tariff_plan
 from handlers.texts import DISCOUNT_TARIFF, DISCOUNT_TARIFF_MAX
@@ -49,7 +50,12 @@ async def handle_discount_entry(callback: CallbackQuery, session: AsyncSession):
 
     if keys and len(keys) > 0:
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=RENEW_KEY_NOTIFICATION, callback_data=f"renew_key|{keys[0].email}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=RENEW_KEY_NOTIFICATION,
+                callback_data=build_key_callback("renew_key", keys[0].client_id, keys[0].email),
+            )
+        )
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
         expires_at = last_time + timedelta(hours=discount_active_hours)
@@ -127,7 +133,12 @@ async def handle_ultra_discount(callback: CallbackQuery, session: AsyncSession):
 
     if keys and len(keys) > 0:
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=RENEW_KEY_NOTIFICATION, callback_data=f"renew_key|{keys[0].email}"))
+        builder.row(
+            InlineKeyboardButton(
+                text=RENEW_KEY_NOTIFICATION,
+                callback_data=build_key_callback("renew_key", keys[0].client_id, keys[0].email),
+            )
+        )
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
         expires_at = last_time + timedelta(hours=discount_active_hours)
