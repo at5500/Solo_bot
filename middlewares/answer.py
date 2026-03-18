@@ -48,11 +48,12 @@ class CallbackAnswerMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if isinstance(event, CallbackQuery) and not data.get("callback_answered_by_concurrency") and not data.get("callback_answered_early"):
-            try:
-                await event.answer()
-            except Exception:
-                pass
+        if isinstance(event, CallbackQuery):
+            if not data.get("callback_answered_by_concurrency") and not data.get("callback_answered_early"):
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
             if isinstance(event.message, InaccessibleMessage):
                 try:
                     new_message = await bot.send_message(event.message.chat.id, "⏳")
