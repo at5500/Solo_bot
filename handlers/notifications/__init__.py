@@ -4,6 +4,7 @@ from aiogram import Router
 
 from .general_notifications import router as general_notifications_router
 from .special_notifications import router as special_notifications_router
+from . import task_manager as _task_manager
 
 
 router = Router(name="notifications_main_router")

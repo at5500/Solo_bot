@@ -238,6 +238,33 @@ class Notification(DictLikeMixin, Base):
     last_notification_time = Column(DateTime, default=datetime.utcnow)
 
 
+class ScheduledBroadcast(DictLikeMixin, Base):
+    __tablename__ = "scheduled_broadcasts"
+    __table_args__ = (
+        Index("ix_scheduled_broadcasts_status_time", "status", "scheduled_for"),
+        Index("ix_scheduled_broadcasts_creator_time", "created_by_tg_id", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_by_tg_id = Column(BigInteger, ForeignKey("users.tg_id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(String(32), nullable=False, server_default=text("'scheduled'"), index=True)
+    send_to = Column(String(32), nullable=False, index=True)
+    cluster_name = Column(String, nullable=True)
+    text = Column(Text, nullable=False)
+    photo = Column(String, nullable=True)
+    keyboard_json = Column(JSONB, nullable=True)
+    scheduled_for = Column(DateTime(timezone=True), nullable=False, index=True)
+    workers = Column(Integer, nullable=False, server_default=text("5"))
+    messages_per_second = Column(Integer, nullable=False, server_default=text("35"))
+    stats_json = Column(JSONB, nullable=True)
+    error_text = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Gift(DictLikeMixin, Base):
     __tablename__ = "gifts"
 

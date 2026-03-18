@@ -11,6 +11,7 @@ from .notifications import *
 from .payments import *
 from .referrals import *
 from .servers import *
+from .scheduled_broadcasts import *
 from .settings_cache import settings_cache
 from .statistics import *
 from .tariffs import *

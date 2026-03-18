@@ -23,13 +23,28 @@ from api.v2.schemas.audit import (
 )
 from audit import drain_audit_redis_to_db, get_audit_funnel, get_audit_stats, list_audit_events
 from config import API_TOKEN, BOT_SERVICE
-from database import async_session_maker, save_blocked_user_ids
+from database import async_session_maker
 from core.bootstrap import MANAGEMENT_CONFIG
 from core.executor import run_io
 from core.settings.management_config import update_management_config
-from database.models import Key, Server, User
-from handlers.admin.sender.sender_service import BroadcastService
-from handlers.admin.sender.sender_utils import get_recipients, parse_message_buttons
+from database.models import Key, ScheduledBroadcast, Server, User
+from database.scheduled_broadcasts import (
+    cancel_scheduled_broadcast,
+    create_scheduled_broadcast,
+    get_scheduled_broadcast,
+    list_scheduled_broadcasts,
+    mark_scheduled_broadcast_failed,
+    mark_scheduled_broadcast_sent,
+    start_scheduled_broadcast,
+    update_scheduled_broadcast,
+)
+from handlers.admin.sender.scheduled_service import (
+    ensure_utc_datetime,
+    execute_broadcast_payload,
+    execute_scheduled_broadcast,
+    prepare_broadcast_payload,
+    scheduled_broadcast_to_dict,
+)
 from logger import logger
 from utils.backup import backup_database
 
@@ -53,6 +68,20 @@ class BroadcastLaunchPayload(BaseModel):
     messages_per_second: int = 35
 
 
+class ScheduledBroadcastCreatePayload(BroadcastLaunchPayload):
+    scheduled_for: datetime
+
+
+class ScheduledBroadcastUpdatePayload(BaseModel):
+    send_to: Literal["all", "subscribed", "unsubscribed", "untrial", "trial", "hotleads", "cluster"] | None = None
+    text: str | None = None
+    photo: str | None = None
+    cluster_name: str | None = None
+    workers: int | None = None
+    messages_per_second: int | None = None
+    scheduled_for: datetime | None = None
+
+
 _broadcast_bot: Bot | None = None
 
 
@@ -62,6 +91,39 @@ def _get_broadcast_bot() -> Bot:
     if _broadcast_bot is None:
         _broadcast_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     return _broadcast_bot
+
+
+def _require_future_schedule(value: datetime) -> datetime:
+    scheduled_for = ensure_utc_datetime(value)
+    if scheduled_for <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="scheduled_for must be in the future")
+    return scheduled_for
+
+
+def _resolve_update_payload(
+    payload: ScheduledBroadcastUpdatePayload,
+    current: ScheduledBroadcast,
+) -> dict:
+    fields = payload.model_fields_set
+    send_to = payload.send_to if "send_to" in fields else current.send_to
+    text = payload.text if "text" in fields else current.text
+    photo = payload.photo if "photo" in fields else current.photo
+    cluster_name = payload.cluster_name if "cluster_name" in fields else current.cluster_name
+    workers = payload.workers if "workers" in fields else current.workers
+    messages_per_second = (
+        payload.messages_per_second if "messages_per_second" in fields else current.messages_per_second
+    )
+    prepared = prepare_broadcast_payload(
+        send_to=send_to,
+        text=text,
+        photo=photo,
+        cluster_name=cluster_name,
+        workers=workers,
+        messages_per_second=messages_per_second,
+    )
+    if "scheduled_for" in fields:
+        prepared["scheduled_for"] = _require_future_schedule(payload.scheduled_for)
+    return prepared
 
 
 async def _restart_bot() -> None:
@@ -300,36 +362,125 @@ async def launch_broadcast(
     identity=Depends(verify_identity_admin_short),
 ):
     """Запуск рассылки по выбранной аудитории. Сессия БД не держится на время рассылки."""
-    text_raw = (payload.text or "").strip()
-    if not text_raw:
-        raise HTTPException(status_code=400, detail="Broadcast text is required")
-    if payload.send_to == "cluster" and not (payload.cluster_name or "").strip():
-        raise HTTPException(status_code=400, detail="Cluster name is required for cluster broadcast")
-    clean_text, keyboard = parse_message_buttons(text_raw)
-    max_len = 1024 if payload.photo else 4096
-    if len(clean_text) > max_len:
-        raise HTTPException(status_code=400, detail=f"Message too long. Max {max_len} symbols")
-    async with async_session_maker() as session:
-        tg_ids, total_users = await get_recipients(session, payload.send_to, (payload.cluster_name or None))
-        await session.commit()
-    if not tg_ids:
-        return {"success": False, "message": "No recipients found", "stats": {"total_messages": 0}}
-    bot = _get_broadcast_bot()
-    messages = [{"tg_id": tg_id, "text": clean_text, "photo": payload.photo, "keyboard": keyboard} for tg_id in tg_ids]
-    workers = max(1, min(int(payload.workers or 5), 30))
-    rate = max(1, min(int(payload.messages_per_second or 35), 60))
-    broadcast_service = BroadcastService(bot=bot, session=None, messages_per_second=rate)
-    stats = await broadcast_service.broadcast(messages, workers=workers)
-    blocked_ids = stats.get("blocked_user_ids") or []
-    if blocked_ids:
-        async with async_session_maker() as session:
-            try:
-                await save_blocked_user_ids(session, blocked_ids)
-            except Exception:
-                pass
-    return {
-        "success": True,
-        "message": "Broadcast completed",
-        "recipients": total_users,
-        "stats": stats,
-    }
+    try:
+        prepared = prepare_broadcast_payload(
+            send_to=payload.send_to,
+            text=payload.text,
+            photo=payload.photo,
+            cluster_name=payload.cluster_name,
+            workers=payload.workers,
+            messages_per_second=payload.messages_per_second,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await execute_broadcast_payload(prepared, bot=_get_broadcast_bot())
+
+
+@router.post("/broadcast/scheduled")
+async def create_broadcast_schedule(
+    payload: ScheduledBroadcastCreatePayload,
+    identity=Depends(verify_identity_admin_short),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        prepared = prepare_broadcast_payload(
+            send_to=payload.send_to,
+            text=payload.text,
+            photo=payload.photo,
+            cluster_name=payload.cluster_name,
+            workers=payload.workers,
+            messages_per_second=payload.messages_per_second,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    broadcast = await create_scheduled_broadcast(
+        session,
+        created_by_tg_id=getattr(identity, "tg_id", None),
+        send_to=prepared["send_to"],
+        cluster_name=prepared["cluster_name"],
+        text=prepared["text"],
+        photo=prepared["photo"],
+        keyboard_json=prepared["keyboard_json"],
+        scheduled_for=_require_future_schedule(payload.scheduled_for),
+        workers=prepared["workers"],
+        messages_per_second=prepared["messages_per_second"],
+    )
+    return {"success": True, "item": scheduled_broadcast_to_dict(broadcast)}
+
+
+@router.get("/broadcast/scheduled")
+async def list_broadcast_schedules(
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+    status: str | None = Query(None, description="Фильтр статусов через запятую"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    statuses = [item.strip() for item in (status or "").split(",") if item.strip()] or None
+    items = await list_scheduled_broadcasts(session, statuses=statuses, limit=limit, offset=offset)
+    return {"items": [scheduled_broadcast_to_dict(item) for item in items], "limit": limit, "offset": offset}
+
+
+@router.get("/broadcast/scheduled/{broadcast_id}")
+async def get_broadcast_schedule(
+    broadcast_id: str,
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    item = await get_scheduled_broadcast(session, broadcast_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Scheduled broadcast not found")
+    return {"item": scheduled_broadcast_to_dict(item)}
+
+
+@router.patch("/broadcast/scheduled/{broadcast_id}")
+async def update_broadcast_schedule(
+    broadcast_id: str,
+    payload: ScheduledBroadcastUpdatePayload,
+    identity=Depends(verify_identity_admin_short),
+    session: AsyncSession = Depends(get_session),
+):
+    current = await get_scheduled_broadcast(session, broadcast_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Scheduled broadcast not found")
+    try:
+        values = _resolve_update_payload(payload, current)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated = await update_scheduled_broadcast(session, broadcast_id, **values)
+    if updated is None:
+        raise HTTPException(status_code=409, detail="Scheduled broadcast can no longer be edited")
+    return {"success": True, "item": scheduled_broadcast_to_dict(updated)}
+
+
+@router.post("/broadcast/scheduled/{broadcast_id}/cancel")
+async def cancel_broadcast_schedule(
+    broadcast_id: str,
+    identity=Depends(verify_identity_admin_short),
+    session: AsyncSession = Depends(get_session),
+):
+    item = await cancel_scheduled_broadcast(session, broadcast_id)
+    if item is None:
+        raise HTTPException(status_code=409, detail="Scheduled broadcast can no longer be cancelled")
+    return {"success": True, "item": scheduled_broadcast_to_dict(item)}
+
+
+@router.post("/broadcast/scheduled/{broadcast_id}/send-now")
+async def send_broadcast_schedule_now(
+    broadcast_id: str,
+    identity=Depends(verify_identity_admin_short),
+    session: AsyncSession = Depends(get_session),
+):
+    item = await start_scheduled_broadcast(session, broadcast_id)
+    if item is None:
+        raise HTTPException(status_code=409, detail="Scheduled broadcast can no longer be sent now")
+    try:
+        result = await execute_scheduled_broadcast(item, bot=_get_broadcast_bot())
+    except Exception as exc:
+        await mark_scheduled_broadcast_failed(session, broadcast_id, str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if result.get("success"):
+        item = await mark_scheduled_broadcast_sent(session, broadcast_id, result)
+    else:
+        item = await mark_scheduled_broadcast_failed(session, broadcast_id, result.get("message", "Broadcast failed"))
+    return {"success": bool(result.get("success")), "item": scheduled_broadcast_to_dict(item), "result": result}

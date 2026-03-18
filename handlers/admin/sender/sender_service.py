@@ -224,17 +224,22 @@ class BroadcastService:
         total: int,
         on_progress: Callable[[int, int, int, int], Awaitable[None]],
         interval: float,
+        progress_every: int,
     ) -> None:
         """Периодически вызывает on_progress(completed, total, sent, failed)."""
+        last_reported = 0
         while self.is_running:
             await asyncio.sleep(interval)
             if not self.is_running:
                 break
             completed = len(self.results)
+            if completed - last_reported < progress_every:
+                continue
             sent = self.total_sent
             failed = completed - sent
             try:
                 await on_progress(completed, total, sent, failed)
+                last_reported = completed
             except Exception as e:
                 logger.debug(f"[Broadcast] Ошибка обновления прогресса: {e}")
 
@@ -244,6 +249,7 @@ class BroadcastService:
         workers: int = 20,
         on_progress: Callable[[int, int, int, int], Awaitable[None]] | None = None,
         progress_interval: float = 2.0,
+        progress_every: int = 50,
     ) -> dict:
         self.is_running = True
         self.start_time = time.time()
@@ -266,7 +272,7 @@ class BroadcastService:
         progress_task = None
         if on_progress and total > 0:
             progress_task = asyncio.create_task(
-                self._progress_loop(total, on_progress, progress_interval),
+                self._progress_loop(total, on_progress, progress_interval, max(1, progress_every)),
             )
 
         worker_tasks = [asyncio.create_task(self._worker()) for _ in range(workers)]
