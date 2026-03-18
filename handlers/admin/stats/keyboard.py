@@ -4,10 +4,33 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_btn
 
 
-def build_audit_refresh_kb() -> InlineKeyboardMarkup:
-    """Клавиатура под сообщением аудита: кнопка «Обновить»."""
+def build_audit_refresh_kb(source: str = "db") -> InlineKeyboardMarkup:
+    """Клавиатура под сообщением аудита: выбор источника данных."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Обновить", callback_data=AdminPanelCallback(action="audit_refresh").pack())
+    redis_text = "• Redis raw" if source == "redis" else "Redis raw"
+    db_text = "• БД вчера" if source == "db" else "БД вчера"
+    reset_text = "Сбросить Redis" if source == "redis" else "Сбросить БД"
+    builder.button(text=redis_text, callback_data=AdminPanelCallback(action="audit_refresh_redis").pack())
+    builder.button(text=db_text, callback_data=AdminPanelCallback(action="audit_refresh_db").pack())
+    builder.button(text=reset_text, callback_data=AdminPanelCallback(action=f"audit_reset_ask_{source}").pack())
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def build_audit_source_kb() -> InlineKeyboardMarkup:
+    """Клавиатура выбора источника аудита при первом открытии."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Redis raw", callback_data=AdminPanelCallback(action="audit_refresh_redis").pack())
+    builder.button(text="БД вчера", callback_data=AdminPanelCallback(action="audit_refresh_db").pack())
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def build_audit_reset_confirm_kb(source: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Да, сбросить", callback_data=AdminPanelCallback(action=f"audit_reset_do_{source}").pack())
+    builder.button(text="Отмена", callback_data=AdminPanelCallback(action=f"audit_refresh_{source}").pack())
+    builder.adjust(1)
     return builder.as_markup()
 
 

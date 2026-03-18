@@ -29,6 +29,8 @@ key_email                 │ 45       │ email по client_id
 payment_pending           │ 3600     │ Ожидающий платёж (1 ч)
 audit_history             │ 300      │ История действий клиента (админка)
 audit:flush               │ —        │ Буфер аудита (список для выгрузки в БД в 00:00)
+audit:flush:processing    │ —        │ Батч аудита, перенесённый в processing до commit в БД
+audit:flush:drain_lock    │ 900      │ Лок nightly/manual drain аудита
 audit:user:tg:*           │ 25 ч     │ События по tg_id для чтения до выгрузки
 audit:user:identity:*     │ 25 ч     │ События по identity для чтения до выгрузки
 webhook_abuse_fail        │ 60       │ Счётчик неудачных вебхуков по IP

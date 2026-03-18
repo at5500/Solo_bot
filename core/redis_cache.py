@@ -216,3 +216,42 @@ async def cache_lpop_batch(key: str, count: int) -> list[Any]:
         return out
     except Exception:
         return out
+
+
+async def cache_lmove_batch(source: str, destination: str, count: int) -> list[Any]:
+    """Атомарно переносит до count элементов из головы source в хвост destination."""
+    if count <= 0:
+        return []
+    client = await _get_redis()
+    if client is None:
+        return []
+    try:
+        raw_list = await client.eval(
+            """
+            local moved = {}
+            local count = tonumber(ARGV[1])
+            for i = 1, count do
+                local item = redis.call('LPOP', KEYS[1])
+                if not item then
+                    break
+                end
+                redis.call('RPUSH', KEYS[2], item)
+                table.insert(moved, item)
+            end
+            return moved
+            """,
+            2,
+            source,
+            destination,
+            int(count),
+        )
+        out = []
+        for raw in raw_list or []:
+            try:
+                out.append(json.loads(raw))
+            except Exception:
+                pass
+        return out
+    except Exception as exc:
+        logger.warning(f"[Redis] lmove_batch({source}->{destination}) не удался: {exc}")
+        return []

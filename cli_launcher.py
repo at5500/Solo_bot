@@ -303,7 +303,7 @@ def install_rsync_if_needed():
         os.system("sudo apt update && sudo apt install -y rsync")
 
 
-def clean_project_dir_safe(update_buttons=False, update_img=False):
+def clean_project_dir_safe(update_buttons=False, update_img=False, update_redis_cache=False):
     console.print("[yellow]Очистка проекта перед обновлением...[/yellow]")
 
     preserved_paths = set()
@@ -327,6 +327,9 @@ def clean_project_dir_safe(update_buttons=False, update_img=False):
         for root, dirs, files in os.walk(os.path.join(PROJECT_DIR, "img")):
             for name in dirs + files:
                 preserved_paths.add(os.path.join(root, name))
+
+    if not update_redis_cache:
+        preserved_paths.add(os.path.join(PROJECT_DIR, "core", "redis_cache.py"))
 
     for root, dirs, files in os.walk(PROJECT_DIR, topdown=False):
         for file in files:
@@ -474,6 +477,7 @@ def update_from_beta():
 
     update_buttons = safe_confirm("[yellow]Обновлять файл buttons.py?[/yellow]", default=False)
     update_img = safe_confirm("[yellow]Обновлять папку img?[/yellow]", default=False)
+    update_redis_cache = safe_confirm("[yellow]Обновлять файл core/redis_cache.py?[/yellow]", default=False)
 
     backup_project()
     install_git_if_needed()
@@ -488,13 +492,19 @@ def update_from_beta():
         return
 
     subprocess.run(["sudo", "rm", "-rf", os.path.join(PROJECT_DIR, "venv")])
-    clean_project_dir_safe(update_buttons=update_buttons, update_img=update_img)
+    clean_project_dir_safe(
+        update_buttons=update_buttons,
+        update_img=update_img,
+        update_redis_cache=update_redis_cache,
+    )
 
     exclude_options = ""
     if not update_img:
         exclude_options += "--exclude=img "
     if not update_buttons:
         exclude_options += "--exclude=handlers/buttons.py "
+    if not update_redis_cache:
+        exclude_options += "--exclude=core/redis_cache.py "
     exclude_options += "--exclude=modules "
 
     rsync_cmd = ["rsync", "-a"] + [x for x in exclude_options.split() if x] + [f"{TEMP_DIR}/", f"{PROJECT_DIR}/"]
@@ -520,7 +530,7 @@ def update_from_beta():
     console.print("[green]Обновление с ветки dev завершено.[/green]")
 
 
-def _do_update_to_tag(tag_name: str, update_buttons: bool, update_img: bool) -> None:
+def _do_update_to_tag(tag_name: str, update_buttons: bool, update_img: bool, update_redis_cache: bool) -> None:
     """Общая логика обновления до указанного тега (релиз или произвольный тег)."""
     subprocess.run(["rm", "-rf", TEMP_DIR])
     subprocess.run(
@@ -530,13 +540,19 @@ def _do_update_to_tag(tag_name: str, update_buttons: bool, update_img: bool) -> 
 
     console.print("[red]Начинается перезапись файлов бота![/red]")
     subprocess.run(["sudo", "rm", "-rf", os.path.join(PROJECT_DIR, "venv")])
-    clean_project_dir_safe(update_buttons=update_buttons, update_img=update_img)
+    clean_project_dir_safe(
+        update_buttons=update_buttons,
+        update_img=update_img,
+        update_redis_cache=update_redis_cache,
+    )
 
     exclude_options = ""
     if not update_img:
         exclude_options += "--exclude=img "
     if not update_buttons:
         exclude_options += "--exclude=handlers/buttons.py "
+    if not update_redis_cache:
+        exclude_options += "--exclude=core/redis_cache.py "
     exclude_options += "--exclude=modules "
 
     rsync_cmd = ["rsync", "-a"] + exclude_options.split() + [f"{TEMP_DIR}/", f"{PROJECT_DIR}/"]
@@ -567,12 +583,13 @@ def update_from_release():
         return
 
     console.print("[red]ВНИМАНИЕ! Папка бота будет полностью перезаписана![/red]")
-    console.print("[red]  Исключения: папка img и файл handlers/buttons.py[/red]")
+    console.print("[red]  Исключения: папка img, файл handlers/buttons.py и файл core/redis_cache.py[/red]")
     if not safe_confirm("[red]Вы точно хотите продолжить?[/red]"):
         return
 
     update_buttons = safe_confirm("[yellow]Обновлять файл buttons.py?[/yellow]", default=False)
     update_img = safe_confirm("[yellow]Обновлять папку img?[/yellow]", default=False)
+    update_redis_cache = safe_confirm("[yellow]Обновлять файл core/redis_cache.py?[/yellow]", default=False)
 
     backup_project()
     install_git_if_needed()
@@ -618,7 +635,7 @@ def update_from_release():
             return
 
         console.print(f"[cyan]Клонируем {tag_name} во временную папку...[/cyan]")
-        _do_update_to_tag(tag_name, update_buttons, update_img)
+        _do_update_to_tag(tag_name, update_buttons, update_img, update_redis_cache)
 
     except Exception as e:
         console.print(f"[red]❌ Ошибка при обновлении: {e}[/red]")

@@ -165,9 +165,12 @@ async def update_payment_status(
         payment.status = new_status
         if payment_id is not None:
             payment.payment_id = payment_id
+        base = payment.metadata_ or {}
+        if new_status == "success" and "status_changed_at" not in base:
+            base["status_changed_at"] = datetime.utcnow().replace(tzinfo=None).isoformat()
         if metadata_patch:
-            base = payment.metadata_ or {}
             base.update(metadata_patch)
+        if base:
             payment.metadata_ = base
 
         await session.commit()

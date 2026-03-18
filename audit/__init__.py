@@ -4,35 +4,36 @@ import json
 import uuid
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Iterable
 
 from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject, User
 from fastapi import Request
-from sqlalchemy import and_, delete, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from database.audit import (
+    create_audit_reset_marker_db,
+    delete_old_audit_events_db,
+    ensure_audit_table,
+    fetch_existing_audit_request_ids_db,
+    fetch_latest_audit_reset_db,
+    fetch_audit_events_db,
+    fetch_audit_events_db_window,
+    fetch_audit_rows_db,
+    fetch_successful_payment_rows_db,
+)
 from database.models import AuditEvent
 from logger import logger
 
-def _get_bot_webhook_path() -> str:
-    """Путь вебхука бота из конфига (для исключения из шага «успешная оплата»)."""
-    try:
-        from config import WEBHOOK_PATH
-        return ((WEBHOOK_PATH or "").strip().lower()) or ""
-    except ImportError:
-        return ""
-
-
-def _is_bot_webhook_path(path: str) -> bool:
-    """True только если path — именно вебхук бота (точное совпадение сегмента пути), не касса."""
-    bot_path = _get_bot_webhook_path()
-    if not bot_path:
-        return False
-    p = (path or "").strip().lower()
-    path_segment = p.split(" ", 1)[1] if " " in p else p
-    return path_segment == bot_path or path_segment.rstrip("/") == bot_path.rstrip("/")
+from .rules import (
+    AUDIT_STEP_LABELS,
+    DEFAULT_FUNNEL_STEPS,
+    _funnel_step_counts,
+    _is_ignored_analytics_event,
+    _normalize_path_to_step,
+    _normalize_path_to_steps,
+)
 
 try:
     from core.cache_config import (
@@ -51,10 +52,11 @@ except ImportError:
     AUDIT_REDIS_USER_TTL_SEC = 25 * 3600
     AUDIT_REDIS_DRAIN_BATCH = 1000
 
+
 _MAX_TEXT_LEN = 160
-_AUDIT_TABLE_READY = False
-
-
+_AUDIT_REDIS_PROCESSING_KEY = f"{AUDIT_REDIS_FLUSH_KEY}:processing"
+_AUDIT_REDIS_DRAIN_LOCK_KEY = f"{AUDIT_REDIS_FLUSH_KEY}:drain_lock"
+_AUDIT_REDIS_DRAIN_LOCK_TTL_SEC = 15 * 60
 @dataclass
 class AuditContext:
     request_id: str
@@ -100,6 +102,36 @@ def _jsonable(value: Any) -> Any:
 
 def _serialize(payload: dict[str, Any]) -> str:
     return json.dumps(_jsonable(payload), ensure_ascii=False, sort_keys=True)
+
+
+async def get_audit_db_reset_at(session: AsyncSession) -> datetime | None:
+    reset_at = await fetch_latest_audit_reset_db(session, source="db")
+    if reset_at is None:
+        return None
+    if reset_at.tzinfo is None:
+        return reset_at.replace(tzinfo=timezone.utc)
+    return reset_at.astimezone(timezone.utc)
+
+
+async def set_audit_db_reset_at(session: AsyncSession, at: datetime | None = None) -> datetime:
+    created = at.astimezone(timezone.utc).replace(tzinfo=None) if at is not None and at.tzinfo else (at or datetime.utcnow())
+    await create_audit_reset_marker_db(session, source="db", created_at=created)
+    await session.commit()
+    return created.replace(tzinfo=timezone.utc)
+
+
+async def clear_audit_redis_buffers() -> int:
+    from core.redis_cache import cache_delete_pattern
+
+    patterns = (
+        AUDIT_REDIS_FLUSH_KEY,
+        _AUDIT_REDIS_PROCESSING_KEY,
+        _AUDIT_REDIS_DRAIN_LOCK_KEY,
+    )
+    deleted = 0
+    for pattern in patterns:
+        deleted += await cache_delete_pattern(pattern)
+    return deleted
 
 
 def _message_text(event: TelegramObject) -> str | None:
@@ -346,7 +378,6 @@ def _telegram_access_payload(
     result: str = "success",
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Собирает payload для записи telegram_access (для фоновой задачи или синхронной)."""
     ctx = get_telegram_context(audit_context)
     user = _event_user(event)
     path = describe_telegram_event(event)
@@ -375,7 +406,6 @@ async def record_telegram_access_event(
     result: str = "success",
     reason: str | None = None,
 ) -> AuditEvent | None:
-    """Пишет в БД одно событие «обработчик Telegram вызван» для полного следа пользователя."""
     payload = _telegram_access_payload(audit_context, event, result=result, reason=reason)
     return await safe_record_audit_event(
         session,
@@ -404,7 +434,7 @@ def _audit_record_for_redis(
     request_id: str | None = None,
     metadata_: dict | None = None,
 ) -> dict[str, Any]:
-    """Формирует запись для буфера Redis (с created_at в ISO)."""
+    effective_request_id = _trim(request_id, 64) if request_id else new_request_id()
     return {
         "event_type": event_type,
         "channel": channel,
@@ -415,10 +445,29 @@ def _audit_record_for_redis(
         "entity_id": _trim(str(entity_id), 255) if entity_id is not None else None,
         "result": _trim(result, 32) or "success",
         "reason": _trim(reason, 1000) if reason else None,
-        "request_id": _trim(request_id, 64) if request_id else None,
+        "request_id": effective_request_id,
         "metadata_": _jsonable(metadata_) if metadata_ else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+async def _push_audit_record_to_redis(record: dict[str, Any]) -> None:
+    from core.redis_cache import cache_expire, cache_rpush
+
+    n = await cache_rpush(AUDIT_REDIS_FLUSH_KEY, record)
+    if n == 0:
+        raise RuntimeError("Redis unavailable (cache_rpush returned 0)")
+
+    actor_tg_id = record.get("actor_tg_id")
+    actor_identity_id = record.get("actor_identity_id")
+    if actor_tg_id is not None:
+        user_key = f"{AUDIT_REDIS_USER_PREFIX}{actor_tg_id}"
+        await cache_rpush(user_key, record)
+        await cache_expire(user_key, AUDIT_REDIS_USER_TTL_SEC)
+    if actor_identity_id:
+        identity_key = f"{AUDIT_REDIS_IDENTITY_PREFIX}{actor_identity_id}"
+        await cache_rpush(identity_key, record)
+        await cache_expire(identity_key, AUDIT_REDIS_USER_TTL_SEC)
 
 
 async def record_audit_event_to_redis(
@@ -430,9 +479,6 @@ async def record_audit_event_to_redis(
     result: str = "success",
     reason: str | None = None,
 ) -> None:
-    """Пишет событие telegram_access в буфер Redis (списки для выгрузки в БД и для чтения по пользователю)."""
-    from core.redis_cache import cache_expire, cache_rpush
-
     record = _audit_record_for_redis(
         path_or_handler=path_or_handler,
         actor_identity_id=actor_identity_id,
@@ -441,17 +487,7 @@ async def record_audit_event_to_redis(
         reason=reason,
         request_id=request_id,
     )
-    n = await cache_rpush(AUDIT_REDIS_FLUSH_KEY, record)
-    if n == 0:
-        raise RuntimeError("Redis unavailable (cache_rpush returned 0)")
-    if actor_tg_id is not None:
-        user_key = f"{AUDIT_REDIS_USER_PREFIX}{actor_tg_id}"
-        await cache_rpush(user_key, record)
-        await cache_expire(user_key, AUDIT_REDIS_USER_TTL_SEC)
-    if actor_identity_id:
-        identity_key = f"{AUDIT_REDIS_IDENTITY_PREFIX}{actor_identity_id}"
-        await cache_rpush(identity_key, record)
-        await cache_expire(identity_key, AUDIT_REDIS_USER_TTL_SEC)
+    await _push_audit_record_to_redis(record)
 
 
 async def record_api_access_event_to_redis(
@@ -463,9 +499,6 @@ async def record_api_access_event_to_redis(
     result: str = "success",
     reason: str | None = None,
 ) -> None:
-    """Пишет событие api_access в буфер Redis (как telegram_access)."""
-    from core.redis_cache import cache_expire, cache_rpush
-
     record = _audit_record_for_redis(
         event_type="api_access",
         channel="api",
@@ -476,15 +509,7 @@ async def record_api_access_event_to_redis(
         reason=reason,
         request_id=request_id,
     )
-    await cache_rpush(AUDIT_REDIS_FLUSH_KEY, record)
-    if actor_tg_id is not None:
-        user_key = f"{AUDIT_REDIS_USER_PREFIX}{actor_tg_id}"
-        await cache_rpush(user_key, record)
-        await cache_expire(user_key, AUDIT_REDIS_USER_TTL_SEC)
-    if actor_identity_id:
-        identity_key = f"{AUDIT_REDIS_IDENTITY_PREFIX}{actor_identity_id}"
-        await cache_rpush(identity_key, record)
-        await cache_expire(identity_key, AUDIT_REDIS_USER_TTL_SEC)
+    await _push_audit_record_to_redis(record)
 
 
 async def record_api_access_event_background(
@@ -495,8 +520,6 @@ async def record_api_access_event_background(
     reason: str | None = None,
     status_code: int = 200,
 ) -> None:
-    """Пишет одно событие api_access в Redis-буфер или в БД в фоне (после обработки запроса).
-    Вызывается из middleware; actor берётся из request.state (set_api_actor в эндпоинтах)."""
     context = ensure_api_context(request)
     path_or_handler = f"{request.method} {request.url.path}"
     if request.url.query:
@@ -548,8 +571,6 @@ async def record_telegram_access_event_background(
     result: str = "success",
     reason: str | None = None,
 ) -> None:
-    """Пишет событие telegram_access: в Redis-буфер (если включён), иначе в БД.
-    При сбое записи в Redis — fallback в БД, чтобы события не терялись."""
     if AUDIT_REDIS_BUFFER_ENABLED:
         try:
             await record_audit_event_to_redis(
@@ -562,9 +583,7 @@ async def record_telegram_access_event_background(
             )
             return
         except Exception as exc:
-            logger.warning(
-                f"[Audit] Запись в Redis-буфер не удалась, пишем в БД: {exc}"
-            )
+            logger.warning(f"[Audit] Запись в Redis-буфер не удалась, пишем в БД: {exc}")
     try:
         async with session_factory() as session:
             await ensure_audit_table(session)
@@ -651,7 +670,6 @@ async def safe_record_telegram_event(
 
 
 def _redis_record_to_event_like(rec: dict[str, Any]) -> SimpleNamespace:
-    """Превращает запись из Redis в объект с теми же атрибутами, что и AuditEvent."""
     created = rec.get("created_at")
     if isinstance(created, str):
         try:
@@ -684,7 +702,6 @@ async def _list_audit_events_from_redis(
     event_types: list[str] | None,
     max_events: int = 3000,
 ) -> list[SimpleNamespace]:
-    """Читает события пользователя из Redis-буфера (для слияния с БД)."""
     if not AUDIT_REDIS_BUFFER_ENABLED:
         return []
     from core.redis_cache import cache_lrange
@@ -716,7 +733,6 @@ async def _list_audit_events_from_redis(
 
 
 async def list_audit_events_from_redis_buffer(max_events: int = 5000) -> list[SimpleNamespace]:
-    """Читает последние события из глобального буфера Redis (audit:flush). Не удаляет записи."""
     if not AUDIT_REDIS_BUFFER_ENABLED:
         return []
     from core.redis_cache import cache_lrange
@@ -734,26 +750,26 @@ async def list_audit_events_from_redis_buffer(max_events: int = 5000) -> list[Si
 def _aggregate_audit_rows(
     rows: list[tuple[Any, Any, Any, Any]],
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], set[tuple[str, int | str]]]:
-    """Собирает by_step, by_path_list, all_actors из строк (path, result, actor_tg_id, actor_identity_id)."""
     by_step: dict[str, dict[str, Any]] = {}
-    total_events = 0
     all_actors: set[tuple[str, int | str]] = set()
 
-    for path, res, tg_id, identity_id in rows:
-        total_events += 1
-        step = _normalize_path_to_step(path or "")
-        actor = (identity_id or "", tg_id or 0)
-        if identity_id or tg_id:
+    for row in rows:
+        path, res, tg_id, identity_id = row[0], row[1], row[2], row[3]
+        if _is_ignored_analytics_event(path or ""):
+            continue
+        actor = _audit_actor_key(identity_id, tg_id)
+        if actor is not None:
             all_actors.add(actor)
-        if step not in by_step:
-            by_step[step] = {"total": 0, "success": 0, "fail": 0, "actors": set()}
-        by_step[step]["total"] += 1
-        if res == "success":
-            by_step[step]["success"] += 1
-        else:
-            by_step[step]["fail"] += 1
-        if identity_id or tg_id:
-            by_step[step]["actors"].add(actor)
+        for step in _normalize_path_to_steps(path or ""):
+            if step not in by_step:
+                by_step[step] = {"total": 0, "success": 0, "fail": 0, "actors": set()}
+            by_step[step]["total"] += 1
+            if res == "success":
+                by_step[step]["success"] += 1
+            else:
+                by_step[step]["fail"] += 1
+            if actor is not None:
+                by_step[step]["actors"].add(actor)
 
     by_path_list = []
     for step, data in sorted(by_step.items(), key=lambda x: -x[1]["total"]):
@@ -761,16 +777,61 @@ def _aggregate_audit_rows(
         fail = data["fail"]
         unique = len(data["actors"])
         fail_rate = round(100.0 * fail / total, 1) if total else 0
-        by_path_list.append({
-            "step": step,
-            "label": AUDIT_STEP_LABELS.get(step, step),
-            "total": total,
-            "success": data["success"],
-            "fail": fail,
-            "unique_users": unique,
-            "fail_rate_pct": fail_rate,
-        })
+        by_path_list.append(
+            {
+                "step": step,
+                "label": AUDIT_STEP_LABELS.get(step, step),
+                "total": total,
+                "success": data["success"],
+                "fail": fail,
+                "unique_users": unique,
+                "fail_rate_pct": fail_rate,
+            }
+        )
     return by_step, by_path_list, all_actors
+
+
+def _audit_actor_key(identity_id: Any, tg_id: Any) -> tuple[str, str | int] | None:
+    if tg_id not in (None, 0, "0", ""):
+        try:
+            return ("tg", int(tg_id))
+        except (TypeError, ValueError):
+            return ("tg", str(tg_id))
+    if identity_id not in (None, ""):
+        return ("identity", str(identity_id))
+    return None
+
+
+def _event_like_dedupe_key(event: AuditEvent | SimpleNamespace) -> tuple[Any, ...]:
+    request_id = getattr(event, "request_id", None)
+    event_type = getattr(event, "event_type", None)
+    path = getattr(event, "path_or_handler", None)
+    result = getattr(event, "result", None)
+    if request_id:
+        return ("request", request_id, event_type, path, result)
+    return (
+        "raw",
+        event_type,
+        getattr(event, "channel", None),
+        path,
+        getattr(event, "actor_tg_id", None),
+        getattr(event, "actor_identity_id", None),
+        result,
+        getattr(event, "reason", None),
+        str(getattr(event, "created_at", None)),
+    )
+
+
+def _dedupe_event_like(events: list[AuditEvent | SimpleNamespace]) -> list[AuditEvent | SimpleNamespace]:
+    seen: set[tuple[Any, ...]] = set()
+    unique: list[AuditEvent | SimpleNamespace] = []
+    for event in events:
+        key = _event_like_dedupe_key(event)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(event)
+    return unique
 
 
 async def list_audit_events(
@@ -784,70 +845,36 @@ async def list_audit_events(
     limit: int = 100,
     offset: int = 0,
 ) -> list[AuditEvent | SimpleNamespace]:
-    """Список событий аудита. При включённом Redis-буфере объединяет данные из БД и Redis."""
-    await ensure_audit_table(session)
     event_types_list = sorted(event_types) if event_types else None
 
     if not AUDIT_REDIS_BUFFER_ENABLED:
-        stmt = select(AuditEvent)
-        actor_filters = []
-        if identity_id:
-            actor_filters.append(AuditEvent.actor_identity_id == identity_id)
-            actor_filters.append(and_(AuditEvent.entity_type == "identity", AuditEvent.entity_id == identity_id))
-        if tg_id is not None:
-            tg_id_str = str(tg_id)
-            actor_filters.append(AuditEvent.actor_tg_id == tg_id)
-            actor_filters.append(and_(AuditEvent.entity_type == "user", AuditEvent.entity_id == tg_id_str))
-            actor_filters.append(and_(AuditEvent.entity_type == "telegram_user", AuditEvent.entity_id == tg_id_str))
-        if actor_filters:
-            stmt = stmt.where(or_(*actor_filters))
-        if channel:
-            stmt = stmt.where(AuditEvent.channel == channel)
-        if event_type:
-            stmt = stmt.where(AuditEvent.event_type == event_type)
-        if event_types_list:
-            stmt = stmt.where(AuditEvent.event_type.in_(event_types_list))
-        stmt = stmt.order_by(desc(AuditEvent.created_at), desc(AuditEvent.id)).limit(limit).offset(offset)
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
+        return await fetch_audit_events_db(
+            session,
+            identity_id=identity_id,
+            tg_id=tg_id,
+            channel=channel,
+            event_type=event_type,
+            event_types=event_types_list,
+            limit=limit,
+            offset=offset,
+        )
 
     redis_events = await _list_audit_events_from_redis(
         tg_id, identity_id, channel, event_types_list, max_events=3000
     )
     need = offset + limit + len(redis_events)
-    stmt = select(AuditEvent)
-    actor_filters = []
-    if identity_id:
-        actor_filters.append(AuditEvent.actor_identity_id == identity_id)
-        actor_filters.append(and_(AuditEvent.entity_type == "identity", AuditEvent.entity_id == identity_id))
-    if tg_id is not None:
-        tg_id_str = str(tg_id)
-        actor_filters.append(AuditEvent.actor_tg_id == tg_id)
-        actor_filters.append(and_(AuditEvent.entity_type == "user", AuditEvent.entity_id == tg_id_str))
-        actor_filters.append(and_(AuditEvent.entity_type == "telegram_user", AuditEvent.entity_id == tg_id_str))
-    if actor_filters:
-        stmt = stmt.where(or_(*actor_filters))
-    if channel:
-        stmt = stmt.where(AuditEvent.channel == channel)
-    if event_type:
-        stmt = stmt.where(AuditEvent.event_type == event_type)
-    if event_types_list:
-        stmt = stmt.where(AuditEvent.event_type.in_(event_types_list))
-    stmt = stmt.order_by(desc(AuditEvent.created_at), desc(AuditEvent.id)).limit(min(5000, need)).offset(0)
-    result = await session.execute(stmt)
-    db_events = list(result.scalars().all())
-    merged = redis_events + db_events
+    db_events = await fetch_audit_events_db_window(
+        session,
+        identity_id=identity_id,
+        tg_id=tg_id,
+        channel=channel,
+        event_type=event_type,
+        event_types=event_types_list,
+        limit=min(5000, need),
+    )
+    merged = _dedupe_event_like(redis_events + db_events)
     merged.sort(key=lambda e: (e.created_at, getattr(e, "id", 0)), reverse=True)
     return merged[offset : offset + limit]
-
-
-async def ensure_audit_table(session: AsyncSession) -> None:
-    global _AUDIT_TABLE_READY
-    if _AUDIT_TABLE_READY:
-        return
-    connection = await session.connection()
-    await connection.run_sync(AuditEvent.__table__.create, checkfirst=True)
-    _AUDIT_TABLE_READY = True
 
 
 async def delete_old_audit_events(
@@ -855,191 +882,7 @@ async def delete_old_audit_events(
     *,
     older_than_days: int = 90,
 ) -> int:
-    """Удаляет события старше N дней. Вызывать по крону/периодике при больших наплывах.
-    Возвращает количество удалённых строк."""
-    await ensure_audit_table(session)
-    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-    stmt = delete(AuditEvent).where(AuditEvent.created_at < threshold)
-    result = await session.execute(stmt)
-    return result.rowcount or 0
-
-
-AUDIT_STEP_LABELS: dict[str, str] = {
-    "start": "Старт",
-    "profile": "Профиль",
-    "view_keys": "Мои ключи",
-    "key_create": "Подписка оформлена",
-    "pay_start": "Начало оплаты (ссылка создана)",
-    "pay": "Успешная оплата (пополнение)",
-    "key_view": "Ключ (карточка)",
-    "connect": "Подписка подключена",
-    "renew": "Продление",
-    "addons": "Аддоны",
-    "referral": "Рефералы",
-    "coupons": "Купоны",
-    "register": "Регистрация (API)",
-    "login": "Вход (API)",
-    "api_other": "API прочее",
-    "admin": "Админ-панель",
-    "other": "Прочее",
-}
-
-
-DEFAULT_FUNNEL_STEPS = ("start", "profile", "view_keys", "key_create", "pay_start", "pay", "key_view", "connect")
-
-
-_CALLBACK_EXACT: dict[str, str] = {
-    "profile": "profile",
-    "view_keys": "view_keys",
-    "create_key": "key_create",
-    "buy": "key_create",
-    "pay": "pay_start",
-    "balance": "pay_start",
-}
-
-
-_CALLBACK_PREFIX: list[tuple[str, str]] = [
-    ("view_key|", "key_view"),
-    ("view_keys|", "view_keys"),
-    ("connect_device|", "connect"),
-    ("connect_router|", "connect"),
-    ("connect_tv|", "connect"),
-    ("connect_pc|", "connect"),
-    ("connect_ios|", "connect"),
-    ("connect_android|", "connect"),
-    ("show_qr|", "connect"),
-    ("continue_tv|", "connect"),
-    ("pay_currency", "pay_start"),
-    ("balance_history", "pay_start"),
-    ("cfg_user_confirm|", "key_create"),
-    ("choose_payment_provider|", "pay_start"),
-    ("cfg_renew", "renew"),
-    ("key_addons", "addons"),
-    ("extend_key", "coupons"),
-]
-
-
-_CALLBACK_CONTAINS: list[tuple[str, str]] = [
-    ("connect_", "connect"),
-    ("renew", "renew"),
-    ("addon", "addons"),
-    ("referral", "referral"),
-    ("invite", "referral"),
-    ("coupon", "coupons"),
-    ("users_audit", "admin"),
-    ("users_editor", "admin"),
-    ("search_user", "admin"),
-    ("admin_panel", "admin"),
-]
-
-_MESSAGE_START: set[str] = {"/start", "start"}
-
-_HANDLER_CONTAINS: list[tuple[str, str] | tuple[str, str, str]] = [
-    ("process_start", "start"),
-    ("start_entry", "start"),
-    ("show_start_menu", "start"),
-    ("process_callback_view_profile", "profile"),
-    ("process_callback_or_message_view_keys", "view_keys"),
-    ("key_view", "key_view", "key_create"),
-    ("key_create", "key_create"),
-    ("handle_key_creation", "key_create"),
-    ("confirm_create", "key_create"),
-    ("complete_key_renewal", "renew"),
-    ("handle_connect_device", "connect"),
-    ("process_connect_", "connect"),
-    ("process_callback_connect", "connect"),
-    ("process_continue_tv", "connect"),
-    ("show_qr_code", "connect"),
-    ("pay", "pay_start"),
-    ("balance", "pay_start"),
-    ("renew", "renew"),
-    ("addon", "addons"),
-    ("referral", "referral"),
-    ("refferal", "referral"),
-    ("coupon", "coupons"),
-    ("admin_panel", "admin"),
-    ("users_audit", "admin"),
-    ("users_editor", "admin"),
-    ("search_user", "admin"),
-    ("auth/register", "register"),
-    ("auth/login", "login"),
-    ("auth/send-login", "login"),
-    ("auth/login-by-code", "login"),
-    ("auth/login-telegram", "login"),
-]
-
-def _funnel_step_counts(path: str, result: str, step: str) -> bool:
-    """Решает, считать ли событие достижением шага воронки.
-    pay_start: любое успешное «начало оплаты» (меню, валюта, создание ссылки).
-    pay: вебхук с «webhook» в path, кроме пути вебхука бота из конфига (WEBHOOK_PATH).
-    key_create: только факт создания ключа (cfg_user_confirm или /keys/create).
-    connect: любое успешное подключение."""
-    if result != "success":
-        return False
-    p = (path or "").lower()
-    if step == "pay_start":
-        return True
-    if step == "pay":
-        if "webhook" not in p:
-            return False
-        if _is_bot_webhook_path(path or ""):
-            return False
-        return True
-    if step == "key_create":
-        return "cfg_user_confirm" in p or "/keys/create" in p
-    return True
-
-
-def _normalize_path_to_step(path: str) -> str:
-    """Сводит path_or_handler к шагу по правилам из маппингов.
-    Вебхук с «webhook» в path → pay, кроме пути вебхука бота из конфига (WEBHOOK_PATH)."""
-    if not path:
-        return "other"
-    p = path.lower().strip()
-    if "webhook" in p:
-        if _is_bot_webhook_path(path):
-            pass 
-        else:
-            return "pay"
-
-    if p.startswith("callback:"):
-        callback_data = p.split(":", 1)[-1] 
-        data = callback_data.split("|")[0]  
-        step = _CALLBACK_EXACT.get(data)
-        if step:
-            return step
-        for prefix, step in _CALLBACK_PREFIX:
-            if callback_data.startswith(prefix):
-                return step
-        for item in _CALLBACK_CONTAINS:
-            substr, step = item[0], item[1]
-            if substr in callback_data:
-                return step
-        return "other"
-
-    if p.startswith("message:"):
-        text = (p.split(":", 1)[-1] or "").strip()
-        return "start" if any(s in text for s in _MESSAGE_START) else "other"
-
-    if p.startswith("post ") or p.startswith("get "):
-        if "auth/register" in p:
-            return "register"
-        if "auth/" in p and "login" in p:
-            return "login"
-        if "payment-links" in p or ("payment" in p and "webhook" not in p):
-            return "pay_start"
-        return "api_other"
-
-    for item in _HANDLER_CONTAINS:
-        if len(item) == 3:
-            substr, step, exclude = item[0], item[1], item[2]
-            if substr in p and exclude not in p:
-                return step
-        else:
-            substr, step = item[0], item[1]
-            if substr in p:
-                return step
-    return "other"
+    return await delete_old_audit_events_db(session, older_than_days=older_than_days)
 
 
 async def get_audit_stats(
@@ -1049,32 +892,20 @@ async def get_audit_stats(
     date_to: datetime,
     max_events: int = 100_000,
 ) -> dict[str, Any]:
-    """Агрегаты по аудиту за период (только БД): по шагам объём, успехи/ошибки, уникальные пользователи.
-    Удобно для «какие пути хорошо отрабатывают, какие нет». Данные из Redis в расчёт не берутся."""
-    await ensure_audit_table(session)
     d_from = _naive_utc(date_from)
     d_to = _naive_utc(date_to)
-    stmt = (
-        select(
-            AuditEvent.path_or_handler,
-            AuditEvent.result,
-            AuditEvent.actor_tg_id,
-            AuditEvent.actor_identity_id,
-        )
-        .where(
-            AuditEvent.created_at >= d_from,
-            AuditEvent.created_at < d_to,
-        )
-        .limit(max_events)
-    )
-    result = await session.execute(stmt)
-    rows = result.all()
+    rows = await fetch_audit_rows_db(session, date_from=d_from, date_to=d_to, limit=max_events)
+    rows.extend(await fetch_successful_payment_rows_db(session, date_from=d_from, date_to=d_to, limit=max_events))
     by_step, by_path_list, all_actors = _aggregate_audit_rows(rows)
+    raw_total_events = sum(1 for row in rows if not _is_ignored_analytics_event(row[0] or ""))
+    analytics_total_events = sum(row["total"] for row in by_path_list)
     return {
         "summary": {
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "total_events": sum(d["total"] for d in by_step.values()),
+            "total_events": raw_total_events,
+            "raw_total_events": raw_total_events,
+            "analytics_total_events": analytics_total_events,
             "unique_users": len(all_actors),
         },
         "by_path": by_path_list,
@@ -1082,16 +913,48 @@ async def get_audit_stats(
 
 
 async def get_audit_stats_from_redis(max_events: int = 5000) -> dict[str, Any] | None:
-    """Агрегаты по аудиту из буфера Redis (без БД). Возвращает None, если буфер выключен."""
     if not AUDIT_REDIS_BUFFER_ENABLED:
         return None
     events = await list_audit_events_from_redis_buffer(max_events=max_events)
-    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in events]
+    filtered_events = events
+    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in filtered_events]
     by_step, by_path_list, all_actors = _aggregate_audit_rows(rows)
+    raw_total_events = sum(1 for row in rows if not _is_ignored_analytics_event(row[0] or ""))
+    analytics_total_events = sum(row["total"] for row in by_path_list)
     return {
         "summary": {
             "source": "redis",
-            "total_events": len(events),
+            "total_events": raw_total_events,
+            "raw_total_events": raw_total_events,
+            "analytics_total_events": analytics_total_events,
+            "unique_users": len(all_actors),
+        },
+        "by_path": by_path_list,
+    }
+
+
+async def get_audit_stats_from_redis_since(
+    *,
+    date_from: datetime | None = None,
+    max_events: int = 5000,
+) -> dict[str, Any] | None:
+    if not AUDIT_REDIS_BUFFER_ENABLED:
+        return None
+    events = await list_audit_events_from_redis_buffer(max_events=max_events)
+    filtered_events = events
+    if date_from is not None:
+        threshold = date_from.astimezone(timezone.utc) if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+        filtered_events = [e for e in events if getattr(e, "created_at", None) and e.created_at >= threshold]
+    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in filtered_events]
+    by_step, by_path_list, all_actors = _aggregate_audit_rows(rows)
+    raw_total_events = sum(1 for row in rows if not _is_ignored_analytics_event(row[0] or ""))
+    analytics_total_events = sum(row["total"] for row in by_path_list)
+    return {
+        "summary": {
+            "source": "redis",
+            "total_events": raw_total_events,
+            "raw_total_events": raw_total_events,
+            "analytics_total_events": analytics_total_events,
             "unique_users": len(all_actors),
         },
         "by_path": by_path_list,
@@ -1106,27 +969,11 @@ async def get_audit_funnel(
     steps_ordered: tuple[str, ...] | None = None,
     max_events: int = 50_000,
 ) -> list[dict[str, Any]]:
-    """Воронка: сколько уникальных пользователей достигли каждого шага.
-    Шаг pay = только вебхук кассы (пополнение). Шаг key_create = только факт создания ключа. Остальное — по result success."""
-    await ensure_audit_table(session)
     steps = steps_ordered or DEFAULT_FUNNEL_STEPS
     d_from = _naive_utc(date_from)
     d_to = _naive_utc(date_to)
-    stmt = (
-        select(
-            AuditEvent.path_or_handler,
-            AuditEvent.result,
-            AuditEvent.actor_tg_id,
-            AuditEvent.actor_identity_id,
-        )
-        .where(
-            AuditEvent.created_at >= d_from,
-            AuditEvent.created_at < d_to,
-        )
-        .limit(max_events)
-    )
-    result = await session.execute(stmt)
-    rows = result.all()
+    rows = await fetch_audit_rows_db(session, date_from=d_from, date_to=d_to, limit=max_events)
+    rows.extend(await fetch_successful_payment_rows_db(session, date_from=d_from, date_to=d_to, limit=max_events))
     return _funnel_from_rows(rows, steps)
 
 
@@ -1134,47 +981,43 @@ def _funnel_from_rows(
     rows: list[tuple[Any, ...]],
     steps_ordered: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
-    """Воронка по строкам: (path, result, actor_tg_id, actor_identity_id). Учитываются только завершающие события."""
     steps = steps_ordered or DEFAULT_FUNNEL_STEPS
-    actor_steps: dict[tuple[str, int], set[str]] = {}
+    step_actors: dict[str, set[tuple[str, str | int]]] = {step: set() for step in steps}
     for row in rows:
         if len(row) >= 4:
             path, result, tg_id, identity_id = row[0], row[1], row[2], row[3]
         else:
             path, tg_id, identity_id = row[0], row[1], row[2]
             result = "success"
-        step = _normalize_path_to_step(path or "")
-        if not _funnel_step_counts(path or "", str(result or ""), step):
+        if _is_ignored_analytics_event(path or ""):
             continue
-        key = (str(identity_id or ""), int(tg_id or 0))
-        if key == ("", 0):
+        key = _audit_actor_key(identity_id, tg_id)
+        if key is None:
             continue
-        if key not in actor_steps:
-            actor_steps[key] = set()
-        actor_steps[key].add(step)
-
-    step_index = {s: i for i, s in enumerate(steps)}
-    reached: list[int] = [0] * len(steps)
-    for _actor, reached_steps in actor_steps.items():
-        max_idx = -1
-        for st in reached_steps:
-            if st in step_index and step_index[st] > max_idx:
-                max_idx = step_index[st]
-        for i in range(max_idx + 1):
-            reached[i] += 1
+        for step in _normalize_path_to_steps(path or ""):
+            if not _funnel_step_counts(path or "", str(result or ""), step):
+                continue
+            if step in step_actors:
+                step_actors[step].add(key)
 
     funnel_list = []
-    prev_count = None
-    for i, step in enumerate(steps):
-        count = reached[i]
-        conversion = round(100.0 * count / prev_count, 1) if prev_count and prev_count > 0 else 100.0
-        funnel_list.append({
-            "step": step,
-            "label": AUDIT_STEP_LABELS.get(step, step),
-            "count": count,
-            "conversion_from_prev_pct": conversion if prev_count else None,
-        })
-        prev_count = count
+    prev_actors: set[tuple[str, str | int]] | None = None
+    for step in steps:
+        actors = step_actors.get(step, set())
+        count = len(actors)
+        conversion = None
+        if prev_actors is not None and prev_actors:
+            overlap = len(prev_actors & actors)
+            conversion = round(100.0 * overlap / len(prev_actors), 1)
+        funnel_list.append(
+            {
+                "step": step,
+                "label": AUDIT_STEP_LABELS.get(step, step),
+                "count": count,
+                "conversion_from_prev_pct": conversion,
+            }
+        )
+        prev_actors = actors
     return funnel_list
 
 
@@ -1182,7 +1025,6 @@ async def get_audit_funnel_from_redis(
     max_events: int = 5000,
     steps_ordered: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Воронка по событиям из буфера Redis. None, если буфер выключен."""
     if not AUDIT_REDIS_BUFFER_ENABLED:
         return None
     events = await list_audit_events_from_redis_buffer(max_events=max_events)
@@ -1190,46 +1032,91 @@ async def get_audit_funnel_from_redis(
     return _funnel_from_rows(rows, steps_ordered)
 
 
-async def drain_audit_redis_to_db(session_factory: Any) -> int:
-    """Выгружает буфер аудита из Redis в БД батчами. Вызывать по крону (например в 00:00).
-    Возвращает количество записанных событий."""
-    from core.redis_cache import cache_lpop_batch
+async def get_audit_funnel_from_redis_since(
+    *,
+    date_from: datetime | None = None,
+    max_events: int = 5000,
+    steps_ordered: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]] | None:
+    if not AUDIT_REDIS_BUFFER_ENABLED:
+        return None
+    events = await list_audit_events_from_redis_buffer(max_events=max_events)
+    filtered_events = events
+    if date_from is not None:
+        threshold = date_from.astimezone(timezone.utc) if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+        filtered_events = [e for e in events if getattr(e, "created_at", None) and e.created_at >= threshold]
+    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in filtered_events]
+    return _funnel_from_rows(rows, steps_ordered)
 
+
+async def drain_audit_redis_to_db(session_factory: Any) -> int:
+    from core.redis_cache import cache_delete, cache_lmove_batch, cache_lpop_batch, cache_lrange, cache_setnx
+
+    if not await cache_setnx(_AUDIT_REDIS_DRAIN_LOCK_KEY, 1, _AUDIT_REDIS_DRAIN_LOCK_TTL_SEC):
+        logger.info("[Audit] drain_audit_redis_to_db пропущен: уже выполняется другой drain")
+        return 0
     total = 0
-    while True:
-        batch = await cache_lpop_batch(AUDIT_REDIS_FLUSH_KEY, AUDIT_REDIS_DRAIN_BATCH)
-        if not batch:
-            break
-        try:
-            async with session_factory() as session:
-                await ensure_audit_table(session)
-                for rec in batch:
-                    created = rec.get("created_at")
-                    if isinstance(created, str):
-                        try:
-                            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        except Exception:
-                            created = datetime.now(timezone.utc)
-                    elif created is None:
-                        created = datetime.now(timezone.utc)
-                    event = AuditEvent(
-                        event_type=rec.get("event_type", "telegram_access"),
-                        channel=rec.get("channel", "telegram"),
-                        path_or_handler=rec.get("path_or_handler") or "telegram",
-                        actor_identity_id=rec.get("actor_identity_id"),
-                        actor_tg_id=rec.get("actor_tg_id"),
-                        entity_type=rec.get("entity_type"),
-                        entity_id=rec.get("entity_id"),
-                        result=rec.get("result", "success"),
-                        reason=rec.get("reason"),
-                        metadata_=rec.get("metadata_"),
-                        request_id=rec.get("request_id"),
-                        created_at=created,
+    try:
+        while True:
+            raw_batch = await cache_lrange(_AUDIT_REDIS_PROCESSING_KEY, 0, AUDIT_REDIS_DRAIN_BATCH - 1)
+            if not raw_batch:
+                raw_batch = await cache_lmove_batch(
+                    AUDIT_REDIS_FLUSH_KEY,
+                    _AUDIT_REDIS_PROCESSING_KEY,
+                    AUDIT_REDIS_DRAIN_BATCH,
+                )
+            if not raw_batch:
+                break
+            batch = [rec for rec in raw_batch if isinstance(rec, dict)]
+            if not batch:
+                logger.warning("[Audit] drain_audit_redis_to_db: отброшен пустой/битый батч (%s элементов)", len(raw_batch))
+                await cache_lpop_batch(_AUDIT_REDIS_PROCESSING_KEY, len(raw_batch))
+                continue
+            try:
+                async with session_factory() as session:
+                    await ensure_audit_table(session)
+                    existing_request_ids = await fetch_existing_audit_request_ids_db(
+                        session,
+                        [str(rec.get("request_id")) for rec in batch if rec.get("request_id")],
                     )
-                    session.add(event)
-                await session.commit()
-                total += len(batch)
-        except Exception as exc:
-            logger.warning("[Audit] drain_audit_redis_to_db батч не записан: %s", exc)
-            break
-    return total
+                    inserted_count = 0
+                    seen_batch_request_ids: set[str] = set()
+                    for rec in batch:
+                        request_id = rec.get("request_id")
+                        if request_id and (request_id in existing_request_ids or request_id in seen_batch_request_ids):
+                            continue
+                        if request_id:
+                            seen_batch_request_ids.add(request_id)
+                        created = rec.get("created_at")
+                        if isinstance(created, str):
+                            try:
+                                created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            except Exception:
+                                created = datetime.now(timezone.utc)
+                        elif created is None:
+                            created = datetime.now(timezone.utc)
+                        event = AuditEvent(
+                            event_type=rec.get("event_type", "telegram_access"),
+                            channel=rec.get("channel", "telegram"),
+                            path_or_handler=rec.get("path_or_handler") or "telegram",
+                            actor_identity_id=rec.get("actor_identity_id"),
+                            actor_tg_id=rec.get("actor_tg_id"),
+                            entity_type=rec.get("entity_type"),
+                            entity_id=rec.get("entity_id"),
+                            result=rec.get("result", "success"),
+                            reason=rec.get("reason"),
+                            metadata_=rec.get("metadata_"),
+                            request_id=request_id,
+                            created_at=created,
+                        )
+                        session.add(event)
+                        inserted_count += 1
+                    await session.commit()
+                await cache_lpop_batch(_AUDIT_REDIS_PROCESSING_KEY, len(raw_batch))
+                total += inserted_count
+            except Exception as exc:
+                logger.warning("[Audit] drain_audit_redis_to_db батч не записан, останется в Redis processing: %s", exc)
+                break
+        return total
+    finally:
+        await cache_delete(_AUDIT_REDIS_DRAIN_LOCK_KEY)

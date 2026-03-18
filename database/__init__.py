@@ -1,3 +1,4 @@
+from .audit import *
 from .bans import *
 from .coupons import *
 from .db import async_session_maker
