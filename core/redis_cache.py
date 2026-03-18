@@ -4,6 +4,7 @@ from importlib import import_module
 from typing import Any
 
 from config import REDIS_URL
+from logger import logger
 
 _REDIS_CLIENT = None
 _REDIS_UNAVAILABLE_UNTIL = 0.0
@@ -17,6 +18,12 @@ def _now() -> float:
 async def _get_redis() -> Any | None:
     global _REDIS_CLIENT, _REDIS_UNAVAILABLE_UNTIL
 
+    try:
+        from bot import redis as bot_redis
+        if bot_redis is not None:
+            return bot_redis
+    except ImportError:
+        pass
     if _REDIS_CLIENT is not None:
         return _REDIS_CLIENT
     if _REDIS_UNAVAILABLE_UNTIL > _now():
@@ -33,7 +40,11 @@ async def _get_redis() -> Any | None:
         await client.ping()
         _REDIS_CLIENT = client
         return _REDIS_CLIENT
-    except Exception:
+    except Exception as exc:
+        url_display = REDIS_URL.split("@")[-1] if "@" in REDIS_URL else REDIS_URL
+        logger.warning(
+            f"[Redis] Подключение не удалось ({url_display}): {exc}. Повтор через {_REDIS_BACKOFF_SEC} с."
+        )
         _REDIS_UNAVAILABLE_UNTIL = _now() + _REDIS_BACKOFF_SEC
         _REDIS_CLIENT = None
         return None
@@ -141,6 +152,7 @@ async def cache_delete_pattern(pattern: str) -> int:
 
 async def cache_rpush(key: str, *values: Any) -> int:
     """Добавляет значения в хвост списка. Значения сериализуются в JSON. Возвращает длину списка после или 0 при ошибке."""
+    global _REDIS_CLIENT
     if not values:
         return 0
     client = await _get_redis()
@@ -149,7 +161,9 @@ async def cache_rpush(key: str, *values: Any) -> int:
     try:
         raw = [json.dumps(v, ensure_ascii=False) for v in values]
         return int(await client.rpush(key, *raw))
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"[Redis] rpush({key}) не удался: {exc}")
+        _REDIS_CLIENT = None
         return 0
 
 

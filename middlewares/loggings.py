@@ -8,11 +8,17 @@ from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject, U
 from audit import (
     ensure_telegram_context,
     log_telegram_access,
+    record_audit_event_to_redis,
     record_telegram_access_event,
     record_telegram_access_event_background,
     set_telegram_actor,
     _telegram_access_payload,
 )
+try:
+    from core.cache_config import AUDIT_REDIS_BUFFER_ENABLED
+except ImportError:
+    AUDIT_REDIS_BUFFER_ENABLED = False
+
 from logger import logger
 
 
@@ -33,8 +39,9 @@ def _log_activity_sync(user_info: UserInfo) -> None:
 
 
 class LoggingMiddleware(BaseMiddleware):
-    """Middleware для логирования действий пользователя. Лог пишется в фоне, не задерживая обработчик.
-    Если передан sessionmaker — аудит пишется в отдельной сессии в фоне (не блокирует ответ)."""
+    """Middleware для логирования действий пользователя. Лог пишется в фоне.
+    Аудит: при включённом Redis-буфере пишем только в Redis (в БД — раз в сутки через drain);
+    при выключенном буфере или сбое Redis — пишем в БД."""
 
     def __init__(self, sessionmaker=None):
         super().__init__()
@@ -61,20 +68,32 @@ class LoggingMiddleware(BaseMiddleware):
                     identity_id=db_user.get("identity_id"),
                     tg_id=db_user.get("tg_id"),
                 )
-            if self._sessionmaker is not None:
-                payload = _telegram_access_payload(audit_context, event, result="success")
-                asyncio.create_task(
-                    record_telegram_access_event_background(self._sessionmaker, **payload)
-                )
-            else:
-                session = data.get("session")
-                if session is not None:
-                    await record_telegram_access_event(
-                        session,
-                        audit_context,
-                        event,
-                        result="success",
+            payload = _telegram_access_payload(audit_context, event, result="success")
+            if AUDIT_REDIS_BUFFER_ENABLED:
+                if self._sessionmaker is not None:
+                    asyncio.create_task(
+                        record_telegram_access_event_background(
+                            self._sessionmaker, **payload
+                        )
                     )
+                else:
+                    asyncio.create_task(record_audit_event_to_redis(**payload))
+            else:
+                if self._sessionmaker is not None:
+                    asyncio.create_task(
+                        record_telegram_access_event_background(
+                            self._sessionmaker, **payload
+                        )
+                    )
+                else:
+                    session = data.get("session")
+                    if session is not None:
+                        await record_telegram_access_event(
+                            session,
+                            audit_context,
+                            event,
+                            result="success",
+                        )
             asyncio.create_task(
                 asyncio.to_thread(
                     log_telegram_access,
@@ -86,25 +105,35 @@ class LoggingMiddleware(BaseMiddleware):
             return result
         except Exception as exc:
             reason = type(exc).__name__
-            if self._sessionmaker is not None:
-                payload = _telegram_access_payload(
-                    audit_context, event, result="fail", reason=reason
-                )
-                asyncio.create_task(
-                    record_telegram_access_event_background(
-                        self._sessionmaker, **payload
+            payload = _telegram_access_payload(
+                audit_context, event, result="fail", reason=reason
+            )
+            if AUDIT_REDIS_BUFFER_ENABLED:
+                if self._sessionmaker is not None:
+                    asyncio.create_task(
+                        record_telegram_access_event_background(
+                            self._sessionmaker, **payload
+                        )
                     )
-                )
+                else:
+                    asyncio.create_task(record_audit_event_to_redis(**payload))
             else:
-                session = data.get("session")
-                if session is not None:
-                    await record_telegram_access_event(
-                        session,
-                        audit_context,
-                        event,
-                        result="fail",
-                        reason=reason,
+                if self._sessionmaker is not None:
+                    asyncio.create_task(
+                        record_telegram_access_event_background(
+                            self._sessionmaker, **payload
+                        )
                     )
+                else:
+                    session = data.get("session")
+                    if session is not None:
+                        await record_telegram_access_event(
+                            session,
+                            audit_context,
+                            event,
+                            result="fail",
+                            reason=reason,
+                        )
             asyncio.create_task(
                 asyncio.to_thread(
                     log_telegram_access,

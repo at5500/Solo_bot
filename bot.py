@@ -15,15 +15,11 @@ from utils.modules_loader import load_modules_from_folder, modules_hub
 apply_button_icons_patch()
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-storage = MemoryStorage()
-try:
-    RedisStorage = import_module("aiogram.fsm.storage.redis").RedisStorage
-    redis_from_url = import_module("redis.asyncio").from_url
 
-    redis = redis_from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-    storage = RedisStorage(redis=redis)
-except Exception:
-    storage = MemoryStorage()
+RedisStorage = import_module("aiogram.fsm.storage.redis").RedisStorage
+redis_from_url = import_module("redis.asyncio").from_url
+redis = redis_from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+storage = RedisStorage(redis=redis)
 
 dp = Dispatcher(bot=bot, storage=storage)
 

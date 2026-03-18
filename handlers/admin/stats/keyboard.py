@@ -4,6 +4,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_btn
 
 
+def build_audit_refresh_kb() -> InlineKeyboardMarkup:
+    """Клавиатура под сообщением аудита: кнопка «Обновить»."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Обновить", callback_data=AdminPanelCallback(action="audit_refresh").pack())
+    return builder.as_markup()
+
+
 def build_stats_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить", callback_data=AdminPanelCallback(action="stats").pack())

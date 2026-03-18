@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone, timedelta
 from typing import Literal
 
 import psutil
@@ -15,8 +16,12 @@ from sqlalchemy import distinct, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_admin, verify_identity_admin_short
-from api.v2.schemas.audit import AuditEventListResponse, AuditEventResponse
-from audit import drain_audit_redis_to_db, list_audit_events
+from api.v2.schemas.audit import (
+    AuditEventListResponse,
+    AuditEventResponse,
+    AuditStatsResponse,
+)
+from audit import drain_audit_redis_to_db, get_audit_funnel, get_audit_stats, list_audit_events
 from config import API_TOKEN, BOT_SERVICE
 from database import async_session_maker, save_blocked_user_ids
 from core.bootstrap import MANAGEMENT_CONFIG
@@ -175,6 +180,60 @@ async def get_broadcast_clusters(
     result = await session.execute(select(distinct(Server.cluster_name)).where(Server.cluster_name.is_not(None)))
     clusters = sorted([row[0] for row in result.all() if row and row[0]])
     return {"clusters": clusters}
+
+
+def _parse_date_range(
+    date: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> tuple[datetime, datetime]:
+    """Возвращает (date_from, date_to) в UTC. Либо date=YYYY-MM-DD (один день), либо date_from + date_to."""
+    tz = timezone.utc
+    if date:
+        try:
+            d = datetime.strptime(date, "%Y-%m-%d").date()
+            start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+            end = start + timedelta(days=1)
+            return start, end
+        except ValueError:
+            raise HTTPException(status_code=400, detail="date должен быть YYYY-MM-DD")
+    if date_from and date_to:
+        try:
+            start = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=tz)
+            if start >= end:
+                raise HTTPException(status_code=400, detail="date_from должен быть раньше date_to")
+            return start, end
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Неверный формат дат: {e}")
+    # по умолчанию — вчера
+    end = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=1)
+    return start, end
+
+
+@router.get("/audit-stats", response_model=AuditStatsResponse)
+async def get_audit_stats_endpoint(
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+    date: str | None = Query(None, description="Один день: YYYY-MM-DD"),
+    date_from: str | None = Query(None, description="Начало периода (ISO)"),
+    date_to: str | None = Query(None, description="Конец периода (ISO)"),
+):
+    """Статистика аудита за период: какие пути отрабатывают хорошо/плохо, воронка старт→оплата.
+    Данные только из БД (события из Redis учитываются после drain)."""
+    start, end = _parse_date_range(date=date, date_from=date_from, date_to=date_to)
+    stats = await get_audit_stats(session, date_from=start, date_to=end)
+    funnel = await get_audit_funnel(session, date_from=start, date_to=end)
+    return AuditStatsResponse(
+        summary=stats["summary"],
+        by_path=stats["by_path"],
+        funnel=funnel,
+    )
 
 
 @router.get("/audit-events", response_model=AuditEventListResponse)

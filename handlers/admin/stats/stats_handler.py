@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime, timedelta
+from html import escape
 
 import pytz
 
@@ -8,6 +9,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audit import get_audit_funnel, get_audit_funnel_from_redis, get_audit_stats, get_audit_stats_from_redis
 from bot import bot
 from config import ADMIN_ID
 from database import (
@@ -38,7 +40,7 @@ from utils.csv_export import (
 )
 
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_kb
-from .keyboard import build_stats_kb
+from .keyboard import build_audit_refresh_kb, build_stats_kb
 
 
 router = Router()
@@ -251,6 +253,160 @@ async def handle_stats(callback_query: CallbackQuery, session: AsyncSession):
     except Exception as e:
         logger.error(f"Error in user_stats_menu: {e}")
         await callback_query.answer("Произошла ошибка при получении статистики", show_alert=True)
+
+
+@router.callback_query(AdminPanelCallback.filter(F.action == "stats_audit"), IsAdminFilter())
+async def handle_stats_audit(callback_query: CallbackQuery, session: AsyncSession):
+    """Статистика аудита за вчера (МСК): объём по шагам, % ошибок, воронка."""
+    kb = build_admin_back_kb("stats")
+    try:
+        moscow_tz = pytz.timezone("Europe/Moscow")
+        now = datetime.now(moscow_tz)
+        yesterday_date = (now.date() - timedelta(days=1))
+        start = moscow_tz.localize(datetime.combine(yesterday_date, datetime.min.time()))
+        end = start + timedelta(days=1)
+        start_utc = start.astimezone(pytz.UTC)
+        end_utc = end.astimezone(pytz.UTC)
+
+        stats = await get_audit_stats(session, date_from=start_utc, date_to=end_utc)
+        funnel = await get_audit_funnel(session, date_from=start_utc, date_to=end_utc)
+
+        summary = stats["summary"]
+        by_path = stats["by_path"]
+
+        lines = [
+            f"📊 <b>Аудит за {yesterday_date.strftime('%d.%m.%Y')}</b> (МСК)",
+            "",
+            f"📎 Событий: <b>{summary['total_events']}</b> │ Уникальных пользователей: <b>{summary['unique_users']}</b>",
+            "",
+            "<b>По шагам (топ по объёму):</b>",
+        ]
+        for row in by_path[:8]:
+            fail_mark = "⚠️" if row["fail_rate_pct"] > 10 else "✅"
+            lines.append(
+                f"{fail_mark} {row['label']}: {row['total']} (ок: {row['success']}, ошибок: {row['fail']}, {row['fail_rate_pct']}% ошибок)"
+            )
+        lines.append("")
+        by_step_totals = {row["step"]: row["total"] for row in by_path}
+        funnel_counts = {s["step"]: s["count"] for s in funnel}
+        pay_start = by_step_totals.get("pay_start", 0)
+        pay_ok = max(by_step_totals.get("pay", 0), funnel_counts.get("pay", 0))
+        key_created = by_step_totals.get("key_create", 0)
+        connect_ok = max(by_step_totals.get("connect", 0), funnel_counts.get("connect", 0))
+        pct_pay = round(100.0 * pay_ok / pay_start, 1) if pay_start else 0
+        pct_connect = round(100.0 * connect_ok / key_created, 1) if key_created else 0
+        lines.append("<b>Оплата:</b> начало {0}, успешная {1}, % успешных от созданных: {2}%".format(pay_start, pay_ok, pct_pay))
+        lines.append("<b>Подписка:</b> оформлена {0}, подключена {1}, % успешных подключений: {2}%".format(key_created, connect_ok, pct_connect))
+        lines.append("")
+        lines.append("<b>Воронка (уник. пользователей по шагам):</b>")
+        for step in funnel:
+            conv = f" → {step['conversion_from_prev_pct']}%" if step["conversion_from_prev_pct"] is not None else ""
+            lines.append(f"  • {step['label']}: {step['count']} польз.{conv}")
+
+        text = "\n".join(lines)
+        await callback_query.message.edit_text(
+            text,
+            reply_markup=kb,
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.exception("Ошибка при получении статистики аудита: %s", e)
+        await callback_query.answer("Ошибка при загрузке статистики аудита", show_alert=True)
+        await callback_query.message.edit_text(
+            f"❗ Ошибка: {e}",
+            reply_markup=kb,
+        )
+
+
+async def _build_audit_report(session: AsyncSession) -> tuple[str | None, str | None]:
+    """Собирает текст отчёта аудита. Возвращает (text, error): при успехе error=None; при отключённом Redis text=None, error=None."""
+    try:
+        stats = await get_audit_stats_from_redis(max_events=5000)
+        funnel = await get_audit_funnel_from_redis(max_events=5000)
+        if stats is None or funnel is None:
+            return (None, None)
+        summary = stats["summary"]
+        by_path = stats["by_path"]
+        if summary["total_events"] == 0:
+            moscow_tz = pytz.timezone("Europe/Moscow")
+            now = datetime.now(moscow_tz)
+            end_utc = now.astimezone(pytz.UTC)
+            start_utc = end_utc - timedelta(hours=24)
+            stats = await get_audit_stats(session, date_from=start_utc, date_to=end_utc)
+            funnel = await get_audit_funnel(session, date_from=start_utc, date_to=end_utc)
+            summary = stats["summary"]
+            by_path = stats["by_path"]
+            header = "📊 <b>Аудит из БД</b> (буфер Redis пуст; последние 24 ч)"
+        else:
+            header = "📊 <b>Аудит из Redis</b> (буфер, последние события)"
+        lines = [
+            header,
+            "",
+            f"📎 Событий: <b>{summary['total_events']}</b> │ Уникальных пользователей: <b>{summary['unique_users']}</b>",
+            "",
+            "<b>По шагам (топ по объёму):</b>",
+        ]
+        for row in by_path[:8]:
+            fail_mark = "⚠️" if row["fail_rate_pct"] > 10 else "✅"
+            lines.append(
+                f"{fail_mark} {row['label']}: {row['total']} (ок: {row['success']}, ошибок: {row['fail']}, {row['fail_rate_pct']}% ошибок)"
+            )
+        lines.append("")
+        by_step_totals = {row["step"]: row["total"] for row in by_path}
+        funnel_counts = {s["step"]: s["count"] for s in funnel}
+        pay_start = by_step_totals.get("pay_start", 0)
+        pay_ok = max(by_step_totals.get("pay", 0), funnel_counts.get("pay", 0))
+        key_created = by_step_totals.get("key_create", 0)
+        connect_ok = max(by_step_totals.get("connect", 0), funnel_counts.get("connect", 0))
+        pct_pay = round(100.0 * pay_ok / pay_start, 1) if pay_start else 0
+        pct_connect = round(100.0 * connect_ok / key_created, 1) if key_created else 0
+        lines.append("<b>Оплата:</b> начало {0}, успешная {1}, % успешных от созданных: {2}%".format(pay_start, pay_ok, pct_pay))
+        lines.append("<b>Подписка:</b> оформлена {0}, подключена {1}, % успешных подключений: {2}%".format(key_created, connect_ok, pct_connect))
+        lines.append("")
+        lines.append("<b>Воронка (уник. пользователей по шагам):</b>")
+        for step in funnel:
+            conv = f" → {step['conversion_from_prev_pct']}%" if step["conversion_from_prev_pct"] is not None else ""
+            lines.append(f"  • {step['label']}: {step['count']} польз.{conv}")
+        return ("\n".join(lines), None)
+    except Exception as e:
+        logger.exception("Ошибка при получении аудита: %s", e)
+        return (None, str(e))
+
+
+@router.message(F.text.in_(["Аудит", "аудит"]), IsAdminFilter())
+async def handle_audit_command(message: Message, session: AsyncSession):
+    """По команде «Аудит» — отправить статистику аудита из буфера Redis; при пустом буфере — из БД за 24 ч."""
+    text, err = await _build_audit_report(session)
+    if err:
+        await message.answer(f"❗ Ошибка: {escape(err)}")
+        return
+    if text is None:
+        await message.answer(
+            "📊 Буфер аудита в Redis выключен (AUDIT_REDIS_BUFFER_ENABLED=False). "
+            "Используйте кнопку «Аудит (воронки)» в Статистике для отчёта из БД.",
+        )
+        return
+    await message.answer(text, reply_markup=build_audit_refresh_kb())
+
+
+@router.callback_query(AdminPanelCallback.filter(F.action == "audit_refresh"), IsAdminFilter())
+async def handle_audit_refresh(callback_query: CallbackQuery, session: AsyncSession):
+    """Обновить отчёт аудита по нажатию кнопки «Обновить» под сообщением."""
+    await callback_query.answer()
+    text, err = await _build_audit_report(session)
+    if err:
+        await callback_query.message.edit_text(f"❗ Ошибка: {escape(err)}")
+        return
+    if text is None:
+        await callback_query.message.edit_text(
+            "📊 Буфер аудита в Redis выключен (AUDIT_REDIS_BUFFER_ENABLED=False). "
+            "Используйте кнопку «Аудит (воронки)» в Статистике для отчёта из БД.",
+        )
+        return
+    try:
+        await callback_query.message.edit_text(text, reply_markup=build_audit_refresh_kb())
+    except TelegramBadRequest:
+        pass
 
 
 @router.callback_query(AdminPanelCallback.filter(F.action == "stats_export_users_csv"), IsAdminFilter())

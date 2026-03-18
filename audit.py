@@ -16,6 +16,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import AuditEvent
 from logger import logger
 
+def _get_bot_webhook_path() -> str:
+    """Путь вебхука бота из конфига (для исключения из шага «успешная оплата»)."""
+    try:
+        from config import WEBHOOK_PATH
+        return ((WEBHOOK_PATH or "").strip().lower()) or ""
+    except ImportError:
+        return ""
+
+
+def _is_bot_webhook_path(path: str) -> bool:
+    """True только если path — именно вебхук бота (точное совпадение сегмента пути), не касса."""
+    bot_path = _get_bot_webhook_path()
+    if not bot_path:
+        return False
+    p = (path or "").strip().lower()
+    path_segment = p.split(" ", 1)[1] if " " in p else p
+    return path_segment == bot_path or path_segment.rstrip("/") == bot_path.rstrip("/")
+
 try:
     from core.cache_config import (
         AUDIT_REDIS_BUFFER_ENABLED,
@@ -48,6 +66,13 @@ class AuditContext:
 
 def new_request_id() -> str:
     return uuid.uuid4().hex
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Приводит datetime к naive UTC для запросов к колонкам DateTime (без timezone)."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=None)
 
 
 def _trim(value: Any, limit: int = _MAX_TEXT_LEN) -> str | None:
@@ -416,7 +441,9 @@ async def record_audit_event_to_redis(
         reason=reason,
         request_id=request_id,
     )
-    await cache_rpush(AUDIT_REDIS_FLUSH_KEY, record)
+    n = await cache_rpush(AUDIT_REDIS_FLUSH_KEY, record)
+    if n == 0:
+        raise RuntimeError("Redis unavailable (cache_rpush returned 0)")
     if actor_tg_id is not None:
         user_key = f"{AUDIT_REDIS_USER_PREFIX}{actor_tg_id}"
         await cache_rpush(user_key, record)
@@ -521,8 +548,8 @@ async def record_telegram_access_event_background(
     result: str = "success",
     reason: str | None = None,
 ) -> None:
-    """Пишет событие telegram_access: в Redis-буфер (если включён) или в БД в отдельной сессии.
-    При ошибке логирует и не пробрасывает исключение."""
+    """Пишет событие telegram_access: в Redis-буфер (если включён), иначе в БД.
+    При сбое записи в Redis — fallback в БД, чтобы события не терялись."""
     if AUDIT_REDIS_BUFFER_ENABLED:
         try:
             await record_audit_event_to_redis(
@@ -533,9 +560,11 @@ async def record_telegram_access_event_background(
                 result=result,
                 reason=reason,
             )
+            return
         except Exception as exc:
-            logger.warning("[Audit] Запись в Redis-буфер не удалась: %s", exc)
-        return
+            logger.warning(
+                f"[Audit] Запись в Redis-буфер не удалась, пишем в БД: {exc}"
+            )
     try:
         async with session_factory() as session:
             await ensure_audit_table(session)
@@ -686,6 +715,64 @@ async def _list_audit_events_from_redis(
     return out[:max_events]
 
 
+async def list_audit_events_from_redis_buffer(max_events: int = 5000) -> list[SimpleNamespace]:
+    """Читает последние события из глобального буфера Redis (audit:flush). Не удаляет записи."""
+    if not AUDIT_REDIS_BUFFER_ENABLED:
+        return []
+    from core.redis_cache import cache_lrange
+
+    raw = await cache_lrange(AUDIT_REDIS_FLUSH_KEY, -max_events, -1)
+    out = []
+    for rec in raw:
+        if not isinstance(rec, dict):
+            continue
+        out.append(_redis_record_to_event_like(rec))
+    out.sort(key=lambda e: e.created_at)
+    return out
+
+
+def _aggregate_audit_rows(
+    rows: list[tuple[Any, Any, Any, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], set[tuple[str, int | str]]]:
+    """Собирает by_step, by_path_list, all_actors из строк (path, result, actor_tg_id, actor_identity_id)."""
+    by_step: dict[str, dict[str, Any]] = {}
+    total_events = 0
+    all_actors: set[tuple[str, int | str]] = set()
+
+    for path, res, tg_id, identity_id in rows:
+        total_events += 1
+        step = _normalize_path_to_step(path or "")
+        actor = (identity_id or "", tg_id or 0)
+        if identity_id or tg_id:
+            all_actors.add(actor)
+        if step not in by_step:
+            by_step[step] = {"total": 0, "success": 0, "fail": 0, "actors": set()}
+        by_step[step]["total"] += 1
+        if res == "success":
+            by_step[step]["success"] += 1
+        else:
+            by_step[step]["fail"] += 1
+        if identity_id or tg_id:
+            by_step[step]["actors"].add(actor)
+
+    by_path_list = []
+    for step, data in sorted(by_step.items(), key=lambda x: -x[1]["total"]):
+        total = data["total"]
+        fail = data["fail"]
+        unique = len(data["actors"])
+        fail_rate = round(100.0 * fail / total, 1) if total else 0
+        by_path_list.append({
+            "step": step,
+            "label": AUDIT_STEP_LABELS.get(step, step),
+            "total": total,
+            "success": data["success"],
+            "fail": fail,
+            "unique_users": unique,
+            "fail_rate_pct": fail_rate,
+        })
+    return by_step, by_path_list, all_actors
+
+
 async def list_audit_events(
     session: AsyncSession,
     *,
@@ -775,6 +862,332 @@ async def delete_old_audit_events(
     stmt = delete(AuditEvent).where(AuditEvent.created_at < threshold)
     result = await session.execute(stmt)
     return result.rowcount or 0
+
+
+AUDIT_STEP_LABELS: dict[str, str] = {
+    "start": "Старт",
+    "profile": "Профиль",
+    "view_keys": "Мои ключи",
+    "key_create": "Подписка оформлена",
+    "pay_start": "Начало оплаты (ссылка создана)",
+    "pay": "Успешная оплата (пополнение)",
+    "key_view": "Ключ (карточка)",
+    "connect": "Подписка подключена",
+    "renew": "Продление",
+    "addons": "Аддоны",
+    "referral": "Рефералы",
+    "coupons": "Купоны",
+    "register": "Регистрация (API)",
+    "login": "Вход (API)",
+    "api_other": "API прочее",
+    "admin": "Админ-панель",
+    "other": "Прочее",
+}
+
+
+DEFAULT_FUNNEL_STEPS = ("start", "profile", "view_keys", "key_create", "pay_start", "pay", "key_view", "connect")
+
+
+_CALLBACK_EXACT: dict[str, str] = {
+    "profile": "profile",
+    "view_keys": "view_keys",
+    "create_key": "key_create",
+    "buy": "key_create",
+    "pay": "pay_start",
+    "balance": "pay_start",
+}
+
+
+_CALLBACK_PREFIX: list[tuple[str, str]] = [
+    ("view_key|", "key_view"),
+    ("view_keys|", "view_keys"),
+    ("connect_device|", "connect"),
+    ("connect_router|", "connect"),
+    ("connect_tv|", "connect"),
+    ("connect_pc|", "connect"),
+    ("connect_ios|", "connect"),
+    ("connect_android|", "connect"),
+    ("show_qr|", "connect"),
+    ("continue_tv|", "connect"),
+    ("pay_currency", "pay_start"),
+    ("balance_history", "pay_start"),
+    ("cfg_user_confirm|", "key_create"),
+    ("choose_payment_provider|", "pay_start"),
+    ("cfg_renew", "renew"),
+    ("key_addons", "addons"),
+    ("extend_key", "coupons"),
+]
+
+
+_CALLBACK_CONTAINS: list[tuple[str, str]] = [
+    ("connect_", "connect"),
+    ("renew", "renew"),
+    ("addon", "addons"),
+    ("referral", "referral"),
+    ("invite", "referral"),
+    ("coupon", "coupons"),
+    ("users_audit", "admin"),
+    ("users_editor", "admin"),
+    ("search_user", "admin"),
+    ("admin_panel", "admin"),
+]
+
+_MESSAGE_START: set[str] = {"/start", "start"}
+
+_HANDLER_CONTAINS: list[tuple[str, str] | tuple[str, str, str]] = [
+    ("process_start", "start"),
+    ("start_entry", "start"),
+    ("show_start_menu", "start"),
+    ("process_callback_view_profile", "profile"),
+    ("process_callback_or_message_view_keys", "view_keys"),
+    ("key_view", "key_view", "key_create"),
+    ("key_create", "key_create"),
+    ("handle_key_creation", "key_create"),
+    ("confirm_create", "key_create"),
+    ("complete_key_renewal", "renew"),
+    ("handle_connect_device", "connect"),
+    ("process_connect_", "connect"),
+    ("process_callback_connect", "connect"),
+    ("process_continue_tv", "connect"),
+    ("show_qr_code", "connect"),
+    ("pay", "pay_start"),
+    ("balance", "pay_start"),
+    ("renew", "renew"),
+    ("addon", "addons"),
+    ("referral", "referral"),
+    ("refferal", "referral"),
+    ("coupon", "coupons"),
+    ("admin_panel", "admin"),
+    ("users_audit", "admin"),
+    ("users_editor", "admin"),
+    ("search_user", "admin"),
+    ("auth/register", "register"),
+    ("auth/login", "login"),
+    ("auth/send-login", "login"),
+    ("auth/login-by-code", "login"),
+    ("auth/login-telegram", "login"),
+]
+
+def _funnel_step_counts(path: str, result: str, step: str) -> bool:
+    """Решает, считать ли событие достижением шага воронки.
+    pay_start: любое успешное «начало оплаты» (меню, валюта, создание ссылки).
+    pay: вебхук с «webhook» в path, кроме пути вебхука бота из конфига (WEBHOOK_PATH).
+    key_create: только факт создания ключа (cfg_user_confirm или /keys/create).
+    connect: любое успешное подключение."""
+    if result != "success":
+        return False
+    p = (path or "").lower()
+    if step == "pay_start":
+        return True
+    if step == "pay":
+        if "webhook" not in p:
+            return False
+        if _is_bot_webhook_path(path or ""):
+            return False
+        return True
+    if step == "key_create":
+        return "cfg_user_confirm" in p or "/keys/create" in p
+    return True
+
+
+def _normalize_path_to_step(path: str) -> str:
+    """Сводит path_or_handler к шагу по правилам из маппингов.
+    Вебхук с «webhook» в path → pay, кроме пути вебхука бота из конфига (WEBHOOK_PATH)."""
+    if not path:
+        return "other"
+    p = path.lower().strip()
+    if "webhook" in p:
+        if _is_bot_webhook_path(path):
+            pass 
+        else:
+            return "pay"
+
+    if p.startswith("callback:"):
+        callback_data = p.split(":", 1)[-1] 
+        data = callback_data.split("|")[0]  
+        step = _CALLBACK_EXACT.get(data)
+        if step:
+            return step
+        for prefix, step in _CALLBACK_PREFIX:
+            if callback_data.startswith(prefix):
+                return step
+        for item in _CALLBACK_CONTAINS:
+            substr, step = item[0], item[1]
+            if substr in callback_data:
+                return step
+        return "other"
+
+    if p.startswith("message:"):
+        text = (p.split(":", 1)[-1] or "").strip()
+        return "start" if any(s in text for s in _MESSAGE_START) else "other"
+
+    if p.startswith("post ") or p.startswith("get "):
+        if "auth/register" in p:
+            return "register"
+        if "auth/" in p and "login" in p:
+            return "login"
+        if "payment-links" in p or ("payment" in p and "webhook" not in p):
+            return "pay_start"
+        return "api_other"
+
+    for item in _HANDLER_CONTAINS:
+        if len(item) == 3:
+            substr, step, exclude = item[0], item[1], item[2]
+            if substr in p and exclude not in p:
+                return step
+        else:
+            substr, step = item[0], item[1]
+            if substr in p:
+                return step
+    return "other"
+
+
+async def get_audit_stats(
+    session: AsyncSession,
+    *,
+    date_from: datetime,
+    date_to: datetime,
+    max_events: int = 100_000,
+) -> dict[str, Any]:
+    """Агрегаты по аудиту за период (только БД): по шагам объём, успехи/ошибки, уникальные пользователи.
+    Удобно для «какие пути хорошо отрабатывают, какие нет». Данные из Redis в расчёт не берутся."""
+    await ensure_audit_table(session)
+    d_from = _naive_utc(date_from)
+    d_to = _naive_utc(date_to)
+    stmt = (
+        select(
+            AuditEvent.path_or_handler,
+            AuditEvent.result,
+            AuditEvent.actor_tg_id,
+            AuditEvent.actor_identity_id,
+        )
+        .where(
+            AuditEvent.created_at >= d_from,
+            AuditEvent.created_at < d_to,
+        )
+        .limit(max_events)
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+    by_step, by_path_list, all_actors = _aggregate_audit_rows(rows)
+    return {
+        "summary": {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "total_events": sum(d["total"] for d in by_step.values()),
+            "unique_users": len(all_actors),
+        },
+        "by_path": by_path_list,
+    }
+
+
+async def get_audit_stats_from_redis(max_events: int = 5000) -> dict[str, Any] | None:
+    """Агрегаты по аудиту из буфера Redis (без БД). Возвращает None, если буфер выключен."""
+    if not AUDIT_REDIS_BUFFER_ENABLED:
+        return None
+    events = await list_audit_events_from_redis_buffer(max_events=max_events)
+    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in events]
+    by_step, by_path_list, all_actors = _aggregate_audit_rows(rows)
+    return {
+        "summary": {
+            "source": "redis",
+            "total_events": len(events),
+            "unique_users": len(all_actors),
+        },
+        "by_path": by_path_list,
+    }
+
+
+async def get_audit_funnel(
+    session: AsyncSession,
+    *,
+    date_from: datetime,
+    date_to: datetime,
+    steps_ordered: tuple[str, ...] | None = None,
+    max_events: int = 50_000,
+) -> list[dict[str, Any]]:
+    """Воронка: сколько уникальных пользователей достигли каждого шага.
+    Шаг pay = только вебхук кассы (пополнение). Шаг key_create = только факт создания ключа. Остальное — по result success."""
+    await ensure_audit_table(session)
+    steps = steps_ordered or DEFAULT_FUNNEL_STEPS
+    d_from = _naive_utc(date_from)
+    d_to = _naive_utc(date_to)
+    stmt = (
+        select(
+            AuditEvent.path_or_handler,
+            AuditEvent.result,
+            AuditEvent.actor_tg_id,
+            AuditEvent.actor_identity_id,
+        )
+        .where(
+            AuditEvent.created_at >= d_from,
+            AuditEvent.created_at < d_to,
+        )
+        .limit(max_events)
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+    return _funnel_from_rows(rows, steps)
+
+
+def _funnel_from_rows(
+    rows: list[tuple[Any, ...]],
+    steps_ordered: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Воронка по строкам: (path, result, actor_tg_id, actor_identity_id). Учитываются только завершающие события."""
+    steps = steps_ordered or DEFAULT_FUNNEL_STEPS
+    actor_steps: dict[tuple[str, int], set[str]] = {}
+    for row in rows:
+        if len(row) >= 4:
+            path, result, tg_id, identity_id = row[0], row[1], row[2], row[3]
+        else:
+            path, tg_id, identity_id = row[0], row[1], row[2]
+            result = "success"
+        step = _normalize_path_to_step(path or "")
+        if not _funnel_step_counts(path or "", str(result or ""), step):
+            continue
+        key = (str(identity_id or ""), int(tg_id or 0))
+        if key == ("", 0):
+            continue
+        if key not in actor_steps:
+            actor_steps[key] = set()
+        actor_steps[key].add(step)
+
+    step_index = {s: i for i, s in enumerate(steps)}
+    reached: list[int] = [0] * len(steps)
+    for _actor, reached_steps in actor_steps.items():
+        max_idx = -1
+        for st in reached_steps:
+            if st in step_index and step_index[st] > max_idx:
+                max_idx = step_index[st]
+        for i in range(max_idx + 1):
+            reached[i] += 1
+
+    funnel_list = []
+    prev_count = None
+    for i, step in enumerate(steps):
+        count = reached[i]
+        conversion = round(100.0 * count / prev_count, 1) if prev_count and prev_count > 0 else 100.0
+        funnel_list.append({
+            "step": step,
+            "label": AUDIT_STEP_LABELS.get(step, step),
+            "count": count,
+            "conversion_from_prev_pct": conversion if prev_count else None,
+        })
+        prev_count = count
+    return funnel_list
+
+
+async def get_audit_funnel_from_redis(
+    max_events: int = 5000,
+    steps_ordered: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Воронка по событиям из буфера Redis. None, если буфер выключен."""
+    if not AUDIT_REDIS_BUFFER_ENABLED:
+        return None
+    events = await list_audit_events_from_redis_buffer(max_events=max_events)
+    rows = [(e.path_or_handler, e.result, e.actor_tg_id, e.actor_identity_id) for e in events]
+    return _funnel_from_rows(rows, steps_ordered)
 
 
 async def drain_audit_redis_to_db(session_factory: Any) -> int:
