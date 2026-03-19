@@ -1,7 +1,7 @@
 from .audit import *
 from .bans import *
 from .coupons import *
-from .db import async_session_maker
+from .db import Base, async_session_maker, engine, reset_async_db_engine
 from .gifts import *
 from . import identities
 from .hot_leads import *

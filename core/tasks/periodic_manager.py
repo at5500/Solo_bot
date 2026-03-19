@@ -68,12 +68,14 @@ def _run_process_loop_task(task_id: str, runner: LoopRunner) -> None:
 
 
 async def _run_process_loop_task_async(task_id: str, runner: LoopRunner) -> None:
+    from database.db import reset_async_db_engine
     from bot import bot
     from core.bootstrap import bootstrap
     from database import async_session_maker, init_db
 
     logger.info("[PeriodicManager] Process-loop задача {} запущена, PID={}", task_id, os.getpid())
     try:
+        reset_async_db_engine()
         await init_db()
         await bootstrap()
         await runner(bot, async_session_maker)
