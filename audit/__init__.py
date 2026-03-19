@@ -536,7 +536,7 @@ async def record_api_access_event_background(
                 reason=reason,
             )
         except Exception as exc:
-            logger.warning("[Audit] Запись api_access в Redis-буфер не удалась: %s", exc)
+            logger.warning("[Audit] Запись api_access в Redis-буфер не удалась: {}", exc)
         return
     try:
         async with session_factory() as session:
@@ -1069,7 +1069,7 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                 break
             batch = [rec for rec in raw_batch if isinstance(rec, dict)]
             if not batch:
-                logger.warning("[Audit] drain_audit_redis_to_db: отброшен пустой/битый батч (%s элементов)", len(raw_batch))
+                logger.warning("[Audit] drain_audit_redis_to_db: отброшен пустой/битый батч ({} элементов)", len(raw_batch))
                 await cache_lpop_batch(_AUDIT_REDIS_PROCESSING_KEY, len(raw_batch))
                 continue
             try:
@@ -1115,7 +1115,7 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                 await cache_lpop_batch(_AUDIT_REDIS_PROCESSING_KEY, len(raw_batch))
                 total += inserted_count
             except Exception as exc:
-                logger.warning("[Audit] drain_audit_redis_to_db батч не записан, останется в Redis processing: %s", exc)
+                logger.warning("[Audit] drain_audit_redis_to_db батч не записан, останется в Redis processing: {}", exc)
                 break
         return total
     finally:

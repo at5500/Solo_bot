@@ -385,7 +385,7 @@ async def _build_audit_report(session: AsyncSession, source: str = "db") -> tupl
             lines.append(f"  • {step['label']}: {step['count']} польз.{conv}")
         return ("\n".join(lines), None)
     except Exception as e:
-        logger.exception("Ошибка при получении аудита: %s", e)
+        logger.exception("Ошибка при получении аудита: {}", e)
         return (None, str(e))
 
 
@@ -485,7 +485,7 @@ async def handle_audit_reset_do(callback_query: CallbackQuery, session: AsyncSes
         except TelegramBadRequest:
             pass
     except Exception as e:
-        logger.exception("Ошибка при сбросе аудита (%s): %s", source, e)
+        logger.exception("Ошибка при сбросе аудита ({}): {}", source, e)
         await callback_query.answer("Не удалось сбросить аудит", show_alert=True)
 
 

@@ -356,7 +356,7 @@ async def post_audit_drain(identity=Depends(verify_identity_admin_short)):
         count = await drain_audit_redis_to_db(async_session_maker)
         return {"success": True, "drained": count}
     except Exception as exc:
-        logger.warning("audit-drain failed: %s", exc)
+        logger.warning("audit-drain failed: {}", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
