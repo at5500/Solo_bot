@@ -13,7 +13,8 @@ def build_audit_refresh_kb(source: str = "db") -> InlineKeyboardMarkup:
     builder.button(text=redis_text, callback_data=AdminPanelCallback(action="audit_refresh_redis").pack())
     builder.button(text=db_text, callback_data=AdminPanelCallback(action="audit_refresh_db").pack())
     builder.button(text=reset_text, callback_data=AdminPanelCallback(action=f"audit_reset_ask_{source}").pack())
-    builder.adjust(2, 1)
+    builder.button(text="Администратор", callback_data=AdminPanelCallback(action="admin").pack())
+    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 
@@ -22,7 +23,8 @@ def build_audit_source_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Redis raw", callback_data=AdminPanelCallback(action="audit_refresh_redis").pack())
     builder.button(text="БД вчера", callback_data=AdminPanelCallback(action="audit_refresh_db").pack())
-    builder.adjust(2)
+    builder.button(text="Администратор", callback_data=AdminPanelCallback(action="admin").pack())
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 
@@ -30,7 +32,8 @@ def build_audit_reset_confirm_kb(source: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Да, сбросить", callback_data=AdminPanelCallback(action=f"audit_reset_do_{source}").pack())
     builder.button(text="Отмена", callback_data=AdminPanelCallback(action=f"audit_refresh_{source}").pack())
-    builder.adjust(1)
+    builder.button(text="Администратор", callback_data=AdminPanelCallback(action="admin").pack())
+    builder.adjust(1, 1, 1)
     return builder.as_markup()
 
 

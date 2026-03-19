@@ -1,22 +1,154 @@
 import locale
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 
+from contextlib import contextmanager
+from datetime import datetime
 from time import sleep
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
-from rich.console import Console, Group
-from rich.live import Live
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
+try:
+    from rich.console import Console, Group
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+    from rich.prompt import Confirm, Prompt
+    from rich.table import Table
+except ImportError:
+    def _strip_markup(value):
+        if not isinstance(value, str):
+            return str(value)
+        return re.sub(r"\[[^\]]+\]", "", value)
 
-from config import BOT_SERVICE
+
+    class Group:
+        def __init__(self, *items):
+            self.items = items
+
+        def __str__(self):
+            return "\n".join(_strip_markup(item) for item in self.items)
+
+
+    class Panel:
+        def __init__(self, renderable, **kwargs):
+            self.renderable = renderable
+
+        def __str__(self):
+            return _strip_markup(self.renderable)
+
+
+    class Table:
+        def __init__(self, title=None, **kwargs):
+            self.title = title
+            self.rows = []
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *row):
+            self.rows.append(row)
+
+        def __str__(self):
+            lines = []
+            if self.title:
+                lines.append(_strip_markup(self.title))
+            lines.extend(" | ".join(_strip_markup(cell) for cell in row) for row in self.rows)
+            return "\n".join(lines)
+
+
+    class Live:
+        def __init__(self, **kwargs):
+            self.last_renderable = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, renderable):
+            self.last_renderable = renderable
+            print(_strip_markup(str(renderable)))
+
+
+    class SpinnerColumn:
+        pass
+
+
+    class TextColumn:
+        def __init__(self, *args, **kwargs):
+            pass
+
+
+    class Progress:
+        def __init__(self, *args, **kwargs):
+            self.last_description = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add_task(self, description, total=None):
+            self.last_description = description
+            print(_strip_markup(description))
+            return 1
+
+        def update(self, task_id, description=None):
+            if description and description != self.last_description:
+                self.last_description = description
+                print(_strip_markup(description))
+
+
+    class Prompt:
+        @staticmethod
+        def ask(message, choices=None, default=None, show_choices=True, **kwargs):
+            suffix = ""
+            if choices and show_choices:
+                suffix = f" ({'/'.join(choices)})"
+            if default is not None:
+                suffix = f"{suffix} [{default}]"
+            value = input(f"{_strip_markup(message)}{suffix}: ").strip()
+            if not value and default is not None:
+                value = str(default)
+            if choices and value not in choices:
+                raise ValueError(f"Ожидается одно из значений: {', '.join(choices)}")
+            return value
+
+
+    class Confirm:
+        @staticmethod
+        def ask(message, default=False, **kwargs):
+            prompt = "Y/n" if default else "y/N"
+            value = input(f"{_strip_markup(message)} [{prompt}]: ").strip().lower()
+            if not value:
+                return default
+            return value in {"y", "yes", "1", "true"}
+
+
+    class Console:
+        def print(self, *args, **kwargs):
+            print(*(_strip_markup(str(arg)) for arg in args))
+
+        def log(self, *args, **kwargs):
+            self.print(*args)
+
+        @contextmanager
+        def status(self, message):
+            self.print(message)
+            yield
 
 
 def ensure_utf8_locale():
@@ -59,7 +191,59 @@ TEMP_DIR = os.path.expanduser("~/.solobot_tmp")
 PROJECT_DIR = os.path.abspath(os.path.dirname(__file__))
 IS_ROOT_DIR = PROJECT_DIR == "/root"
 GITHUB_REPO = "https://github.com/Vladless/Solo_bot"
-SERVICE_NAME = BOT_SERVICE
+DEFAULT_SERVICE_NAME = "bot.service"
+VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "bin", "python")
+
+
+class HttpResponse:
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return json.loads(self.text)
+
+
+def http_get(url: str, *, params=None, timeout: int = 10) -> HttpResponse:
+    if requests is not None:
+        response = requests.get(url, params=params, timeout=timeout)
+        return HttpResponse(response.status_code, response.text)
+
+    final_url = url
+    if params:
+        final_url = f"{url}?{urlencode(params)}"
+    request = Request(final_url, headers={"User-Agent": "SoloBot-CLI"})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return HttpResponse(response.status, response.read().decode("utf-8"))
+    except HTTPError as error:
+        return HttpResponse(error.code, error.read().decode("utf-8", errors="replace"))
+    except URLError:
+        return HttpResponse(599, "")
+
+
+def detect_service_name() -> str:
+    config_path = os.path.join(PROJECT_DIR, "config.py")
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, encoding="utf-8") as config_file:
+                config_text = config_file.read()
+            match = re.search(r"BOT_SERVICE\s*=\s*['\"]([^'\"]+)['\"]", config_text)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+    return DEFAULT_SERVICE_NAME
+
+
+def refresh_service_name() -> str:
+    global SERVICE_NAME, SYSTEMD_SERVICE_PATH
+    SERVICE_NAME = detect_service_name()
+    SYSTEMD_SERVICE_PATH = os.path.join("/etc/systemd/system", SERVICE_NAME)
+    return SERVICE_NAME
+
+
+SERVICE_NAME = refresh_service_name()
 
 
 def is_ascii_only(value: str) -> bool:
@@ -103,6 +287,9 @@ def safe_prompt(message: str, **kwargs) -> str:
         except UnicodeDecodeError:
             warn_english_only()
             continue
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            continue
         if isinstance(value, str) and not is_ascii_only(value):
             warn_english_only()
             continue
@@ -123,6 +310,236 @@ def is_service_exists(service_name):
     return service_name in result.stdout
 
 
+def get_runtime_user() -> str:
+    return os.environ.get("SUDO_USER") or subprocess.check_output(["whoami"], text=True).strip()
+
+
+def has_project_code() -> bool:
+    required_paths = ("requirements.txt", "main.py")
+    return all(os.path.exists(os.path.join(PROJECT_DIR, path)) for path in required_paths)
+
+
+def has_local_config() -> bool:
+    return os.path.exists(os.path.join(PROJECT_DIR, "config.py"))
+
+
+def bootstrap_project_files(branch: str = "main") -> bool:
+    refresh_service_name()
+    if has_project_code():
+        return True
+
+    console.print("[yellow]Полный проект рядом не найден. Подтягиваю файлы бота...[/yellow]")
+    install_core_packages_if_needed()
+    install_rsync_if_needed()
+
+    subprocess.run(["rm", "-rf", TEMP_DIR], check=False)
+    clone_result = subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", branch, GITHUB_REPO, TEMP_DIR],
+        check=False,
+    )
+    if clone_result.returncode != 0:
+        console.print("[red]❌ Не удалось скачать проект из GitHub.[/red]")
+        return False
+
+    rsync_cmd = ["rsync", "-a", f"{TEMP_DIR}/", f"{PROJECT_DIR}/"]
+    if has_local_config():
+        rsync_cmd.insert(2, "--exclude=config.py")
+    if os.path.exists(os.path.join(PROJECT_DIR, "handlers", "texts.py")):
+        rsync_cmd.insert(2, "--exclude=handlers/texts.py")
+    if os.path.exists(os.path.join(PROJECT_DIR, "handlers", "buttons.py")):
+        rsync_cmd.insert(2, "--exclude=handlers/buttons.py")
+    if os.path.exists(os.path.join(PROJECT_DIR, "core", "redis_cache.py")):
+        rsync_cmd.insert(2, "--exclude=core/redis_cache.py")
+    if os.path.exists(os.path.join(PROJECT_DIR, "img")):
+        rsync_cmd.insert(2, "--exclude=img")
+    if os.path.exists(os.path.join(PROJECT_DIR, "modules")):
+        rsync_cmd.insert(2, "--exclude=modules")
+    rsync_cmd.insert(2, "--exclude=.git")
+
+    sync_result = subprocess.run(rsync_cmd, check=False)
+    subprocess.run(["rm", "-rf", TEMP_DIR], check=False)
+    if sync_result.returncode != 0:
+        console.print("[red]❌ Не удалось распаковать файлы проекта.[/red]")
+        return False
+
+    refresh_service_name()
+    console.print("[green]Файлы проекта подготовлены.[/green]")
+    return True
+
+
+def install_core_packages_if_needed():
+    missing_packages = []
+
+    if shutil.which("git") is None:
+        missing_packages.append("git")
+    if shutil.which("rsync") is None:
+        missing_packages.append("rsync")
+
+    python312_path = shutil.which("python3.12")
+    if python312_path is None:
+        missing_packages.extend(["python3.12", "python3.12-venv"])
+    else:
+        venv_check = subprocess.run(
+            [python312_path, "-m", "venv", "--help"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if venv_check.returncode != 0:
+            missing_packages.append("python3.12-venv")
+
+    if not missing_packages:
+        return
+
+    unique_packages = list(dict.fromkeys(missing_packages))
+    console.print(f"[yellow]Устанавливаю системные пакеты: {', '.join(unique_packages)}[/yellow]")
+    subprocess.run(["sudo", "apt", "update"], check=True)
+    subprocess.run(["sudo", "apt", "install", "-y", *unique_packages], check=True)
+
+
+def build_systemd_service() -> str:
+    run_user = get_runtime_user()
+    return (
+        "[Unit]\n"
+        "Description=SoloBot Telegram bot\n"
+        "After=network.target\n\n"
+        "[Service]\n"
+        f"User={run_user}\n"
+        f"WorkingDirectory={PROJECT_DIR}\n"
+        f"ExecStart={VENV_PYTHON} {os.path.join(PROJECT_DIR, 'main.py')}\n"
+        "Restart=always\n"
+        "RestartSec=5\n"
+        'Environment="PYTHONUNBUFFERED=1"\n\n'
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def ensure_systemd_service() -> bool:
+    refresh_service_name()
+    console.print(f"[yellow]Проверяю systemd-службу {SERVICE_NAME}...[/yellow]")
+    service_text = build_systemd_service()
+    service_exists = os.path.exists(SYSTEMD_SERVICE_PATH)
+
+    if service_exists:
+        try:
+            with open(SYSTEMD_SERVICE_PATH, encoding="utf-8") as service_file:
+                if service_file.read() == service_text:
+                    console.print(f"[green]Служба {SERVICE_NAME} уже настроена.[/green]")
+                    return True
+        except Exception:
+            pass
+
+    try:
+        subprocess.run(
+            ["sudo", "tee", SYSTEMD_SERVICE_PATH],
+            input=service_text,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        console.print(f"[green]Служба {SERVICE_NAME} настроена.[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[red]❌ Не удалось настроить службу {SERVICE_NAME}: {e}[/red]")
+        return False
+
+
+def initialize_database() -> bool:
+    if not os.path.exists(VENV_PYTHON):
+        console.print("[yellow]Инициализация базы пропущена: виртуальное окружение ещё не создано.[/yellow]")
+        return False
+    console.print("[yellow]Инициализация базы данных...[/yellow]")
+    try:
+        subprocess.run(
+            [
+                VENV_PYTHON,
+                "-c",
+                "import asyncio; from database.init_db import init_db; asyncio.run(init_db())",
+            ],
+            cwd=PROJECT_DIR,
+            check=True,
+        )
+        console.print("[green]База данных успешно инициализирована.[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[red]❌ Не удалось инициализировать базу данных: {e}[/red]")
+        return False
+
+
+def enable_and_start_service(start_now: bool = True) -> None:
+    refresh_service_name()
+    subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+    subprocess.run(["sudo", "systemctl", "enable", SERVICE_NAME], check=True)
+    if start_now:
+        subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME], check=True)
+        console.print(f"[green]Служба {SERVICE_NAME} включена и запущена.[/green]")
+    else:
+        console.print(
+            f"[yellow]Служба {SERVICE_NAME} включена, но не запущена. Проверьте config.py и доступность базы данных.[/yellow]"
+        )
+
+
+def is_runtime_ready() -> bool:
+    refresh_service_name()
+    if not has_project_code():
+        return False
+    return os.path.exists(VENV_PYTHON) and is_service_exists(SERVICE_NAME)
+
+
+def install_bot():
+    console.print(
+        Panel(
+            "[white]CLI подготовит окружение, установит зависимости, создаст systemd-службу "
+            "и попробует инициализировать базу данных. Если проекта ещё нет рядом, CLI сначала скачает его автоматически.[/white]",
+            border_style="green",
+            title="[bold green]Автоматическая установка SoloBot[/bold green]",
+            padding=(1, 2),
+        )
+    )
+
+    if not safe_confirm("[bold green]Запустить автоматическую установку?[/bold green]", default=True):
+        return
+
+    try:
+        branch = "main"
+        if not has_project_code():
+            use_beta = safe_confirm("[yellow]Скачать beta/dev ветку вместо стабильной?[/yellow]", default=False)
+            branch = "dev" if use_beta else "main"
+        if not bootstrap_project_files(branch=branch):
+            return
+        refresh_service_name()
+        install_core_packages_if_needed()
+        install_dependencies()
+        db_ready = initialize_database()
+        if not ensure_systemd_service():
+            return
+        fix_permissions()
+        enable_and_start_service(start_now=db_ready)
+        console.print("[green]✅ Установка SoloBot завершена.[/green]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]❌ Ошибка во время установки: {e}[/red]")
+
+
+def prompt_install_if_needed():
+    if is_runtime_ready():
+        return
+
+    missing_parts = []
+    if not has_project_code():
+        missing_parts.append("файлы проекта")
+    if has_project_code() and not os.path.exists(VENV_PYTHON):
+        missing_parts.append("виртуальное окружение")
+    refresh_service_name()
+    if has_project_code() and not is_service_exists(SERVICE_NAME):
+        missing_parts.append(f"служба {SERVICE_NAME}")
+
+    console.print(f"[yellow]Обнаружена неполная установка: {', '.join(missing_parts)}.[/yellow]")
+    if safe_confirm("[green]Выполнить автоматическую установку сейчас?[/green]", default=True):
+        install_bot()
+
+
 def print_logo():
     logo_lines = [
         "███████╗ ██████╗ ██╗      ██████╗ ██████╗  ██████╗ ████████╗",
@@ -141,7 +558,11 @@ def print_logo():
             live.update(panel)
             sleep(0.07)
 
-    console.print(f"[bold green]Директория бота:[/bold green] [yellow]{PROJECT_DIR}[/yellow]\n")
+    local_version = get_local_version() or "unknown"
+    last_update = get_last_update_date() or "unknown"
+    console.print(f"[bold green]Директория бота:[/bold green] [yellow]{PROJECT_DIR}[/yellow]")
+    console.print(f"[bold green]Установленная версия:[/bold green] [yellow]{local_version}[/yellow]")
+    console.print(f"[bold green]Последнее обновление:[/bold green] [yellow]{last_update}[/yellow]\n")
 
 
 def list_backups():
@@ -240,7 +661,7 @@ def auto_update_cli():
     console.print("[yellow]Проверка обновлений CLI...[/yellow]")
     try:
         url = "https://raw.githubusercontent.com/Vladless/Solo_bot/dev/cli_launcher.py"
-        response = requests.get(url, timeout=10)
+        response = http_get(url, timeout=10)
         if response.status_code != 200:
             console.print("[red]Не удалось получить обновление CLI[/red]")
             return
@@ -298,9 +719,7 @@ def fix_permissions():
 
 
 def install_rsync_if_needed():
-    if subprocess.run(["which", "rsync"], capture_output=True).returncode != 0:
-        console.print("[blue]Установка rsync...[/blue]")
-        os.system("sudo apt update && sudo apt install -y rsync")
+    install_core_packages_if_needed()
 
 
 def clean_project_dir_safe(update_buttons=False, update_img=False, update_redis_cache=False):
@@ -363,13 +782,12 @@ def clean_project_dir_safe(update_buttons=False, update_img=False, update_redis_
 
 
 def install_git_if_needed():
-    if subprocess.run(["which", "git"], capture_output=True).returncode != 0:
-        console.print("[blue]Установка Git...[/blue]")
-        os.system("sudo apt update && sudo apt install -y git")
+    install_core_packages_if_needed()
 
 
 def install_dependencies():
     console.print("[blue]Установка зависимостей...[/blue]")
+    install_core_packages_if_needed()
 
     python312_path = shutil.which("python3.12")
     if not python312_path:
@@ -405,15 +823,27 @@ def install_dependencies():
 
 
 def restart_service():
-    if is_service_exists(SERVICE_NAME):
+    if ensure_systemd_service():
         console.print("[blue]🚀 Перезапуск службы...[/blue]")
         with console.status("[bold yellow]Перезапуск...[/bold yellow]"):
+            subprocess.run(["sudo", "systemctl", "enable", SERVICE_NAME], check=False)
             subprocess.run(["sudo", "systemctl", "restart", SERVICE_NAME])
-    else:
-        console.print(f"[red]❌ Служба {SERVICE_NAME} не найдена.[/red]")
 
 
 def get_local_version():
+    try:
+        result = subprocess.run(
+            ["git", "-C", PROJECT_DIR, "describe", "--tags", "--always"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        version = result.stdout.strip()
+        if result.returncode == 0 and version:
+            return version
+    except Exception:
+        pass
+
     path = os.path.join(PROJECT_DIR, "bot.py")
     if not os.path.isfile(path):
         return None
@@ -425,10 +855,39 @@ def get_local_version():
     return None
 
 
+def get_last_update_date():
+    try:
+        result = subprocess.run(
+            ["git", "-C", PROJECT_DIR, "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M:%S"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            return value
+    except Exception:
+        pass
+
+    excluded_dirs = {".git", "venv", ".venv", "__pycache__", "build", "dist"}
+    latest_mtime = 0.0
+    for root, dirs, files in os.walk(PROJECT_DIR):
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
+        for file_name in files:
+            path = os.path.join(root, file_name)
+            try:
+                latest_mtime = max(latest_mtime, os.path.getmtime(path))
+            except Exception:
+                continue
+    if latest_mtime <= 0:
+        return None
+    return datetime.fromtimestamp(latest_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def get_remote_version(branch="main"):
     try:
         url = f"https://raw.githubusercontent.com/Vladless/Solo_bot/{branch}/bot.py"
-        response = requests.get(url, timeout=10)
+        response = http_get(url, timeout=10)
         if response.status_code == 200:
             for line in response.text.splitlines():
                 match = re.search(r'version\s*=\s*["\'](.+?)["\']', line)
@@ -596,14 +1055,14 @@ def update_from_release():
     install_rsync_if_needed()
 
     try:
-        rel_resp = requests.get(
+        rel_resp = http_get(
             "https://api.github.com/repos/Vladless/Solo_bot/releases",
             timeout=10,
         )
         releases = rel_resp.json() if rel_resp.status_code == 200 else []
         release_tag_names = {r["tag_name"] for r in releases}
 
-        tags_resp = requests.get(
+        tags_resp = http_get(
             "https://api.github.com/repos/Vladless/Solo_bot/tags",
             params={"per_page": 50},
             timeout=10,
@@ -664,7 +1123,7 @@ def show_update_menu():
 
 
 def show_menu():
-    table = Table(title="Solobot CLI v0.4.0", title_style="bold magenta", header_style="bold blue")
+    table = Table(title="Solobot CLI v0.5.0", title_style="bold magenta", header_style="bold blue")
     table.add_column("№", justify="center", style="cyan", no_wrap=True)
     table.add_column("Операция", style="white")
     table.add_row("1", "Запустить бота (systemd)")
@@ -675,28 +1134,38 @@ def show_menu():
     table.add_row("6", "Показать статус")
     table.add_row("7", "Обновить Solobot")
     table.add_row("8", "Восстановить из бэкапа")
-    table.add_row("9", "Выход")
+    table.add_row("9", "Установить / переустановить бота")
+    table.add_row("10", "Выход")
     console.print(table)
 
 
 def main():
     os.chdir(PROJECT_DIR)
-    auto_update_cli()
+   # auto_update_cli()
     print_logo()
+    prompt_install_if_needed()
     try:
         while True:
+            refresh_service_name()
             show_menu()
             choice = safe_prompt(
                 "[bold blue]👉 Введите номер действия[/bold blue]",
-                choices=[str(i) for i in range(1, 10)],
+                choices=[str(i) for i in range(1, 11)],
                 show_choices=False,
             )
             if choice == "1":
                 if is_service_exists(SERVICE_NAME):
                     subprocess.run(["sudo", "systemctl", "start", SERVICE_NAME])
                 else:
-                    console.print(f"[red]❌ Служба {SERVICE_NAME} не найдена.[/red]")
+                    console.print(f"[yellow]Служба {SERVICE_NAME} не найдена.[/yellow]")
+                    if safe_confirm("[green]Установить бота и создать службу сейчас?[/green]", default=True):
+                        install_bot()
             elif choice == "2":
+                if not os.path.exists(VENV_PYTHON):
+                    console.print("[yellow]Виртуальное окружение ещё не создано.[/yellow]")
+                    if safe_confirm("[green]Подготовить окружение через автоматическую установку?[/green]", default=True):
+                        install_bot()
+                    continue
                 if safe_confirm("[green]Вы действительно хотите запустить main.py вручную?[/green]"):
                     subprocess.run(["venv/bin/python", "main.py"])
             elif choice == "3":
@@ -734,6 +1203,8 @@ def main():
             elif choice == "8":
                 restore_from_backup()
             elif choice == "9":
+                install_bot()
+            elif choice == "10":
                 console.print("[bold cyan]Выход из CLI. Удачного дня![/bold cyan]")
                 break
     except KeyboardInterrupt:

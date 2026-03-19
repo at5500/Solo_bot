@@ -70,8 +70,18 @@ level_mapping = {50: "CRITICAL", 40: "ERROR", 30: "WARNING", 20: "INFO", 10: "DE
 
 class InterceptHandler(logging.Handler):
     def emit(self, record):
+        message = record.getMessage()
+        if (
+            record.name.startswith("aiohttp.")
+            and "Invalid method encountered" in message
+            and "b'\\x16\\x03\\x01'" in message
+        ):
+            logger.opt(depth=6).warning(
+                "[HTTP] На порт пришли TLS/HTTPS данные вместо HTTP, соединение закрыто"
+            )
+            return
         logger.opt(depth=6, exception=record.exc_info).log(
-            level_mapping.get(record.levelno, "INFO"), record.getMessage()
+            level_mapping.get(record.levelno, "INFO"), message
         )
 
 
