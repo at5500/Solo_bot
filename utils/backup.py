@@ -32,7 +32,7 @@ from config import (
 from logger import logger
 
 
-async def backup_database() -> Exception | None:
+async def backup_database(bot_instance: Bot | None = None) -> Exception | None:
     """
     Создает резервную копию базы данных (или полный архив) и отправляет его администраторам.
     Блокирующие операции (pg_dump и т.д.) выполняются в пуле процессов, не блокируя event loop и используя другие ядра CPU.
@@ -56,7 +56,7 @@ async def backup_database() -> Exception | None:
 
     logger.info("[Backup] Файл создан: {}", backup_file_path)
     try:
-        await _send_backup_to_admins(backup_file_path)
+        await _send_backup_to_admins(backup_file_path, bot_instance=bot_instance)
         exception = await run_io(_cleanup_old_backups)
 
         if exception:
@@ -234,7 +234,7 @@ async def create_backup_and_send_to_admins(client) -> None:
     await client.database.export()
 
 
-async def _send_backup_to_admins(backup_file_path: str) -> None:
+async def _send_backup_to_admins(backup_file_path: str, bot_instance: Bot | None = None) -> None:
     """
     Отправляет файл бэкапа всем администраторам через Telegram.
 
@@ -247,12 +247,14 @@ async def _send_backup_to_admins(backup_file_path: str) -> None:
     if not backup_file_path or not os.path.exists(backup_file_path):
         raise FileNotFoundError(f"Файл бэкапа не найден: {backup_file_path}")
 
-    from bot import bot
+    active_bot = bot_instance
+    if active_bot is None:
+        from bot import bot as active_bot
 
     async def send_default():
         for admin_id in ADMIN_ID:
             try:
-                await bot.send_document(chat_id=admin_id, document=backup_input_file)
+                await active_bot.send_document(chat_id=admin_id, document=backup_input_file)
                 logger.info("[Backup] Отправлено админу: {}", admin_id)
             except Exception as e:
                 logger.error("[Backup] Не отправлено админу {}: {}", admin_id, e)
@@ -280,7 +282,7 @@ async def _send_backup_to_admins(backup_file_path: str) -> None:
                 if BACKUP_CAPTION:
                     send_kwargs["caption"] = BACKUP_CAPTION
                 try:
-                    await bot.send_document(**send_kwargs)
+                    await active_bot.send_document(**send_kwargs)
                     logger.info("[Backup] Отправлено в канал: {} (топик: {})", channel_id, thread_id)
                 except Exception as e:
                     logger.error("[Backup] Не отправлено в канал {}: {}, fallback", channel_id, e)

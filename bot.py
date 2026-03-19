@@ -36,13 +36,13 @@ dp.message.filter(IsPrivateFilter())
 dp.callback_query.filter(IsPrivateFilter())
 
 async def _on_dispatcher_startup(*_args, **_kwargs):
-    from handlers.notifications.task_manager import ensure_periodic_task_manager_started
+    from core.tasks import ensure_periodic_task_manager_started
 
     await ensure_periodic_task_manager_started(bot, async_session_maker)
 
 
 async def _on_dispatcher_shutdown(*_args, **_kwargs):
-    from handlers.notifications.task_manager import ensure_periodic_task_manager_stopped
+    from core.tasks import ensure_periodic_task_manager_stopped
 
     await ensure_periodic_task_manager_stopped()
 
