@@ -236,6 +236,8 @@ async def update_subscription(
     selected_device_limit = getattr(record, "selected_device_limit", None)
     selected_traffic_limit = getattr(record, "selected_traffic_limit", None)
     selected_price_rub = getattr(record, "selected_price_rub", None)
+    current_device_limit_db = getattr(record, "current_device_limit", None)
+    current_traffic_limit_db = getattr(record, "current_traffic_limit", None)
 
     tariff = None
     subgroup_code = getattr(record, "subgroup_code", None)
@@ -330,6 +332,11 @@ async def update_subscription(
         traffic_limit_gb = int(tariff.traffic_limit) if tariff.traffic_limit is not None else None
         device_limit = int(tariff.device_limit) if tariff.device_limit is not None else 0
 
+    if current_device_limit_db is not None:
+        device_limit = int(current_device_limit_db)
+    if current_traffic_limit_db is not None:
+        traffic_limit_gb = int(current_traffic_limit_db)
+
     new_client_id, remnawave_link_value = await update_key_on_cluster(
         tg_id=tg_id,
         client_id=client_id,
@@ -373,4 +380,6 @@ async def update_subscription(
         selected_device_limit=selected_device_limit,
         selected_traffic_limit=selected_traffic_limit,
         selected_price_rub=selected_price_rub,
+        current_device_limit=current_device_limit_db,
+        current_traffic_limit=current_traffic_limit_db,
     )
