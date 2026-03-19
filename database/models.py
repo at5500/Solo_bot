@@ -17,7 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    text,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
@@ -48,7 +48,7 @@ class Identity(DictLikeMixin, Base):
     api_token_hash = Column(String(64), nullable=True, index=True)
     token_issued_at = Column(DateTime, nullable=True)
     password_hash = Column(String(64), nullable=True)
-    is_admin = Column(Boolean, nullable=False, server_default=text("false"))
+    is_admin = Column(Boolean, nullable=False, server_default=sql_text("false"))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -207,7 +207,7 @@ class Coupon(DictLikeMixin, Base):
     usage_count = Column(Integer, default=0)
     is_used = Column(Boolean, default=False)
     days = Column(Integer, nullable=True)
-    new_users_only = Column(Boolean, nullable=False, server_default=text("false"))
+    new_users_only = Column(Boolean, nullable=False, server_default=sql_text("false"))
 
     percent = Column(Integer, nullable=True)
     max_discount_amount = Column(Integer, nullable=True)
@@ -247,15 +247,15 @@ class ScheduledBroadcast(DictLikeMixin, Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     created_by_tg_id = Column(BigInteger, ForeignKey("users.tg_id", ondelete="SET NULL"), nullable=True, index=True)
-    status = Column(String(32), nullable=False, server_default=text("'scheduled'"), index=True)
+    status = Column(String(32), nullable=False, server_default=sql_text("'scheduled'"), index=True)
     send_to = Column(String(32), nullable=False, index=True)
     cluster_name = Column(String, nullable=True)
     text = Column(Text, nullable=False)
     photo = Column(String, nullable=True)
     keyboard_json = Column(JSONB, nullable=True)
     scheduled_for = Column(DateTime(timezone=True), nullable=False, index=True)
-    workers = Column(Integer, nullable=False, server_default=text("5"))
-    messages_per_second = Column(Integer, nullable=False, server_default=text("35"))
+    workers = Column(Integer, nullable=False, server_default=sql_text("5"))
+    messages_per_second = Column(Integer, nullable=False, server_default=sql_text("35"))
     stats_json = Column(JSONB, nullable=True)
     error_text = Column(Text, nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
@@ -350,7 +350,7 @@ class AuditEvent(DictLikeMixin, Base):
     path_or_handler = Column(String(255), nullable=False)
     entity_type = Column(String(64), nullable=True, index=True)
     entity_id = Column(String(255), nullable=True, index=True)
-    result = Column(String(32), nullable=False, server_default=text("'success'"))
+    result = Column(String(32), nullable=False, server_default=sql_text("'success'"))
     reason = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSONB, nullable=True)
     request_id = Column(String(64), nullable=True, index=True)

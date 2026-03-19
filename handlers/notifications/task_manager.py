@@ -65,7 +65,10 @@ def _register_periodic_tasks() -> None:
     from handlers.admin.sender.scheduled_service import scheduled_broadcasts_loop
     from handlers.notifications.general_notifications import periodic_notifications
 
-    periodic_task_manager.register_loop_task("notifications", periodic_notifications)
+    periodic_task_manager.register_loop_task(
+        "notifications",
+        lambda bot, sessionmaker: periodic_notifications(bot, sessionmaker=sessionmaker),
+    )
     periodic_task_manager.register_loop_task("scheduled_broadcasts", lambda bot, sessionmaker: scheduled_broadcasts_loop(bot))
     periodic_task_manager.register_loop_task("backup", _backup_loop)
     periodic_task_manager.register_loop_task("server_checks", _server_checks_loop)

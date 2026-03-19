@@ -8,10 +8,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import API_TOKEN, REDIS_URL
 from database import async_session_maker
 from filters.private import IsPrivateFilter
-from handlers.notifications.task_manager import (
-    ensure_periodic_task_manager_started,
-    ensure_periodic_task_manager_stopped,
-)
 from utils.button_icons import apply_button_icons_patch, set_button_icon_config
 from utils.custom_emojis import initialize_custom_emojis
 from utils.errors import setup_error_handlers
@@ -40,10 +36,14 @@ dp.message.filter(IsPrivateFilter())
 dp.callback_query.filter(IsPrivateFilter())
 
 async def _on_dispatcher_startup(*_args, **_kwargs):
+    from handlers.notifications.task_manager import ensure_periodic_task_manager_started
+
     await ensure_periodic_task_manager_started(bot, async_session_maker)
 
 
 async def _on_dispatcher_shutdown(*_args, **_kwargs):
+    from handlers.notifications.task_manager import ensure_periodic_task_manager_stopped
+
     await ensure_periodic_task_manager_stopped()
 
 

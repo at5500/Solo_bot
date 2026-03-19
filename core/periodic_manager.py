@@ -1,4 +1,6 @@
 import asyncio
+import fcntl
+import os
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -37,6 +39,8 @@ class PeriodicTaskManager:
         self._scheduler: AsyncIOScheduler | None = None
         self._started = False
         self._lock = asyncio.Lock()
+        self._process_lock_file = None
+        self._process_lock_path = "/tmp/solo_bot_periodic_manager.lock"
 
     def register_loop_task(self, task_id: str, runner: LoopRunner) -> None:
         self._loop_tasks[task_id] = ManagedLoopTask(task_id=task_id, runner=runner)
@@ -44,9 +48,41 @@ class PeriodicTaskManager:
     def register_cron_task(self, task_id: str, runner: CronRunner, trigger: BaseTrigger) -> None:
         self._cron_tasks[task_id] = ManagedCronTask(task_id=task_id, runner=runner, trigger=trigger)
 
+    def _acquire_process_lock(self) -> bool:
+        if self._process_lock_file is not None:
+            return True
+        lock_file = open(self._process_lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(str(os.getpid()))
+            lock_file.flush()
+            self._process_lock_file = lock_file
+            return True
+        except OSError:
+            lock_file.close()
+            return False
+
+    def _release_process_lock(self) -> None:
+        if self._process_lock_file is None:
+            return
+        try:
+            fcntl.flock(self._process_lock_file.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self._process_lock_file.close()
+        except OSError:
+            pass
+        self._process_lock_file = None
+
     async def start(self, bot: Bot, sessionmaker: async_sessionmaker) -> None:
         async with self._lock:
             if self._started:
+                return
+            if not self._acquire_process_lock():
+                logger.info("[PeriodicManager] Уже запущен в другом процессе, текущий запуск пропущен")
                 return
             scheduler = AsyncIOScheduler(timezone=self.timezone_name)
             for cron_task in self._cron_tasks.values():
@@ -86,6 +122,7 @@ class PeriodicTaskManager:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._started = False
+            self._release_process_lock()
             logger.info("[PeriodicManager] Остановлен")
 
 

@@ -23,6 +23,7 @@ from database.scheduled_broadcasts import (
 )
 from handlers.admin.sender.sender_service import BroadcastService
 from handlers.admin.sender.sender_utils import get_recipients, parse_message_buttons
+from logger import logger
 
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
@@ -208,5 +209,8 @@ async def scheduled_broadcasts_loop(
     limit: int = 3,
 ) -> None:
     while True:
-        await process_due_scheduled_broadcasts_once(bot, limit=limit)
+        try:
+            await process_due_scheduled_broadcasts_once(bot, limit=limit)
+        except Exception as exc:
+            logger.error("[ScheduledBroadcasts] Loop error: {}", exc)
         await asyncio.sleep(interval_seconds)

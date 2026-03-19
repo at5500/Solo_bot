@@ -100,6 +100,7 @@ def _resolve_update_payload(
     current: ScheduledBroadcast,
 ) -> dict:
     fields = payload.model_fields_set
+    text_changed = "text" in fields
     send_to = payload.send_to if "send_to" in fields else current.send_to
     text = payload.text if "text" in fields else current.text
     photo = payload.photo if "photo" in fields else current.photo
@@ -116,6 +117,9 @@ def _resolve_update_payload(
         workers=workers,
         messages_per_second=messages_per_second,
     )
+    if not text_changed:
+        prepared["text"] = current.text
+        prepared["keyboard_json"] = current.keyboard_json
     if "scheduled_for" in fields:
         prepared["scheduled_for"] = _require_future_schedule(payload.scheduled_for)
     return prepared
