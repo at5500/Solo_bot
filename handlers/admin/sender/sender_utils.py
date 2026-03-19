@@ -12,17 +12,27 @@ from database.models import BlockedUser, Key, ManualBan, Payment, Server, Tariff
 from logger import logger
 
 
+def _not_banned(tg_id_col):
+    return (
+        ~exists().where(BlockedUser.tg_id == tg_id_col)
+        & ~exists().where(
+            ManualBan.tg_id == tg_id_col,
+            (ManualBan.until.is_(None)) | (ManualBan.until > datetime.utcnow()),
+        )
+    )
+
+
 async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str | None = None) -> tuple[list[int], int]:
     now_ms = int(datetime.utcnow().timestamp() * 1000)
-    banned_tg_ids = select(BlockedUser.tg_id).union_all(
-        select(ManualBan.tg_id).where((ManualBan.until.is_(None)) | (ManualBan.until > datetime.utcnow()))
-    )
 
     query = None
 
     if send_to == "subscribed":
         query = (
-            select(distinct(User.tg_id)).join(Key).where(Key.expiry_time > now_ms).where(~User.tg_id.in_(banned_tg_ids))
+            select(distinct(User.tg_id))
+            .join(Key)
+            .where(Key.expiry_time > now_ms)
+            .where(_not_banned(User.tg_id))
         )
 
     elif send_to == "unsubscribed":
@@ -38,14 +48,23 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
                 .having(func.max(Key.expiry_time) <= now_ms)
             )
         )
-        query = select(distinct(subquery.c.tg_id)).where(~subquery.c.tg_id.in_(banned_tg_ids))
+        query = (
+            select(distinct(subquery.c.tg_id))
+            .where(
+                ~exists().where(BlockedUser.tg_id == subquery.c.tg_id),
+                ~exists().where(
+                    ManualBan.tg_id == subquery.c.tg_id,
+                    (ManualBan.until.is_(None)) | (ManualBan.until > datetime.utcnow()),
+                ),
+            )
+        )
 
     elif send_to == "untrial":
         subquery = select(Key.tg_id)
         query = (
             select(distinct(User.tg_id))
             .where(~User.tg_id.in_(subquery) & User.trial.in_([0, -1]))
-            .where(~User.tg_id.in_(banned_tg_ids))
+            .where(_not_banned(User.tg_id))
         )
 
     elif send_to == "cluster":
@@ -54,7 +73,7 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
             .join(Key, User.tg_id == Key.tg_id)
             .join(Server, Key.server_id == Server.cluster_name)
             .where(Server.cluster_name == cluster_name)
-            .where(~User.tg_id.in_(banned_tg_ids))
+            .where(_not_banned(User.tg_id))
         )
 
     elif send_to == "hotleads":
@@ -66,7 +85,7 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
             .where(Payment.amount > 0)
             .where(Payment.payment_system.notin_(PAYMENT_SYSTEMS_EXCLUDED))
             .where(not_(exists(subquery_active_keys.where(Key.tg_id == User.tg_id))))
-            .where(~User.tg_id.in_(banned_tg_ids))
+            .where(_not_banned(User.tg_id))
         )
 
     elif send_to == "trial":
@@ -74,11 +93,11 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
         query = (
             select(distinct(Key.tg_id))
             .where(Key.tariff_id.in_(trial_tariff_subquery))
-            .where(~Key.tg_id.in_(banned_tg_ids))
+            .where(_not_banned(Key.tg_id))
         )
 
     else:
-        query = select(distinct(User.tg_id)).where(~User.tg_id.in_(banned_tg_ids))
+        query = select(distinct(User.tg_id)).where(_not_banned(User.tg_id))
 
     result = await session.execute(query)
     tg_ids = [row[0] for row in result.all()]

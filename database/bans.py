@@ -12,11 +12,16 @@ async def create_blocked_user(session: AsyncSession, tg_id: int):
 
 
 async def save_blocked_user_ids(session: AsyncSession, tg_ids: list[int]) -> None:
-    """Вставка списка tg_id в таблицу BlockedUser. Вызывать только из основного event loop."""
+    """Вставка списка tg_id в таблицу BlockedUser батчами по 500. Вызывать только из основного event loop."""
     if not tg_ids:
         return
-    values = [{"tg_id": tg_id} for tg_id in tg_ids]
-    stmt = insert(BlockedUser).values(values).on_conflict_do_nothing(index_elements=[BlockedUser.tg_id])
-    await session.execute(stmt)
-    await session.commit()
-    logger.info(f"📝 Добавлено {len(tg_ids)} пользователей в blocked_users")
+    batch_size = 500
+    total = 0
+    for i in range(0, len(tg_ids), batch_size):
+        batch = tg_ids[i : i + batch_size]
+        values = [{"tg_id": tg_id} for tg_id in batch]
+        stmt = insert(BlockedUser).values(values).on_conflict_do_nothing(index_elements=[BlockedUser.tg_id])
+        await session.execute(stmt)
+        await session.commit()
+        total += len(batch)
+    logger.info(f"📝 Добавлено {total} пользователей в blocked_users")

@@ -140,14 +140,6 @@ async def handle_days_input(message: Message, state: FSMContext, session: AsyncS
         server_names = [row[0] for row in server_rows.all()]
         server_names.append(cluster_name)
 
-        result = await session.execute(select(Key).where(Key.server_id.in_(server_names)))
-        keys = result.scalars().all()
-
-        if not keys:
-            await message.answer("❌ Нет подписок в этом кластере или сервере.")
-            await state.clear()
-            return
-
         servers = await get_servers(session=session)
         cluster_servers = servers.get(cluster_name, [])
 
@@ -159,7 +151,13 @@ async def handle_days_input(message: Message, state: FSMContext, session: AsyncS
         is_full_remnawave = all(str(s.get("panel_type", "")).lower() == "remnawave" for s in cluster_servers)
 
         if is_full_remnawave:
-            uuids = [key.client_id for key in keys if key.client_id]
+            uuid_rows = await session.execute(
+                select(Key.client_id).where(
+                    Key.server_id.in_(server_names),
+                    Key.client_id.isnot(None),
+                )
+            )
+            uuids = [row[0] for row in uuid_rows.all()]
 
             if not uuids:
                 await message.answer("❌ Нет валидных подписок для продления.")
@@ -189,16 +187,26 @@ async def handle_days_input(message: Message, state: FSMContext, session: AsyncS
             affected = result_bulk.get("affectedRows", 0)
             logger.info(f"[Cluster Extend] Bulk API: продлено {affected} подписок на {days} дней")
 
-            for key in keys:
-                new_expiry = key.expiry_time + add_ms
-                await update_key_expiry(session, key.client_id, new_expiry)
-
+            await session.execute(
+                update(Key)
+                .where(Key.server_id.in_(server_names))
+                .values(expiry_time=Key.expiry_time + add_ms)
+                .execution_options(synchronize_session=False)
+            )
             await session.commit()
 
             await message.answer(
                 f"✅ Время подписки продлено на <b>{days} дней</b> для <b>{affected}</b> пользователей в кластере <b>{cluster_name}</b>."
             )
         else:
+            result = await session.execute(select(Key).where(Key.server_id.in_(server_names)))
+            keys = result.scalars().all()
+
+            if not keys:
+                await message.answer("❌ Нет подписок в этом кластере или сервере.")
+                await state.clear()
+                return
+
             await release_session_early(session)
             for key in keys:
                 new_expiry = key.expiry_time + add_ms
