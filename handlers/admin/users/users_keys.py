@@ -884,7 +884,11 @@ async def handle_delete_key(
         return
 
     await state.set_state(UserEditorState.confirm_delete_key)
-    await state.update_data(delete_key_email=email, delete_key_tg_id=int(callback_data.tg_id))
+    await state.update_data(
+        delete_key_email=email,
+        delete_key_tg_id=int(callback_data.tg_id),
+        delete_key_client_id=client_id,
+    )
 
     await callback_query.message.edit_text(
         text="❓ Вы уверены, что хотите удалить ключ?",
@@ -906,13 +910,16 @@ async def handle_delete_key_confirm(
     data = await state.get_data()
     email = data.get("delete_key_email")
     expected_tg_id = data.get("delete_key_tg_id")
+    client_id = data.get("delete_key_client_id")
     await state.clear()
 
     if not email or int(expected_tg_id or 0) != int(callback_data.tg_id):
         await callback_query.answer("Данные устарели", show_alert=True)
         return
 
-    client_id = key_obj.client_id
+    if not client_id:
+        key_obj = await get_key_by_email(session, email, int(callback_data.tg_id))
+        client_id = key_obj.client_id if key_obj else None
 
     kb = build_editor_kb(callback_data.tg_id)
 
