@@ -1,5 +1,7 @@
 import html
+import re
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytz
@@ -20,6 +22,11 @@ from .keyboard import AdminUserEditorCallback, build_user_audit_kb
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 PAGE_SIZE = 10
+LOGS_DIR = Path(__file__).resolve().parents[3] / "logs"
+BALANCE_LOG_PATTERN = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| [^|]+ \| [^|]+ \| .*?\[DB\] Баланс пользователя "
+    r"(?P<tg_id>\d+) обновлён: (?P<old>-?\d+(?:\.\d+)?) → (?P<new>-?\d+(?:\.\d+)?)$"
+)
 router = Router()
 
 
@@ -70,7 +77,90 @@ def _deserialize_audit_events(cached: list[dict]) -> list:
         ))
     return out
 
+
+def _event_created_at(event) -> datetime:
+    created = getattr(event, "created_at", None)
+    if created is None:
+        return datetime.min
+    if created.tzinfo is not None:
+        return created.astimezone(pytz.UTC).replace(tzinfo=None)
+    return created
+
+
+def _event_created_at_moscow(event) -> datetime | None:
+    created = getattr(event, "created_at", None)
+    if created is None:
+        return None
+    if getattr(event, "event_type", "") == "balance_changed" and created.tzinfo is None:
+        return MOSCOW_TZ.localize(created)
+    if created.tzinfo is None:
+        return pytz.UTC.localize(created).astimezone(MOSCOW_TZ)
+    return created.astimezone(MOSCOW_TZ)
+
+
+def _load_balance_log_events(tg_id: int, limit: int) -> list:
+    if limit <= 0 or not LOGS_DIR.is_dir():
+        return []
+
+    files = [path for path in LOGS_DIR.iterdir() if path.is_file() and path.name.startswith("logging")]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+
+    events = []
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as file:
+                lines = file.read().splitlines()
+        except Exception:
+            continue
+
+        for line in reversed(lines):
+            match = BALANCE_LOG_PATTERN.match(line.strip())
+            if not match:
+                continue
+            if int(match.group("tg_id")) != tg_id:
+                continue
+
+            old_balance = float(match.group("old"))
+            new_balance = float(match.group("new"))
+            amount = new_balance - old_balance
+            if amount == 0:
+                continue
+
+            try:
+                created_at = MOSCOW_TZ.localize(datetime.strptime(match.group("ts"), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+
+            events.append(SimpleNamespace(
+                event_type="balance_changed",
+                channel="system",
+                path_or_handler="logger:balance",
+                actor_identity_id=None,
+                actor_tg_id=tg_id,
+                entity_type="telegram_user",
+                entity_id=tg_id,
+                result="success",
+                reason=None,
+                metadata_={
+                    "amount": amount,
+                    "balance_before": old_balance,
+                    "balance_after": new_balance,
+                },
+                request_id=None,
+                created_at=created_at,
+            ))
+            if len(events) >= limit:
+                break
+        if len(events) >= limit:
+            break
+
+    events.sort(key=_event_created_at, reverse=True)
+    return events[:limit]
+
 EVENT_CATEGORY_MAP = {
+    "balance": {
+        "balance_changed",
+    },
     "auth": {
         "register_success",
         "register_failed",
@@ -127,6 +217,7 @@ EVENT_CATEGORY_MAP = {
 }
 
 EVENT_TYPE_LABELS = {
+    "balance_changed": "Движение баланса",
     "start_entry_opened": "Старт бота",
     "start_link_opened": "Переход по ссылке",
     "register_success": "Регистрация (успех)",
@@ -188,7 +279,7 @@ def _parse_filter_page(raw_data: str | int | None) -> tuple[str, str, int]:
             return "all", "all", 0
         if channel_filter not in {"all", "api", "telegram"}:
             channel_filter = "all"
-        if category_filter not in {"all", "auth", "payments", "subscriptions", "marketing"}:
+        if category_filter not in {"all", "balance", "auth", "payments", "subscriptions", "marketing"}:
             category_filter = "all"
         if page_str.isdigit():
             return channel_filter, category_filter, int(page_str)
@@ -205,8 +296,9 @@ def _resolve_event_types(category_filter: str) -> list[str] | None:
     return sorted(category_events)
 
 
-CATEGORY_BLOCK_ORDER = ("auth", "subscriptions", "payments", "marketing", "other")
+CATEGORY_BLOCK_ORDER = ("balance", "auth", "subscriptions", "payments", "marketing", "other")
 CATEGORY_BLOCK_LABELS = {
+    "balance": "Баланс",
     "auth": "Авторизация",
     "payments": "Платежи",
     "subscriptions": "Подписки",
@@ -219,6 +311,8 @@ def _event_category(event) -> str:
     """Определяет категорию события для группировки (при выборке «все»)."""
     path = (getattr(event, "path_or_handler", None) or "").lower()
     etype = (getattr(event, "event_type", None) or "").lower()
+    if etype == "balance_changed":
+        return "balance"
     if etype != "telegram_access":
         for cat, event_types in EVENT_CATEGORY_MAP.items():
             if etype in event_types:
@@ -260,6 +354,36 @@ def _event_label(event_type: str) -> str:
 _FLOW_INDENT = "   "
 
 
+def _fmt_money(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_balance_event(event) -> str:
+    metadata = getattr(event, "metadata_", None) or {}
+    amount = metadata.get("amount", 0)
+    before = metadata.get("balance_before")
+    after = metadata.get("balance_after")
+    amount_value = float(amount) if isinstance(amount, (int, float)) else 0.0
+    title = "Пополнение" if amount_value > 0 else "Списание" if amount_value < 0 else "Изменение баланса"
+    direction = "+" if amount_value > 0 else ""
+
+    lines = [f"{html.escape(title)}: <code>{direction}{html.escape(_fmt_money(amount))} RUB</code>"]
+    if before is not None and after is not None:
+        lines.append(
+            f"{_FLOW_INDENT}Баланс: <code>{html.escape(_fmt_money(before))}</code> → "
+            f"<code>{html.escape(_fmt_money(after))}</code>"
+        )
+    if event.reason:
+        lines.append(f"{_FLOW_INDENT}{html.escape(str(event.reason)[:100])}")
+    return "\n".join(lines)
+
+
 def _humanize_path(path: str) -> str:
     """Сокращает типичные callback для админки до читаемого вида."""
     if not path or "callback:" not in path:
@@ -288,7 +412,11 @@ def _format_event_line(
     event, show_request_id: bool = False, inside_block: bool = False, skip_time: bool = False
 ) -> str:
     """Строка события. Если skip_time=True — только описание (время уже в строке статуса)."""
-    created_at = event.created_at.replace(tzinfo=pytz.UTC).astimezone(MOSCOW_TZ).strftime("%d.%m %H:%M:%S")
+    created_dt = _event_created_at_moscow(event)
+    created_at = created_dt.strftime("%d.%m %H:%M:%S") if created_dt is not None else "unknown"
+    if event.event_type == "balance_changed":
+        time_part = "" if skip_time else f"<code>{created_at}</code> "
+        return f"{time_part}{_format_balance_event(event)}"
     if event.event_type == "telegram_access":
         raw_path = (event.path_or_handler or "—").strip()
         event_name = html.escape(_humanize_path(raw_path))
@@ -327,7 +455,8 @@ def _format_event_line(
 
 def _format_event_status(event) -> str:
     """Только время и результат (ок/ошибка)."""
-    created_at = event.created_at.replace(tzinfo=pytz.UTC).astimezone(MOSCOW_TZ).strftime("%d.%m %H:%M:%S")
+    created_dt = _event_created_at_moscow(event)
+    created_at = created_dt.strftime("%d.%m %H:%M:%S") if created_dt is not None else "unknown"
     result_text = "ок" if event.result == "success" else "ошибка"
     return f"<code>{created_at}</code> {result_text}"
 
@@ -368,6 +497,8 @@ async def _render_user_audit(
     user_identity_id = await session.scalar(select(User.identity_id).where(User.tg_id == tg_id))
     channel = None if channel_filter == "all" else channel_filter
     event_types = _resolve_event_types(category_filter)
+    include_balance_logs = channel_filter == "all" and category_filter in {"all", "balance"}
+    combined_limit = (page + 1) * PAGE_SIZE + 1
 
     cache_key_str = cache_key(
         "audit_history",
@@ -377,31 +508,51 @@ async def _render_user_audit(
         category_filter,
         page,
     )
-    cached = await cache_get(cache_key_str)
+    cached = None if include_balance_logs else await cache_get(cache_key_str)
     if cached is not None and isinstance(cached, list):
-        raw = _deserialize_audit_events(cached)
+        raw_events = _deserialize_audit_events(cached)
         has_prev = page > 0
-        has_next = len(raw) > PAGE_SIZE
-        events = raw[:PAGE_SIZE]
+        has_next = len(raw_events) > PAGE_SIZE
+        events = raw_events[:PAGE_SIZE]
     else:
-        raw = await list_audit_events(
-            session,
-            tg_id=tg_id,
-            identity_id=user_identity_id,
-            channel=channel,
-            event_types=event_types,
-            limit=PAGE_SIZE + 1,
-            offset=page * PAGE_SIZE,
-        )
-        has_prev = page > 0
-        has_next = len(raw) > PAGE_SIZE
-        events = raw[:PAGE_SIZE]
-        if raw:
-            await cache_set(
-                cache_key_str,
-                _serialize_audit_events(raw),
-                AUDIT_HISTORY_CACHE_TTL_SEC,
+        if include_balance_logs:
+            audit_events = []
+            if category_filter != "balance":
+                audit_events = await list_audit_events(
+                    session,
+                    tg_id=tg_id,
+                    identity_id=user_identity_id,
+                    channel=channel,
+                    event_types=event_types,
+                    limit=combined_limit,
+                    offset=0,
+                )
+            balance_events = _load_balance_log_events(tg_id, combined_limit)
+            merged_events = sorted(audit_events + balance_events, key=_event_created_at, reverse=True)
+            start = page * PAGE_SIZE
+            stop = start + PAGE_SIZE
+            has_prev = page > 0
+            has_next = len(merged_events) > stop
+            events = merged_events[start:stop]
+        else:
+            raw_events = await list_audit_events(
+                session,
+                tg_id=tg_id,
+                identity_id=user_identity_id,
+                channel=channel,
+                event_types=event_types,
+                limit=PAGE_SIZE + 1,
+                offset=page * PAGE_SIZE,
             )
+            has_prev = page > 0
+            has_next = len(raw_events) > PAGE_SIZE
+            events = raw_events[:PAGE_SIZE]
+            if raw_events:
+                await cache_set(
+                    cache_key_str,
+                    _serialize_audit_events(raw_events),
+                    AUDIT_HISTORY_CACHE_TTL_SEC,
+                )
 
     full_flow = channel_filter == "all" and category_filter == "all"
     lines = [f"🕘 <b>История действий клиента</b> <code>{tg_id}</code>"]
@@ -418,7 +569,7 @@ async def _render_user_audit(
     else:
         lines.append("")
         rev = list(reversed(events))
-        if full_flow:
+        if full_flow and not any(getattr(event, "event_type", "") == "balance_changed" for event in rev):
             by_cat: dict[str, list] = {}
             for e in rev:
                 c = _event_category(e)

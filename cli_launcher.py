@@ -1141,7 +1141,7 @@ def show_menu():
 
 def main():
     os.chdir(PROJECT_DIR)
-   # auto_update_cli()
+    auto_update_cli()
     print_logo()
     prompt_install_if_needed()
     try:

@@ -85,8 +85,13 @@ async def invalidate_profile_cache(tg_id: int) -> None:
     await cache_delete(cache_key("profile_data", tg_id))
 
 
-async def update_balance(session: AsyncSession, tg_id: int, amount: float) -> None:
+async def update_balance(
+    session: AsyncSession,
+    tg_id: int,
+    amount: float,
+) -> None:
     try:
+        amount = float(amount)
         res = await session.execute(
             update(User)
             .where(User.tg_id == tg_id)
@@ -94,9 +99,10 @@ async def update_balance(session: AsyncSession, tg_id: int, amount: float) -> No
             .returning(User.balance)
         )
         new_balance = res.scalar_one_or_none()
-        await session.commit()
         if new_balance is not None:
             old_balance = new_balance - amount
+        await session.commit()
+        if new_balance is not None:
             logger.info(f"[DB] Баланс пользователя {tg_id} обновлён: {old_balance} → {new_balance}")
         else:
             logger.info(f"[DB] Баланс пользователя {tg_id} не изменён: пользователь не найден")
@@ -132,8 +138,22 @@ async def get_balance(session: AsyncSession, tg_id: int) -> float:
     return value
 
 
-async def set_user_balance(session: AsyncSession, tg_id: int, balance: float) -> None:
+async def set_user_balance(
+    session: AsyncSession,
+    tg_id: int,
+    balance: float,
+) -> None:
     try:
+        old_balance_result = await session.execute(select(func.coalesce(User.balance, 0.0)).where(User.tg_id == tg_id))
+        old_balance = old_balance_result.scalar_one_or_none()
+        if old_balance is None:
+            await session.execute(update(User).where(User.tg_id == tg_id).values(balance=balance))
+            await session.commit()
+            await invalidate_balance_cache(tg_id)
+            await invalidate_profile_cache(tg_id)
+            return
+
+        balance = float(balance)
         await session.execute(update(User).where(User.tg_id == tg_id).values(balance=balance))
         await session.commit()
         await invalidate_balance_cache(tg_id)

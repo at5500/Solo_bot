@@ -558,6 +558,7 @@ def build_user_audit_kb(
 
     category_labels = {
         "all": "Все",
+        "balance": "Баланс",
         "auth": "Auth",
         "payments": "Платежи",
         "subscriptions": "Подписки",
@@ -572,7 +573,7 @@ def build_user_audit_kb(
                 data=f"{channel_filter}|{category_key}|0",
             ).pack(),
         )
-        for category_key in ("all", "auth", "payments", "subscriptions", "marketing")
+        for category_key in ("all", "balance", "auth", "payments", "subscriptions", "marketing")
     ]
     builder.row(*category_row[:3])
     builder.row(*category_row[3:])
