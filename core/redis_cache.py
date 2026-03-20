@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import time
 from importlib import import_module
 from typing import Any
@@ -6,7 +8,7 @@ from typing import Any
 from config import REDIS_URL
 from logger import logger
 
-_REDIS_CLIENT = None
+_REDIS_CLIENTS: dict[tuple[int, int], Any] = {}
 _REDIS_UNAVAILABLE_UNTIL = 0.0
 _REDIS_BACKOFF_SEC = 5.0
 
@@ -15,17 +17,26 @@ def _now() -> float:
     return time.monotonic()
 
 
-async def _get_redis() -> Any | None:
-    global _REDIS_CLIENT, _REDIS_UNAVAILABLE_UNTIL
-
+def _client_key() -> tuple[int, int]:
     try:
-        from bot import redis as bot_redis
-        if bot_redis is not None:
-            return bot_redis
-    except ImportError:
-        pass
-    if _REDIS_CLIENT is not None:
-        return _REDIS_CLIENT
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+    except RuntimeError:
+        loop_id = 0
+    return os.getpid(), loop_id
+
+
+def _drop_client(client_key: tuple[int, int]) -> None:
+    _REDIS_CLIENTS.pop(client_key, None)
+
+
+async def _get_redis() -> Any | None:
+    global _REDIS_UNAVAILABLE_UNTIL
+
+    client_key = _client_key()
+    client = _REDIS_CLIENTS.get(client_key)
+    if client is not None:
+        return client
     if _REDIS_UNAVAILABLE_UNTIL > _now():
         return None
 
@@ -38,15 +49,15 @@ async def _get_redis() -> Any | None:
             max_connections=64,
         )
         await client.ping()
-        _REDIS_CLIENT = client
-        return _REDIS_CLIENT
+        _REDIS_CLIENTS[client_key] = client
+        return client
     except Exception as exc:
         url_display = REDIS_URL.split("@")[-1] if "@" in REDIS_URL else REDIS_URL
         logger.warning(
             f"[Redis] Подключение не удалось ({url_display}): {exc}. Повтор через {_REDIS_BACKOFF_SEC} с."
         )
         _REDIS_UNAVAILABLE_UNTIL = _now() + _REDIS_BACKOFF_SEC
-        _REDIS_CLIENT = None
+        _drop_client(client_key)
         return None
 
 
@@ -152,9 +163,9 @@ async def cache_delete_pattern(pattern: str) -> int:
 
 async def cache_rpush(key: str, *values: Any) -> int:
     """Добавляет значения в хвост списка. Значения сериализуются в JSON. Возвращает длину списка после или 0 при ошибке."""
-    global _REDIS_CLIENT
     if not values:
         return 0
+    client_key = _client_key()
     client = await _get_redis()
     if client is None:
         return 0
@@ -163,7 +174,7 @@ async def cache_rpush(key: str, *values: Any) -> int:
         return int(await client.rpush(key, *raw))
     except Exception as exc:
         logger.warning(f"[Redis] rpush({key}) не удался: {exc}")
-        _REDIS_CLIENT = None
+        _drop_client(client_key)
         return 0
 
 
