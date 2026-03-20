@@ -1095,6 +1095,9 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                                 created = datetime.now(timezone.utc)
                         elif created is None:
                             created = datetime.now(timezone.utc)
+                        elif not isinstance(created, datetime):
+                            created = datetime.now(timezone.utc)
+                        created = _naive_utc(created)
                         event = AuditEvent(
                             event_type=rec.get("event_type", "telegram_access"),
                             channel=rec.get("channel", "telegram"),
