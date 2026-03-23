@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title></title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{background:#050507}
+#app{opacity:0;transition:opacity .4s}
+#app.ready{opacity:1}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function(){
+"use strict";
+
+const C = {
+  brand: "Dino VPN",
+  hero_title: "Стабильный интернет без\u00A0ограничений",
+  hero_sub: "Безлимитный трафик. Все устройства. Без логов. Разовая оплата.",
+  api: "",
+  support: "",
+  stats: [
+    { num: 35000, suffix: "+",       label: "пользователей", sep: true },
+    { num: 10,    suffix: " Гбит/с", label: "скорость",     sep: false },
+    { num: 99.9,  suffix: "%",      label: "uptime",        sep: false, dec: 1 },
+    { num: 24,    suffix: "/7",     label: "поддержка",     sep: false },
+  ],
+  features: [
+    { img: "https://images.unsplash.com/photo-1558981806-ec527fa84c39?w=900&h=500&fit=crop&q=80", t: "Безлимитный трафик", d: "Никаких лимитов на объём данных. Смотрите видео, скачивайте файлы и работайте без оглядки на счётчик трафика." },
+    { img: "https://images.unsplash.com/photo-1423666639041-f56000c27a9a?w=900&h=500&fit=crop&q=80", t: "Все устройства", d: "Одна подписка на телефон, планшет, ноутбук и даже роутер. До 10 устройств одновременно без доплат." },
+    { img: "https://images.unsplash.com/photo-1633265486064-086b219458ec?w=900&h=500&fit=crop&q=80", t: "Шифрование", d: "Ваш трафик защищён по последним стандартам. Данные невозможно перехватить — ни в кафе, ни в аэропорту, ни дома." },
+    { img: "https://images.unsplash.com/photo-1688092807424-8f1ee617d5ed?w=900&h=500&fit=crop&q=80", t: "10+ локаций по всему миру", d: "Серверы в Европе, Азии и Америке. Выбирайте ближайший для максимальной скорости или нужный для доступа к контенту." },
+  ],
+  steps: [
+    { n: "01", t: "Выберите тариф",  d: "Определитесь с подходящим сроком подписки",
+      svg: '<path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/>' },
+    { n: "02", t: "Укажите e-mail",  d: "На него придёт конфигурация и инструкция",
+      svg: '<path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>' },
+    { n: "03", t: "Оплатите",        d: "Безопасный разовый платёж без подписок",
+      svg: '<path d="M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/>' },
+    { n: "04", t: "Подключайтесь",   d: "Следуйте простой инструкции из письма",
+      svg: '<path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/>' },
+  ],
+  faq: [
+    { q: "Что я получу после оплаты?", a: "На указанный e-mail придёт ссылка для подключения и пошаговая инструкция для вашего устройства." },
+    { q: "Какие устройства поддерживаются?", a: "iPhone, iPad, Android, Mac, Windows, Linux и роутеры. Инструкции для каждой платформы прилагаются." },
+    { q: "Это разовый платёж или подписка?", a: "Разовый платёж. Карта не привязывается, автоматических списаний нет." },
+    { q: "Могу ли я вернуть деньги?", a: "Да, если сервис не заработал — напишите в поддержку, вернём средства." },
+    { q: "Сколько устройств можно подключить?", a: "Зависит от выбранного тарифа. Обычно от 3 до 10 устройств одновременно." },
+  ],
+  tariffs: [
+    { id:1, name:"1 месяц",    price:299,  old_price:399,  duration_days:30,  popular:false },
+    { id:2, name:"3 месяца",   price:799,  old_price:1107, duration_days:90,  popular:false },
+    { id:3, name:"6 месяцев",  price:1499, old_price:2099, duration_days:180, popular:true  },
+    { id:4, name:"12 месяцев", price:2799, old_price:4485, duration_days:365, popular:false },
+  ],
+};
+
+const css = `
+:root{
+  --bg:#050507;--bg2:#0c0c10;--bg3:#141418;--bg4:#1c1c22;
+  --text:#f0f0f2;--text2:#9a9aa8;--text3:#5a5a6e;
+  --border:#2e2e3a;--border2:#3a3a48;
+  --accent:#c8b6ff;--accent2:#a78bfa;--accent-dim:rgba(167,139,250,.08);--accent-glow:rgba(167,139,250,.15);
+  --radius:14px;--max-w:1100px;
+  --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+html{scroll-behavior:smooth;overflow-y:scroll}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--text);text-decoration:none}
+
+.hdr{position:fixed;top:0;left:0;right:0;z-index:100;backdrop-filter:blur(16px);background:rgba(5,5,7,.75);border-bottom:1px solid var(--border)}
+.hdr-in{max-width:var(--max-w);margin:0 auto;padding:14px 24px;position:relative;min-height:52px;display:flex;align-items:center}
+.logo{font-size:18px;font-weight:700;letter-spacing:.3px;color:var(--accent);position:absolute;left:24px;top:50%;transform:translateY(-50%)}
+.hdr-btns{display:flex;gap:8px;margin-left:auto}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 24px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;border:none;transition:all .2s;font-family:var(--font);height:42px}
+.btn-accent{background:var(--accent2);color:#0a0a0f;border:1.5px solid rgba(255,255,255,.4)}
+.btn-accent:hover{background:var(--accent)}
+.btn-ghost{background:transparent;color:var(--text2);border:1.5px solid var(--text2)}
+.btn-ghost:hover{background:var(--bg3);color:var(--text)}
+.btn-lg{padding:22px 48px;font-size:17px;border-radius:8px;height:auto}
+.btn-white{background:var(--text);color:var(--bg);font-weight:700}
+.btn-white:hover{opacity:.9;transform:translateY(-1px)}
+
+.hero{padding:140px 24px 60px;text-align:center;max-width:720px;margin:0 auto;position:relative}
+.hero::before{content:'';position:absolute;top:60px;left:50%;transform:translateX(-50%);width:500px;height:500px;background:radial-gradient(circle,rgba(167,139,250,.06) 0%,transparent 70%);pointer-events:none}
+.hero h1{font-size:clamp(30px,5.5vw,48px);font-weight:800;line-height:1.12;margin-bottom:18px;letter-spacing:-.5px;position:relative}
+.hero p{font-size:18px;color:var(--text2);margin-bottom:40px;position:relative}
+
+.stats-bar{max-width:var(--max-w);margin:0 auto;padding:0 24px}
+.stats-bar-in{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border-radius:var(--radius);overflow:hidden}
+.stat{background:var(--bg2);padding:28px 16px;text-align:center}
+.stat .val{font-size:26px;font-weight:800;color:var(--text);letter-spacing:-.3px}
+.stat .val.done{animation:stat-pop .5s cubic-bezier(.34,1.56,.64,1)}
+.stat .label{font-size:11px;color:var(--text2);margin-top:6px;text-transform:uppercase;letter-spacing:1.5px}
+@keyframes stat-pop{0%{transform:scale(1)}40%{transform:scale(1.3)}70%{transform:scale(.95)}100%{transform:scale(1)}}
+
+.section{max-width:var(--max-w);margin:0 auto;padding:80px 24px}
+.section-title{font-size:clamp(22px,3.5vw,32px);font-weight:700;text-align:center;margin-bottom:12px;letter-spacing:-.3px}
+.section-sub{text-align:center;color:var(--text2);font-size:15px;margin-bottom:48px}
+
+.carousel-wrap{position:relative;overflow:hidden;padding:20px 0;-webkit-mask-image:linear-gradient(to right,transparent 0%,#000 10%,#000 90%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,#000 10%,#000 90%,transparent 100%)}
+.carousel-track{display:flex;gap:16px;transition:transform .5s cubic-bezier(.4,0,.2,1);will-change:transform}
+.feat{width:65%;border-radius:var(--radius);position:relative;overflow:hidden;transition:all .5s cubic-bezier(.4,0,.2,1);opacity:.35;transform:scale(.88);flex-shrink:0}
+.feat.active{opacity:1;transform:scale(1)}
+.feat-img{width:100%;height:340px;object-fit:cover;display:block}
+.feat-overlay{position:absolute;inset:0;background:linear-gradient(to top,rgba(5,5,7,.95) 0%,rgba(5,5,7,.5) 45%,rgba(5,5,7,.1) 100%);display:flex;flex-direction:column;justify-content:flex-end;padding:32px 36px;opacity:0;transition:opacity .4s}
+.feat.active .feat-overlay{opacity:1}
+.feat h3{font-size:22px;font-weight:700;margin-bottom:8px}
+.feat p{font-size:15px;color:var(--text2);line-height:1.5}
+.carousel-dots{display:flex;justify-content:center;gap:8px;margin-top:20px}
+.carousel-dot{width:8px;height:8px;border-radius:50%;background:var(--border2);cursor:pointer;transition:all .25s;border:none;padding:0}
+.carousel-dot.active{background:var(--accent2);width:24px;border-radius:4px}
+.carousel-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.06);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.08);color:var(--text);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;transition:all .2s;z-index:2}
+.carousel-nav:hover{background:rgba(255,255,255,.15)}
+.carousel-prev{left:16px}
+.carousel-next{right:16px}
+
+.tariffs-section{background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:80px 0}
+.tariffs-section .section-title,.tariffs-section .section-sub{padding:0 24px}
+.tariffs-wrap{max-width:var(--max-w);margin:0 auto;padding:0 24px}
+.tariffs{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.tariff{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius);padding:28px 22px;position:relative;cursor:pointer;transition:all .25s;display:flex;flex-direction:column}
+.tariff:hover{border-color:var(--text3);transform:translateY(-2px)}
+.tariff.selected{border-color:var(--accent2);box-shadow:0 0 0 1px var(--accent2),0 8px 32px rgba(167,139,250,.1)}
+.tariff.popular{border-color:var(--accent2);background:linear-gradient(to bottom,rgba(167,139,250,.06),var(--bg3))}
+.tariff-badge{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:var(--accent2);color:#0a0a0f;font-size:11px;padding:3px 14px;border-radius:20px;font-weight:700;white-space:nowrap;letter-spacing:.3px}
+.tariff h3{font-size:16px;font-weight:600;margin-bottom:12px;margin-top:6px}
+.tariff .price{font-size:32px;font-weight:800;letter-spacing:-.5px}
+.tariff .price-currency{font-size:18px;font-weight:600;margin-left:2px}
+.tariff .price-old{display:block;font-size:14px;color:var(--text3);text-decoration:line-through;margin-top:4px;font-weight:400}
+.tariff .per{font-size:13px;color:var(--text3);margin-top:6px}
+.tariff-spacer{flex:1}
+.tariff .buy-btn{display:block;width:100%;margin-top:18px;padding:11px;border-radius:10px;border:1px solid var(--border2);background:transparent;color:var(--text2);font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;font-family:var(--font)}
+.tariff .buy-btn:hover{background:var(--bg4);color:var(--text);border-color:var(--text3)}
+.tariff.selected .buy-btn,.tariff.popular .buy-btn{background:var(--accent2);color:#0a0a0f;border-color:var(--accent2)}
+.tariff.selected .buy-btn:hover,.tariff.popular .buy-btn:hover{background:var(--accent)}
+
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.step{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:28px 20px;position:relative;overflow:hidden}
+.step-bg{position:absolute;top:-40px;right:-36px;width:140px;height:140px;opacity:.06;pointer-events:none}
+.step-bg svg{width:100%;height:100%;fill:var(--text)}
+.step-n{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;background:var(--accent-dim);border:1px solid rgba(167,139,250,.15);font-size:13px;font-weight:700;margin-bottom:14px;color:var(--accent)}
+.step h3{font-size:15px;font-weight:600;margin-bottom:6px}
+.step p{font-size:13px;color:var(--text2)}
+
+.faq-list{max-width:680px;margin:0 auto}
+.faq-item{border-bottom:1px solid var(--border)}
+.faq-q{padding:20px 0;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-size:15px;font-weight:500;gap:16px}
+.faq-arrow{width:20px;height:20px;border-radius:50%;background:var(--bg3);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--text3);transition:all .2s;flex-shrink:0}
+.faq-item.open .faq-arrow{transform:rotate(45deg);color:var(--accent);border-color:var(--accent-dim)}
+.faq-a{max-height:0;overflow:hidden;transition:max-height .3s ease}
+.faq-item.open .faq-a{max-height:200px}
+.faq-a-in{padding:0 0 20px;font-size:14px;color:var(--text2);line-height:1.7}
+
+.checkout{max-width:540px;margin:0 auto;padding:120px 24px 80px}
+.checkout h2{font-size:26px;font-weight:700;margin-bottom:6px}
+.checkout .sub{color:var(--text2);font-size:14px;margin-bottom:32px}
+.checkout .summary{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:22px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:center}
+.checkout .summary .label{font-size:14px;color:var(--text2)}
+.checkout .summary .val{font-size:28px;font-weight:800}
+.checkout .summary .val span{font-size:16px;font-weight:500}
+.field{margin-bottom:16px}
+.field label{display:block;font-size:13px;color:var(--text2);margin-bottom:8px;font-weight:500}
+.field input{width:100%;padding:13px 16px;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;color:var(--text);font-size:15px;outline:none;transition:border-color .2s;font-family:var(--font)}
+.field input:focus{border-color:var(--accent2);box-shadow:0 0 0 3px var(--accent-dim)}
+.field input::placeholder{color:var(--text3)}
+.check{display:flex;align-items:flex-start;gap:10px;margin:22px 0 28px;font-size:13px;color:var(--text2);line-height:1.5}
+.check input{margin-top:3px;accent-color:var(--accent2);width:16px;height:16px;flex-shrink:0}
+.error{color:#f87171;font-size:13px;margin-top:8px;margin-bottom:8px;display:none;padding:10px 14px;background:rgba(248,113,113,.08);border-radius:8px;border:1px solid rgba(248,113,113,.15)}
+.info-cards{display:grid;gap:12px;margin-top:36px}
+.info-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px}
+.info-card h4{font-size:14px;font-weight:600;margin-bottom:4px}
+.info-card p{font-size:13px;color:var(--text2)}
+
+.success{max-width:540px;margin:0 auto;padding:160px 24px 80px;text-align:center}
+.success-icon{width:72px;height:72px;border-radius:50%;background:linear-gradient(135deg,var(--accent2),var(--accent));display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:32px;color:#0a0a0f}
+.success h2{font-size:24px;font-weight:700;margin-bottom:12px}
+.success p{color:var(--text2);font-size:15px;margin-bottom:6px}
+.spinner{width:44px;height:44px;border:3px solid var(--border2);border-top-color:var(--accent2);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 24px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.footer{border-top:1px solid var(--border);margin-top:40px}
+.footer-in{max-width:var(--max-w);margin:0 auto;padding:32px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+.footer-copy{font-size:13px;color:var(--text3)}
+.footer-links{display:flex;gap:20px}
+.footer-links a{font-size:13px;color:var(--text3);transition:color .2s}
+.footer-links a:hover{color:var(--accent)}
+
+@media(max-width:900px){
+  .tariffs{grid-template-columns:repeat(2,1fr)}
+  .features{grid-template-columns:repeat(2,1fr)}
+  .steps{grid-template-columns:repeat(2,1fr)}
+  .stats-bar-in{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:600px){
+  .hdr-in{padding:12px 16px}
+  .hero{padding:110px 16px 50px}
+  .section{padding:60px 16px}
+  .tariffs-section{padding:60px 0}
+  .tariffs{grid-template-columns:1fr}
+  .tariffs-wrap{padding:0 16px}
+  .carousel-wrap{-webkit-mask-image:none;mask-image:none}
+  .section-sub{margin-bottom:24px}
+  .feat{width:85%}
+  .feat-img{height:220px}
+  .feat-overlay{padding:20px 16px}
+  .feat h3{font-size:16px}
+  .feat p{font-size:13px}
+  .carousel-nav{display:none}
+  .carousel-dots{margin-top:12px}
+  .steps{grid-template-columns:1fr}
+  .stats-bar-in{grid-template-columns:repeat(2,1fr)}
+  .checkout{padding:100px 16px 60px}
+  .footer-in{flex-direction:column;align-items:flex-start}
+}
+`;
+
+let state = { page:"home", selectedTariff:2, email:"", agreed:false, paymentId:null };
+
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  if (attrs) Object.entries(attrs).forEach(([k,v]) => {
+    if (k.startsWith("on")) el.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "cls") el.className = v;
+    else if (k === "html") el.innerHTML = v;
+    else el.setAttribute(k, v);
+  });
+  children.flat().forEach(c => {
+    if (c == null) return;
+    el.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  });
+  return el;
+}
+
+function makeHeader(mode) {
+  const btns = [];
+  if (mode === "home") {
+    btns.push(h("a", {cls:"btn btn-accent", href:"#tariffs"}, "Купить"));
+    btns.push(h("button", {cls:"btn btn-ghost", onClick:()=>navigate("login")}, "Личный кабинет"));
+  } else {
+    btns.push(h("button", {cls:"btn btn-ghost", onClick:()=>navigate("home")}, "На главную"));
+  }
+  return h("header", {cls:"hdr"},
+    h("div", {cls:"hdr-in"},
+      h("div", {cls:"logo", style:"cursor:pointer", onClick:()=>navigate("home")}, C.brand),
+      h("div", {cls:"hdr-btns"}, ...btns),
+    )
+  );
+}
+
+function selectAndBuy(i) {
+  state.selectedTariff = i;
+  navigate("checkout");
+}
+
+function renderHome() {
+  return [
+    makeHeader("home"),
+
+    h("section", {cls:"hero"},
+      h("h1", null, C.hero_title),
+      h("p", null, C.hero_sub),
+      h("a", {cls:"btn btn-accent btn-lg", href:"#tariffs"}, "Выбрать тариф"),
+    ),
+
+    (function(){
+      const statEls = [];
+      const bar = h("section", {cls:"stats-bar"},
+        h("div", {cls:"stats-bar-in"},
+          ...C.stats.map((s, i) => {
+            const valEl = h("div", {cls:"val"}, "0" + s.suffix);
+            statEls.push({ el: valEl, idx: i, ...s });
+            return h("div", {cls:"stat"},
+              valEl,
+              h("div", {cls:"label"}, s.label),
+            );
+          })
+        )
+      );
+      function formatNum(n, sep, dec) {
+        if (sep) return Math.floor(n).toLocaleString("ru");
+        return dec ? n.toFixed(dec) : Math.floor(n).toString();
+      }
+      function animateStat(s, delay) {
+        setTimeout(() => {
+          const duration = 900;
+          const start = performance.now();
+          function tick(now) {
+            const t = Math.min((now - start) / duration, 1);
+            const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+            const cur = s.num * ease;
+            s.el.textContent = formatNum(cur, s.sep, s.dec) + s.suffix;
+            if (t < 1) {
+              requestAnimationFrame(tick);
+            } else {
+              s.el.textContent = formatNum(s.num, s.sep, s.dec) + s.suffix;
+              s.el.classList.add("done");
+            }
+          }
+          requestAnimationFrame(tick);
+        }, delay);
+      }
+      const obs = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) {
+          statEls.forEach(s => animateStat(s, 0));
+          obs.disconnect();
+        }
+      }, { threshold: 0.3 });
+      requestAnimationFrame(() => obs.observe(bar));
+      return bar;
+    })(),
+
+    (function(){
+      let idx = 0;
+      const total = C.features.length;
+      const cards = C.features.map((f,i) =>
+        h("div", {cls:"feat" + (i===0?" active":"")},
+          h("img", {cls:"feat-img", src:f.img, alt:"", loading:"lazy"}),
+          h("div", {cls:"feat-overlay"},
+            h("h3", null, f.t),
+            h("p", null, f.d),
+          ),
+        )
+      );
+      const track = h("div", {cls:"carousel-track"}, ...cards);
+      const dots = C.features.map((_,i) =>
+        h("button", {cls:"carousel-dot" + (i===0?" active":""), onClick:()=>go(i)})
+      );
+      function go(i) {
+        idx = ((i % total) + total) % total;
+        const wrap = track.parentElement;
+        if (wrap && cards[0]) {
+          const wrapW = wrap.offsetWidth;
+          const cardW = cards[0].offsetWidth;
+          const gap = 16;
+          const offset = idx * (cardW + gap) - (wrapW - cardW) / 2;
+          track.style.transform = "translateX(" + (-Math.max(0, offset)) + "px)";
+        }
+        cards.forEach((c,j) => c.className = "feat" + (j===idx?" active":""));
+        dots.forEach((d,j) => d.className = "carousel-dot" + (j===idx?" active":""));
+      }
+      const section = h("section", {cls:"section"},
+        h("h2", {cls:"section-title"}, "Почему выбирают нас"),
+        h("div", {cls:"section-sub"}, "Всё необходимое для стабильного и безопасного интернета"),
+        h("div", {cls:"carousel-wrap"},
+          h("button", {cls:"carousel-nav carousel-prev", onClick:()=>go(idx-1), html:"&#8249;"}),
+          h("button", {cls:"carousel-nav carousel-next", onClick:()=>go(idx+1), html:"&#8250;"}),
+          track,
+        ),
+        h("div", {cls:"carousel-dots"}, ...dots),
+      );
+      let startX = 0, dragging = false;
+      track.addEventListener("touchstart", e => { startX = e.touches[0].clientX; }, {passive:true});
+      track.addEventListener("touchend", e => {
+        const dx = e.changedTouches[0].clientX - startX;
+        if (Math.abs(dx) > 40) go(idx + (dx < 0 ? 1 : -1));
+      }, {passive:true});
+      track.addEventListener("mousedown", e => { dragging = true; startX = e.clientX; track.style.cursor = "grabbing"; });
+      window.addEventListener("mouseup", () => { dragging = false; track.style.cursor = ""; });
+      track.addEventListener("mousemove", e => { if (dragging) e.preventDefault(); });
+      track.addEventListener("mouseup", e => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        if (Math.abs(dx) > 40) go(idx + (dx < 0 ? 1 : -1));
+      });
+      track.style.cursor = "grab";
+      track.addEventListener("dragstart", e => e.preventDefault());
+      requestAnimationFrame(() => requestAnimationFrame(() => go(0)));
+      window.addEventListener("resize", () => go(idx));
+      setInterval(() => go(idx+1), 5000);
+      return section;
+    })(),
+
+    h("section", {cls:"tariffs-section", id:"tariffs"},
+      h("h2", {cls:"section-title"}, "Выберите тариф"),
+      h("div", {cls:"section-sub"}, "Разовая оплата без подписок и автоматических списаний"),
+      h("div", {cls:"tariffs-wrap"},
+        h("div", {cls:"tariffs"},
+          ...C.tariffs.map((t,i) => {
+            const sel = state.selectedTariff === i;
+            const cls = "tariff" + (sel ? " selected" : "") + (t.popular ? " popular" : "");
+            return h("div", {cls, onClick:()=>{state.selectedTariff=i;render()}},
+              t.popular ? h("div", {cls:"tariff-badge"}, "Популярный") : null,
+              h("h3", null, t.name),
+              h("div", null,
+                h("span", {cls:"price"}, t.price.toLocaleString("ru")),
+                h("span", {cls:"price-currency"}, "\u2009\u20BD"),
+              ),
+              t.old_price ? h("span", {cls:"price-old"}, t.old_price.toLocaleString("ru") + "\u2009\u20BD") : null,
+              t.duration_days > 30
+                ? h("div", {cls:"per"}, Math.round(t.price / (t.duration_days/30)).toLocaleString("ru") + "\u2009\u20BD / мес")
+                : null,
+              h("div", {cls:"tariff-spacer"}),
+              h("button", {cls:"buy-btn", onClick:(e)=>{e.stopPropagation();selectAndBuy(i)}}, "Купить"),
+            );
+          })
+        )
+      )
+    ),
+
+    h("section", {cls:"section"},
+      h("h2", {cls:"section-title"}, "Как это работает"),
+      h("div", {cls:"section-sub"}, "4 простых шага для подключения"),
+      h("div", {cls:"steps"},
+        ...C.steps.map(s =>
+          h("div", {cls:"step"},
+            h("div", {cls:"step-bg", html:'<svg viewBox="0 0 24 24">' + s.svg + '</svg>'}),
+            h("div", {cls:"step-n"}, s.n),
+            h("h3", null, s.t),
+            h("p", null, s.d),
+          )
+        )
+      )
+    ),
+
+    h("section", {cls:"section"},
+      h("h2", {cls:"section-title"}, "Частые вопросы"),
+      h("div", {cls:"faq-list"},
+        ...C.faq.map(f => {
+          const item = h("div", {cls:"faq-item"},
+            h("div", {cls:"faq-q", onClick:()=>item.classList.toggle("open")},
+              h("span", null, f.q),
+              h("div", {cls:"faq-arrow"}, "+"),
+            ),
+            h("div", {cls:"faq-a"}, h("div", {cls:"faq-a-in"}, f.a)),
+          );
+          return item;
+        })
+      )
+    ),
+
+    h("footer", {cls:"footer"},
+      h("div", {cls:"footer-in"},
+        h("div", {cls:"footer-copy"}, "\u00A9 " + new Date().getFullYear() + " " + C.brand),
+        h("div", {cls:"footer-links"},
+          C.support ? h("a", {href:C.support, target:"_blank"}, "Поддержка") : null,
+        )
+      )
+    ),
+  ];
+}
+
+function renderCheckout() {
+  const t = C.tariffs[state.selectedTariff] || C.tariffs[0];
+  const errEl = h("div", {cls:"error", id:"form-err"});
+
+  return [
+    makeHeader("inner"),
+
+    h("div", {cls:"checkout"},
+      h("h2", null, "Оформление"),
+      h("div", {cls:"sub"}, "Безопасный разовый платёж без привязки карты"),
+
+      h("div", {cls:"summary"},
+        h("div", null,
+          h("div", {cls:"label"}, t.name),
+        ),
+        h("div", {cls:"val"},
+          t.price.toLocaleString("ru"),
+          h("span", null, "\u2009\u20BD"),
+        ),
+      ),
+
+      h("div", {cls:"field"},
+        h("label", null, "E-mail"),
+        h("input", {type:"email", placeholder:"name@example.com", id:"email-input",
+          value: state.email,
+          onInput:(e)=>{state.email=e.target.value},
+        }),
+      ),
+
+      h("div", {cls:"check"},
+        h("input", {type:"checkbox", id:"agree-cb", ...(state.agreed?{checked:""}:{}),
+          onChange:(e)=>{state.agreed=e.target.checked},
+        }),
+        h("label", {for:"agree-cb", html:"Подтверждаю, что ознакомился и согласен с&nbsp;условиями использования"}),
+      ),
+
+      errEl,
+
+      h("button", {cls:"btn btn-accent btn-lg", style:"width:100%", onClick:async()=>{
+        const email = state.email.trim();
+        if (!email || !email.includes("@") || !email.includes(".")) {
+          errEl.textContent = "Укажите корректный e-mail";
+          errEl.style.display = "block";
+          return;
+        }
+        if (!state.agreed) {
+          errEl.textContent = "Необходимо принять условия использования";
+          errEl.style.display = "block";
+          return;
+        }
+        errEl.style.display = "none";
+        await handlePurchase(t, email);
+      }}, "Перейти к оплате"),
+
+      h("div", {cls:"info-cards"},
+        h("div", {cls:"info-card"},
+          h("h4", null, "Разовая оплата"),
+          h("p", null, "Без подписок и автоматических списаний. Карта не привязывается."),
+        ),
+        h("div", {cls:"info-card"},
+          h("h4", null, "Для всех устройств"),
+          h("p", null, "iPhone, Android, Mac, Windows и роутеры."),
+        ),
+        h("div", {cls:"info-card"},
+          h("h4", null, "Гарантия возврата"),
+          h("p", null, "Если сервис не работает — вернём деньги."),
+        ),
+      ),
+    ),
+  ];
+}
+
+function renderSuccess() {
+  return [
+    makeHeader("inner"),
+    h("div", {cls:"success"},
+      h("div", {cls:"success-icon"}, "\u2714"),
+      h("h2", null, "Оплата прошла успешно"),
+      h("p", null, "Конфигурация и инструкция отправлены на:"),
+      h("p", {style:"color:var(--text);font-weight:600;font-size:17px"}, state.email),
+      h("p", {style:"margin-top:28px;color:var(--text3);font-size:13px"}, "Проверьте папку \u00ABСпам\u00BB, если письмо не пришло в течение 5 минут."),
+      h("button", {cls:"btn btn-ghost", style:"margin-top:28px", onClick:()=>navigate("home")}, "На главную"),
+    ),
+  ];
+}
+
+function renderWaiting() {
+  return [
+    makeHeader("inner"),
+    h("div", {cls:"success"},
+      h("div", {cls:"spinner"}),
+      h("h2", null, "Ожидание оплаты"),
+      h("p", null, "После подтверждения платежа конфигурация будет отправлена на:"),
+      h("p", {style:"color:var(--text);font-weight:600"}, state.email),
+    ),
+  ];
+}
+
+function renderLogin() {
+  const errEl = h("div", {cls:"error", id:"login-err"});
+  return [
+    makeHeader("inner"),
+    h("div", {cls:"checkout"},
+      h("h2", null, "Личный кабинет"),
+      h("div", {cls:"sub"}, "Войдите, чтобы управлять подписками"),
+      h("div", {cls:"field"},
+        h("label", null, "E-mail"),
+        h("input", {type:"email", placeholder:"name@example.com", id:"login-email",
+          value: state.loginEmail || "",
+          onInput:(e)=>{state.loginEmail=e.target.value},
+        }),
+      ),
+      h("div", {cls:"field"},
+        h("label", null, "Пароль"),
+        h("input", {type:"password", placeholder:"Введите пароль", id:"login-pass",
+          value: state.loginPass || "",
+          onInput:(e)=>{state.loginPass=e.target.value},
+        }),
+      ),
+      errEl,
+      h("button", {cls:"btn btn-accent btn-lg", style:"width:100%;margin-top:8px", onClick:async()=>{
+        const email = (state.loginEmail||"").trim();
+        const pass = (state.loginPass||"");
+        if (!email || !email.includes("@")) {
+          errEl.textContent = "Укажите корректный e-mail";
+          errEl.style.display = "block";
+          return;
+        }
+        if (!pass) {
+          errEl.textContent = "Введите пароль";
+          errEl.style.display = "block";
+          return;
+        }
+        errEl.style.display = "none";
+        await handleLogin(email, pass, errEl);
+      }}, "Войти"),
+      h("div", {style:"text-align:center;margin-top:20px"},
+        h("a", {href:"#", style:"color:var(--text3);font-size:13px", onClick:(e)=>{e.preventDefault();}}, "Забыли пароль?"),
+      ),
+    ),
+  ];
+}
+
+function render() {
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+  let elements;
+  switch(state.page) {
+    case "checkout": elements = renderCheckout(); break;
+    case "success":  elements = renderSuccess();  break;
+    case "waiting":  elements = renderWaiting();  break;
+    case "login":    elements = renderLogin();    break;
+    default:         elements = renderHome();
+  }
+  elements.filter(Boolean).forEach(el => app.appendChild(el));
+  app.classList.add("ready");
+  if (state.page !== "home" || !location.hash) window.scrollTo(0,0);
+}
+
+function navigate(page) {
+  state.page = page;
+  render();
+  window.scrollTo(0,0);
+}
+
+async function loadTariffs() {
+  if (!C.api) return;
+  try {
+    const r = await fetch(C.api + "/api/store/tariffs");
+    if (r.ok) {
+      const data = await r.json();
+      if (data.length) C.tariffs = data.map((t,i) => ({
+        id: t.id, name: t.name, price: t.price_rub, old_price: null,
+        duration_days: t.duration_days, badge: null, popular: i === Math.min(2, data.length-1),
+      }));
+    }
+  } catch(e) {}
+}
+
+async function handleLogin(email, pass, errEl) {
+  if (!C.api) { alert("Demo mode"); return; }
+  try {
+    const r = await fetch(C.api + "/api/auth/login", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ email, password: pass }),
+    });
+    if (r.status === 401) {
+      errEl.textContent = "Неверный e-mail или пароль";
+      errEl.style.display = "block";
+      return;
+    }
+    const data = await r.json();
+    if (data.identity_id && data.token) {
+      localStorage.setItem("identity_id", data.identity_id);
+      localStorage.setItem("token", data.token);
+      navigate("cabinet");
+    } else {
+      errEl.textContent = data.detail || "Ошибка входа";
+      errEl.style.display = "block";
+    }
+  } catch(e) {
+    errEl.textContent = "Ошибка соединения";
+    errEl.style.display = "block";
+  }
+}
+
+async function handlePurchase(tariff, email) {
+  if (!C.api) { navigate("success"); return; }
+  try {
+    const r = await fetch(C.api + "/api/store/purchase", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        email, tariff_id: tariff.id, provider_id: "YOOKASSA",
+        success_url: location.origin + "/?ok=1",
+      }),
+    });
+    const data = await r.json();
+    if (data.payment_url) {
+      state.paymentId = data.payment_id;
+      window.location.href = data.payment_url;
+    } else if (data.error) { alert(data.error); }
+  } catch(e) { alert("Connection error"); }
+}
+
+async function checkReturnFromPayment() {
+  const p = new URLSearchParams(location.search);
+  if (p.get("ok") === "1") {
+    state.page = "success";
+    history.replaceState(null, "", location.pathname);
+  }
+}
+
+async function init() {
+  const s = document.createElement("style");
+  s.textContent = css;
+  document.head.appendChild(s);
+  document.title = C.brand;
+  await loadTariffs();
+  await checkReturnFromPayment();
+  render();
+}
+
+init();
+})();
+</script>
+</body>
+</html>
