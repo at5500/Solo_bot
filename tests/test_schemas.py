@@ -32,6 +32,7 @@ MeTariffsResponse = _me.MeTariffsResponse
 MeDiscountInfo = _me.MeDiscountInfo
 MeReferralStats = _me.MeReferralStats
 MePaymentResponse = _me.MePaymentResponse
+MeTrialResponse = _me.MeTrialResponse
 MiniAppLoginRequest = _me.MiniAppLoginRequest
 
 
@@ -217,6 +218,41 @@ class TestMeRenewResponse:
         )
         assert r.payment_url == "https://pay"
         assert r.missing_amount == 100.0
+
+
+class TestMeKeyDetailsLiveFields:
+    def test_with_panel_data(self):
+        d = MeKeyDetails(
+            client_id="uuid", traffic_used_gb=45.5, devices_connected=2,
+            current_device_limit=10, current_traffic_limit=100,
+        )
+        assert d.traffic_used_gb == 45.5
+        assert d.devices_connected == 2
+
+    def test_without_panel_data(self):
+        d = MeKeyDetails(client_id="uuid")
+        assert d.traffic_used_gb is None
+        assert d.devices_connected is None
+
+
+class TestMeTrialResponse:
+    def test_activated(self):
+        r = MeTrialResponse(
+            activated=True, email="abc123", client_id="uuid-1",
+            link="vless://config", expiry_time=1700000000000,
+        )
+        assert r.activated is True
+        assert r.link == "vless://config"
+
+    def test_already_used(self):
+        r = MeTrialResponse(activated=False, error="Trial already used")
+        assert r.activated is False
+        assert r.error == "Trial already used"
+
+    def test_defaults(self):
+        r = MeTrialResponse()
+        assert r.activated is False
+        assert r.email is None
 
 
 class TestMiniAppLoginRequest:

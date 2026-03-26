@@ -21,6 +21,7 @@ from api.v2.schemas.me import (
     MeTariffGroup,
     MeTariffItem,
     MeTariffsResponse,
+    MeTrialResponse,
 )
 from config import USERNAME_BOT
 from database import keys as kdb, payments as pdb, referrals as rdb
@@ -100,7 +101,9 @@ async def get_my_key_details(
     session: AsyncSession = Depends(get_session),
     identity=Depends(verify_identity_token),
 ):
-    """Returns full details for a specific key including the subscription link."""
+    """Returns full details for a specific key including the subscription link and live panel data."""
+    from panels.remnawave_runtime import get_remnawave_profile
+
     tg_id = await _resolve_tg_id(identity)
     details = await kdb.get_key_details(session, email)
     if not details:
@@ -125,10 +128,23 @@ async def get_my_key_details(
             if delta.days == 0:
                 hours_left = int(total_seconds // 3600)
 
+    traffic_used_gb = None
+    devices_connected = None
+    client_id = details.get("client_id")
+    server_id = details.get("server_id")
+    if client_id and server_id and not expired:
+        try:
+            profile = await get_remnawave_profile(session, server_id, client_id, fallback_any=True)
+            if profile:
+                traffic_used_gb = profile.get("used_gb")
+                devices_connected = profile.get("hwid_count")
+        except Exception:
+            pass
+
     return MeKeyDetails(
         email=details.get("email"),
-        client_id=details.get("client_id"),
-        server_id=details.get("server_id"),
+        client_id=client_id,
+        server_id=server_id,
         alias=details.get("alias"),
         created_at=details.get("created_at"),
         expiry_time=expiry_ms,
@@ -143,6 +159,74 @@ async def get_my_key_details(
         selected_traffic_limit=details.get("selected_traffic_limit"),
         current_device_limit=details.get("current_device_limit"),
         current_traffic_limit=details.get("current_traffic_limit"),
+        traffic_used_gb=traffic_used_gb,
+        devices_connected=devices_connected,
+    )
+
+
+@router.post("/trial", response_model=MeTrialResponse)
+async def activate_trial(
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Activate a free trial subscription.
+
+    Finds the first active trial tariff, creates a key on the least loaded
+    cluster.  Returns error if user already used their trial.
+    """
+    import uuid
+
+    from database.tariffs import get_tariffs
+    from database.users import get_trial, update_trial
+    from handlers.keys.operations.creation import create_key_on_cluster
+    from handlers.utils import generate_random_email, get_least_loaded_cluster
+
+    tg_id = await _resolve_tg_id(identity)
+
+    trial_status = await get_trial(session, tg_id)
+    if trial_status not in (0, -1):
+        return MeTrialResponse(activated=False, error="Trial already used")
+
+    tariffs = await get_tariffs(session, group_code="trial")
+    active_trials = [t for t in tariffs if t.get("is_active")]
+    if not active_trials:
+        return MeTrialResponse(activated=False, error="No trial tariffs available")
+
+    tariff = active_trials[0]
+
+    try:
+        cluster_id = await get_least_loaded_cluster(session)
+    except ValueError as e:
+        return MeTrialResponse(activated=False, error=str(e))
+
+    email = await generate_random_email(session=session)
+    client_id = str(uuid.uuid4())
+    duration_days = tariff["duration_days"]
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    expiry_ms = int(now_ms + duration_days * 86400 * 1000)
+
+    await create_key_on_cluster(
+        cluster_id=cluster_id,
+        tg_id=tg_id,
+        client_id=client_id,
+        email=email,
+        expiry_timestamp=expiry_ms,
+        plan=tariff["id"],
+        session=session,
+        is_trial=True,
+    )
+
+    await update_trial(session, tg_id, 1)
+
+    key_details = await kdb.get_key_details(session, email)
+    link = key_details.get("link") if key_details else None
+
+    return MeTrialResponse(
+        activated=True,
+        email=email,
+        client_id=client_id,
+        link=link,
+        expiry_time=expiry_ms,
     )
 
 

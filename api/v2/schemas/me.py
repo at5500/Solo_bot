@@ -50,6 +50,8 @@ class MeKeyDetails(BaseModel):
     selected_traffic_limit: int | None = None
     current_device_limit: int | None = None
     current_traffic_limit: int | None = None
+    traffic_used_gb: float | None = Field(None, description="Actual traffic used (from VPN panel)")
+    devices_connected: int | None = Field(None, description="Currently connected devices (HWID count)")
 
 
 class MeTariffItem(BaseModel):
@@ -149,6 +151,17 @@ class MeRenewResponse(BaseModel):
     missing_amount: float | None = None
     error: str | None = None
     new_expiry_time: int | None = None
+
+
+class MeTrialResponse(BaseModel):
+    """Result of trial activation."""
+
+    activated: bool = False
+    email: str | None = None
+    client_id: str | None = None
+    link: str | None = None
+    expiry_time: int | None = None
+    error: str | None = None
 
 
 class MiniAppLoginRequest(BaseModel):
