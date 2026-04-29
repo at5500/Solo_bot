@@ -20,6 +20,8 @@ from api.v2.schemas.web_public import (
     PartnerConditionsResponse,
     PartnerPayoutEntryResponse,
     PartnerPayoutHistoryResponse,
+    PartnerPayoutMethodResponse,
+    PartnerPayoutMethodUpdateRequest,
     PartnerPayoutRequestCreate,
     PartnerPayoutRequestResponse,
     PartnerQrResponse,
@@ -457,6 +459,52 @@ async def partner_payouts_me(
         for row in rows
     ]
     return PartnerPayoutHistoryResponse(total=total, items=items)
+
+
+_PAYOUT_METHOD_FLAGS: dict[str, str] = {
+    "card": "ENABLE_PAYOUT_CARD",
+    "sbp": "ENABLE_PAYOUT_SBP",
+    "usdt": "ENABLE_PAYOUT_USDT",
+    "ton": "ENABLE_PAYOUT_TON",
+}
+
+
+def _enabled_payout_methods() -> set[str]:
+    """Return the set of payout-method codes currently enabled in partner settings."""
+    try:
+        from modules.partner_program import settings as partner_settings
+    except Exception:
+        return set()
+    enabled: set[str] = set()
+    for code, flag in _PAYOUT_METHOD_FLAGS.items():
+        if bool(getattr(partner_settings, flag, False)):
+            enabled.add(code)
+    return enabled
+
+
+@router.patch("/me/payout", response_model=PartnerPayoutMethodResponse)
+async def partner_update_payout_method(
+    body: PartnerPayoutMethodUpdateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Set the current user's preferred payout method and destination details."""
+    method = (body.method or "").strip().lower()
+    destination = (body.destination or "").strip()
+    if method not in _PAYOUT_METHOD_FLAGS:
+        raise HTTPException(status_code=400, detail="Неизвестный способ выплаты")
+    enabled = _enabled_payout_methods()
+    if method not in enabled:
+        raise HTTPException(status_code=400, detail="Этот способ выплаты сейчас недоступен")
+    if not destination:
+        raise HTTPException(status_code=400, detail="Укажите реквизиты выплаты")
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    await session.execute(
+        text("UPDATE users SET payout_method = :method, card_number = :destination WHERE id = :id"),
+        {"method": method, "destination": destination, "id": int(user_id)},
+    )
+    return PartnerPayoutMethodResponse(ok=True, method=method, destination=destination)
 
 
 @router.post("/payouts/me", response_model=PartnerPayoutRequestResponse)

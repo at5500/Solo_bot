@@ -423,3 +423,14 @@ class PartnerPayoutEntryResponse(BaseModel):
 class PartnerPayoutHistoryResponse(BaseModel):
     total: int = 0
     items: list[PartnerPayoutEntryResponse] = []
+
+
+class PartnerPayoutMethodUpdateRequest(BaseModel):
+    method: str = Field(..., min_length=1, max_length=16, description="Машинный код способа: card|sbp|usdt|ton")
+    destination: str = Field(..., min_length=1, max_length=256, description="Реквизиты выплаты — номер карты, телефон СБП или адрес кошелька")
+
+
+class PartnerPayoutMethodResponse(BaseModel):
+    ok: bool = True
+    method: str = ""
+    destination: str = ""
