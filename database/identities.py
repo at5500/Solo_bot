@@ -12,7 +12,19 @@ from config import API_TOKEN_TTL_DAYS
 from core.executor import run_cpu, run_io
 from database import identity_sessions as _idsess
 from database.access.tg_mirror import refresh_tg_mirrors_for_user
-from database.models import Admin, Identity, User
+from database.models import Admin, Identity, Key, User
+
+
+async def _count_keys_for_billing_user(session: AsyncSession, user_id: int) -> int:
+    """Count VPN keys (rows in keys table) bound to a billing user.
+
+    Used to detect the "subscriptions on both sides" merge-conflict case before
+    we silently fold one Identity into another.
+    """
+    result = await session.execute(
+        select(func.count()).select_from(Key).where(Key.user_id == int(user_id))
+    )
+    return int(result.scalar_one() or 0)
 
 
 def _request_meta(request) -> tuple[str | None, str | None]:
@@ -628,6 +640,15 @@ async def attach_email(session: AsyncSession, identity_id: str, email: str) -> I
         dst_tg = int(identity.tg_id) if identity.tg_id is not None else None
 
         if src_user is not None and int(src_user.id) != int(dst_uid):
+            # Business rule: do not merge when BOTH Identities already have
+            # active VPN keys — there is no unambiguous answer for which
+            # subscription should survive. Caller (link-email/confirm) will
+            # surface this as 409 to the user.
+            src_keys = await _count_keys_for_billing_user(session, int(src_user.id))
+            dst_keys = await _count_keys_for_billing_user(session, int(dst_uid))
+            if src_keys > 0 and dst_keys > 0:
+                return None
+
             from database.users import update_balance
 
             src_uid = int(src_user.id)
@@ -666,6 +687,17 @@ async def attach_telegram(session: AsyncSession, identity_id: str, tg_id: int) -
         can_merge = their_email is None or (our_email is not None and their_email == our_email)
         if not can_merge:
             return None
+
+        # Business rule: refuse merge when both sides already have subscriptions —
+        # we don't know which set of keys to keep. Same guard as attach_email.
+        src_user_row = (await session.execute(select(User).where(User.identity_id == existing.id))).scalars().first()
+        dst_uid = await ensure_billing_user_for_identity(session, identity)
+        if src_user_row is not None and int(src_user_row.id) != int(dst_uid):
+            src_keys = await _count_keys_for_billing_user(session, int(src_user_row.id))
+            dst_keys = await _count_keys_for_billing_user(session, int(dst_uid))
+            if src_keys > 0 and dst_keys > 0:
+                return None
+
         existing.email = None
         existing.tg_id = None
         await session.flush()
