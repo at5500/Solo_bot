@@ -274,6 +274,10 @@ async def purchase_tariff_with_balance(
                 "coupon_id": int(coupon_id) if coupon_id is not None else None,
             },
         )
+        logger.info(
+            f"[Purchase] returning payment_id={payment_result.payment_id} "
+            f"to user_id={billing_user_id} provider={provider_id} amount={required_amount}"
+        )
         return TariffPurchaseResponse(
             ok=True,
             message="Требуется оплата для оформления подписки",
