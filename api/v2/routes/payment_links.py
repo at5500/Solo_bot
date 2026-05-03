@@ -256,13 +256,19 @@ async def get_link_status(
     if payment is None:
         payment = await get_payment_by_payment_id(session, payment_id)
     if not payment:
+        logger.info(f"[Status] payment_id={payment_id} not found in DB (billing_user_ref={billing_user_ref})")
         raise HTTPException(status_code=404, detail="Payment not found")
     owner_ref = payment.get("user_id")
     if owner_ref is None:
         owner_ref = payment.get("tg_id")
     if owner_ref is None or int(owner_ref) != int(billing_user_ref):
+        logger.info(
+            f"[Status] payment_id={payment_id} owner mismatch: "
+            f"payment_owner={owner_ref}, billing_user_ref={billing_user_ref}"
+        )
         raise HTTPException(status_code=404, detail="Payment not found")
     status = str(payment.get("status") or "").lower() or None
+    logger.info(f"[Status] payment_id={payment_id} status={status}, billing_user_ref={billing_user_ref}")
     return PaymentLinkStatusResponse(
         success=True,
         payment_id=payment_id,
