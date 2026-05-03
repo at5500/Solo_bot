@@ -276,7 +276,7 @@ async def purchase_tariff_with_balance(
         )
         logger.info(
             f"[Purchase] returning payment_id={payment_result.payment_id} "
-            f"to user_id={billing_user_id} provider={provider_id} amount={required_amount}"
+            f"to user_id={tg_id} provider={provider_id} amount={required_amount}"
         )
         return TariffPurchaseResponse(
             ok=True,
