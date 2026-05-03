@@ -17,6 +17,8 @@ from api.depends import get_request_actor, get_session, verify_identity_admin, v
 from api.v2.schemas.web_public import (
     PartnerApplyRequest,
     PartnerApplyResponse,
+    PartnerCodeResponse,
+    PartnerCodeUpdateRequest,
     PartnerConditionsResponse,
     PartnerPayoutEntryResponse,
     PartnerPayoutHistoryResponse,
@@ -505,6 +507,34 @@ async def partner_update_payout_method(
         {"method": method, "destination": destination, "id": int(user_id)},
     )
     return PartnerPayoutMethodResponse(ok=True, method=method, destination=destination)
+
+
+@router.patch("/me/code", response_model=PartnerCodeResponse)
+async def partner_update_my_code(
+    body: PartnerCodeUpdateRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Set the current user's partner code (referral slug)."""
+    raw = (body.code or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{3,32}", raw):
+        raise HTTPException(
+            status_code=400,
+            detail="Неверный код. Разрешены a-z, 0-9, _ (3-32 символа)",
+        )
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    exists = await session.execute(
+        text("SELECT 1 FROM users WHERE partner_code = :code AND id != :id LIMIT 1"),
+        {"code": raw, "id": int(user_id)},
+    )
+    if exists.first():
+        raise HTTPException(status_code=409, detail="Такой код уже занят")
+    await session.execute(
+        text("UPDATE users SET partner_code = :code WHERE id = :id"),
+        {"code": raw, "id": int(user_id)},
+    )
+    return PartnerCodeResponse(ok=True, code=raw)
 
 
 @router.post("/payouts/me", response_model=PartnerPayoutRequestResponse)

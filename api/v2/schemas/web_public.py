@@ -434,3 +434,12 @@ class PartnerPayoutMethodResponse(BaseModel):
     ok: bool = True
     method: str = ""
     destination: str = ""
+
+
+class PartnerCodeUpdateRequest(BaseModel):
+    code: str = Field(..., min_length=3, max_length=32, description="New partner code (a-z, 0-9, _)")
+
+
+class PartnerCodeResponse(BaseModel):
+    ok: bool = True
+    code: str = ""
