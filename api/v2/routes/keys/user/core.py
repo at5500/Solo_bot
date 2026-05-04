@@ -25,6 +25,13 @@ async def user_keys(
 ):
     billing_user_id = await _resolve_billing_user_id(request, identity, session)
     keys = await get_keys(session, billing_user_id)
+    tariff_ids = {int(t) for t in (getattr(k, "tariff_id", None) for k in keys) if t is not None}
+    trial_tariff_ids: set[int] = set()
+    if tariff_ids:
+        rows = (
+            await session.execute(select(Tariff.id).where(Tariff.id.in_(tariff_ids), Tariff.price_rub == 0))
+        ).scalars().all()
+        trial_tariff_ids = {int(r) for r in rows}
     result: list[AccountKeyResponse] = []
     for key in keys:
         key_actions = AccountKeyActionsAvailability()
@@ -34,18 +41,20 @@ async def user_keys(
             key_actions = _extract_key_actions_from_markup(markup)
         except Exception:
             key_actions = AccountKeyActionsAvailability()
+        tariff_id_value = getattr(key, "tariff_id", None)
         result.append(
             AccountKeyResponse(
                 email=str(getattr(key, "email", "") or ""),
                 alias=getattr(key, "alias", None),
                 client_id=str(getattr(key, "client_id", "") or ""),
-                tariff_id=getattr(key, "tariff_id", None),
+                tariff_id=tariff_id_value,
                 server_id=str(getattr(key, "server_id", "") or ""),
                 created_at=int(getattr(key, "created_at", 0) or 0),
                 expiry_time=int(getattr(key, "expiry_time", 0) or 0),
                 key=getattr(key, "key", None),
                 remnawave_link=getattr(key, "remnawave_link", None),
                 is_frozen=bool(getattr(key, "is_frozen", False)),
+                is_trial=bool(tariff_id_value is not None and int(tariff_id_value) in trial_tariff_ids),
                 actions=key_actions,
             )
         )
@@ -199,17 +208,25 @@ async def user_key_update_alias(
     if db_key is None:
         raise HTTPException(status_code=404, detail="Подписка не найдена")
     db_key.alias = alias
+    tariff_id_value = getattr(db_key, "tariff_id", None)
+    is_trial_value = False
+    if tariff_id_value is not None:
+        price = (
+            await session.execute(select(Tariff.price_rub).where(Tariff.id == int(tariff_id_value)).limit(1))
+        ).scalar_one_or_none()
+        is_trial_value = price == 0
     return AccountKeyResponse(
         email=str(getattr(db_key, "email", "") or ""),
         alias=getattr(db_key, "alias", None),
         client_id=str(getattr(db_key, "client_id", "") or ""),
-        tariff_id=getattr(db_key, "tariff_id", None),
+        tariff_id=tariff_id_value,
         server_id=str(getattr(db_key, "server_id", "") or ""),
         created_at=int(getattr(db_key, "created_at", 0) or 0),
         expiry_time=int(getattr(db_key, "expiry_time", 0) or 0),
         key=getattr(db_key, "key", None),
         remnawave_link=getattr(db_key, "remnawave_link", None),
         is_frozen=bool(getattr(db_key, "is_frozen", False)),
+        is_trial=is_trial_value,
     )
 
 

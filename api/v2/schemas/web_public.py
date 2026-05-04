@@ -66,6 +66,7 @@ class AccountKeyResponse(BaseModel):
     key: str | None = None
     remnawave_link: str | None = None
     is_frozen: bool = False
+    is_trial: bool = False
     actions: AccountKeyActionsAvailability | None = None
 
 
