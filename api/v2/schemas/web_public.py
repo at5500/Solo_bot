@@ -120,13 +120,11 @@ class KeyDevicesResponse(BaseModel):
     client_id: str
     items: list[KeyDeviceItem] = []
     device_limit: int | None = None
-    hwid_limit_enabled: bool | None = None
 
 
 class KeyDeviceDeleteResponse(AccountKeyActionResponse):
     client_id: str
     hwid: str
-    remaining_devices: int = 0
 
 
 class DeviceCooldownResponse(BaseModel):
