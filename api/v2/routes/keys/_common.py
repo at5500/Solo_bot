@@ -43,6 +43,9 @@ from api.v2.schemas.web_public import (
     AccountKeyRenewResponse,
     AccountKeyResetHwidResponse,
     AccountKeyResponse,
+    KeyDeviceDeleteResponse,
+    KeyDeviceItem,
+    KeyDevicesResponse,
 )
 from config import (
     ENABLE_DELETE_KEY_BUTTON,

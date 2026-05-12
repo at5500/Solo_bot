@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from api.v2.routes import (
     auth,
     coupons,
+    devices,
     flows,
     gifts,
     identities,
@@ -39,6 +40,7 @@ router.include_router(gifts.router, prefix="/api/gifts", tags=["Gifts"])
 router.include_router(referrals.router, prefix="/api/referrals", tags=["Referrals"])
 router.include_router(partners.router, prefix="/api/partners", tags=["Partners"])
 router.include_router(payment_links.router, prefix="/api/payment-links", tags=["PaymentLinks"])
+router.include_router(devices.router, prefix="/api/devices", tags=["Devices"])
 router.include_router(identities.router, prefix="/api/identities", tags=["Identities"])
 router.include_router(misc.router, prefix="/api")
 router.include_router(modules.router, prefix="/api")

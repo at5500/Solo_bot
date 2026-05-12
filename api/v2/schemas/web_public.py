@@ -106,6 +106,35 @@ class AccountKeyResetHwidResponse(AccountKeyActionResponse):
     reset_devices: int = 0
 
 
+class KeyDeviceItem(BaseModel):
+    hwid: str
+    device_model: str | None = None
+    platform: str | None = None
+    os_version: str | None = None
+    user_agent: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class KeyDevicesResponse(BaseModel):
+    client_id: str
+    items: list[KeyDeviceItem] = []
+    device_limit: int | None = None
+    hwid_limit_enabled: bool | None = None
+
+
+class KeyDeviceDeleteResponse(AccountKeyActionResponse):
+    client_id: str
+    hwid: str
+    remaining_devices: int = 0
+
+
+class DeviceCooldownResponse(BaseModel):
+    cooldown_minutes: int
+    can_delete: bool
+    remaining_minutes: int = 0
+
+
 class AccountKeyQrResponse(AccountKeyActionResponse):
     link: str = ""
     image_data_url: str = ""
