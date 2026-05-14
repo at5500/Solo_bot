@@ -120,9 +120,14 @@ async def user_key_device_delete(
     if _DEVICES_MODULE_AVAILABLE and DELETE_DEVICE_COOLDOWN_MINUTES > 0:
         can_delete, remaining = await check_device_cooldown(session, tg_id, DELETE_DEVICE_COOLDOWN_MINUTES)
         if not can_delete:
+            # Structured detail so the client can drive a countdown / disabled
+            # state off `remaining_minutes` instead of parsing the message text.
             raise HTTPException(
                 status_code=409,
-                detail=f"Подождите {remaining} мин. перед следующим удалением",
+                detail={
+                    "message": f"Подождите {remaining} мин. перед следующим удалением",
+                    "remaining_minutes": int(remaining),
+                },
                 headers={"Retry-After": str(int(remaining) * 60)},
             )
 
