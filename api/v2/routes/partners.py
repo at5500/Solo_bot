@@ -8,12 +8,17 @@ from urllib.parse import urlsplit
 
 import qrcode
 
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_request_actor, get_session, verify_identity_admin, verify_identity_token
+from config import ADMIN_ID, API_TOKEN
+from logger import logger
 from api.v2.schemas.web_public import (
     PartnerApplyRequest,
     PartnerApplyResponse,
@@ -558,6 +563,49 @@ async def partner_update_my_code(
     return PartnerCodeResponse(ok=True, code=raw)
 
 
+_notify_bot: Bot | None = None
+
+
+def _get_notify_bot() -> Bot:
+    """Lazy bot instance for admin notifications sent from the API layer.
+
+    Mirrors the pattern in `routes/management.py` — the API process doesn't
+    hold the dispatcher's bot, so we build a thin one on first use.
+    """
+    global _notify_bot
+    if _notify_bot is None:
+        _notify_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    return _notify_bot
+
+
+async def _notify_admins_new_payout(tg_id: int, amount: float, method: str, destination: str) -> None:
+    """Pings every admin about a payout request created via the Mini App.
+
+    The bot's own payout flow already notifies admins; requests filed through
+    the API must do the same, otherwise they sit in `payout_requests` unseen.
+    Best-effort: a delivery failure must never break the payout itself.
+    """
+    try:
+        from modules.partner_program.texts import admin_withdraw_notification
+
+        message = admin_withdraw_notification(int(tg_id), float(amount), method, destination or "—")
+    except Exception:
+        message = (
+            "📤 <b>Новая заявка на вывод</b>\n\n"
+            f"👤 Пользователь: <code>{tg_id}</code>\n"
+            f"💰 Сумма: <b>{round(float(amount), 2)} ₽</b>\n"
+            f"🏦 Способ: <b>{method}</b>\n"
+            f"🧾 Реквизиты: <code>{destination or '—'}</code>"
+        )
+    admin_ids = ADMIN_ID if isinstance(ADMIN_ID, list) else [ADMIN_ID]
+    bot = _get_notify_bot()
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(chat_id=admin_id, text=message)
+        except Exception as e:
+            logger.warning(f"[Partner] Не удалось уведомить админа {admin_id} о заявке на вывод: {e}")
+
+
 @router.post("/payouts/me", response_model=PartnerPayoutRequestResponse)
 async def partner_create_payout_request(
     body: PartnerPayoutRequestCreate,
@@ -614,6 +662,7 @@ async def partner_create_payout_request(
         text("UPDATE users SET partner_balance = :balance WHERE id = :id"),
         {"balance": new_balance, "id": int(user_id)},
     )
+    await _notify_admins_new_payout(int(tg_id), float(requested), payout_method, destination or "")
     return PartnerPayoutRequestResponse(
         ok=True,
         message="Заявка на вывод создана",
