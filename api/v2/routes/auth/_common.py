@@ -31,6 +31,21 @@ def _client_ip(request: Request) -> str:
     return forwarded.split(",")[0].strip() or client_host
 
 
+def _mask_payout_destination(method: str | None, destination: str | None) -> str | None:
+    """Masks payout requisites for display: cards show the last 4 digits,
+    crypto addresses show a head…tail fragment. Returns None when empty."""
+    raw = (destination or "").strip()
+    if not raw:
+        return None
+    code = (method or "").strip().lower()
+    if code in ("card", "sbp"):
+        tail = raw[-4:]
+        return f"*{tail}" if len(raw) > 4 else raw
+    if len(raw) > 10:
+        return f"{raw[:4]}…{raw[-4:]}"
+    return raw
+
+
 async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int) -> dict[str, object]:
     partner_feature_enabled = False
     default_percent = 0.0
@@ -51,6 +66,8 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
         "partner_percent_custom": False,
         "partner_referred_total": 0,
         "partner_payout_method": None,
+        "partner_payout_destination": None,
+        "partner_last_payout": None,
     }
     try:
         partner_row = (
@@ -63,7 +80,8 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
                         partner_percent,
                         COALESCE(partner_percent_custom, false),
                         partner_code,
-                        payout_method
+                        payout_method,
+                        card_number
                     FROM users
                     WHERE id = :user_id
                     LIMIT 1
@@ -94,7 +112,10 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
         except Exception as e:
             logger.warning("[Auth] Ошибка сохранения partner_code для billing_user_id={}: {}", billing_user_id, e)
     payout_method = str(partner_row[5] or "").strip() or None
+    payout_destination_raw = str(partner_row[6] or "").strip() or None
+    payout_destination = _mask_payout_destination(payout_method, payout_destination_raw)
     referred_total = 0
+    last_payout: dict[str, object] | None = None
     if tg_id is not None:
         try:
             referred_total = int(
@@ -108,6 +129,35 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
             )
         except Exception:
             referred_total = 0
+        try:
+            payout_row = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT id, amount, status, created_at, method, destination
+                        FROM payout_requests
+                        WHERE tg_id = :tg_id
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"tg_id": int(tg_id)},
+                )
+            ).first()
+            if payout_row is not None:
+                created_at = payout_row[3]
+                last_payout = {
+                    "id": int(payout_row[0]),
+                    "amount_rub": float(payout_row[1] or 0.0),
+                    "status": str(payout_row[2] or ""),
+                    "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else None,
+                    "method": payout_row[4] or payout_method,
+                    "destination": _mask_payout_destination(
+                        payout_row[4] or payout_method, payout_row[5] or payout_destination_raw
+                    ),
+                }
+        except Exception:
+            last_payout = None
     payload.update({
         "partner_enabled": bool(partner_feature_enabled or code or referred_total > 0 or balance > 0),
         "partner_code": code,
@@ -116,5 +166,7 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
         "partner_percent_custom": percent_custom,
         "partner_referred_total": referred_total,
         "partner_payout_method": payout_method,
+        "partner_payout_destination": payout_destination,
+        "partner_last_payout": last_payout,
     })
     return payload

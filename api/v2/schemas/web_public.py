@@ -23,6 +23,8 @@ class AccountSummaryResponse(BaseModel):
     partner_percent_custom: bool = False
     partner_referred_total: int = 0
     partner_payout_method: str | None = None
+    partner_payout_destination: str | None = None
+    partner_last_payout: "PartnerPayoutEntryResponse | None" = None
     unread_notifications: int = 0
 
 
@@ -426,6 +428,18 @@ class CouponApplyResponse(BaseModel):
     balance: float = 0.0
 
 
+class PartnerPayoutToBalanceRequest(BaseModel):
+    amount_rub: float = Field(..., gt=0)
+
+
+class PartnerPayoutToBalanceResponse(BaseModel):
+    ok: bool = True
+    message: str = ""
+    amount_rub: float = 0.0
+    partner_balance: float = 0.0
+    balance: float = 0.0
+
+
 class PartnerPayoutRequestCreate(BaseModel):
     amount_rub: float = Field(..., gt=0)
 
@@ -471,3 +485,8 @@ class PartnerCodeUpdateRequest(BaseModel):
 class PartnerCodeResponse(BaseModel):
     ok: bool = True
     code: str = ""
+
+
+# AccountSummaryResponse references PartnerPayoutEntryResponse, which is
+# declared later in this module — resolve the forward reference now.
+AccountSummaryResponse.model_rebuild()

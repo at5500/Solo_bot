@@ -26,6 +26,8 @@ from api.v2.schemas.web_public import (
     PartnerPayoutMethodUpdateRequest,
     PartnerPayoutRequestCreate,
     PartnerPayoutRequestResponse,
+    PartnerPayoutToBalanceRequest,
+    PartnerPayoutToBalanceResponse,
     PartnerQrResponse,
     PartnerTopEntryResponse,
     PartnerTopResponse,
@@ -509,6 +511,25 @@ async def partner_update_payout_method(
     return PartnerPayoutMethodResponse(ok=True, method=method, destination=destination)
 
 
+@router.get("/me/payout", response_model=PartnerPayoutMethodResponse)
+async def partner_get_payout_method(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Returns the current user's saved payout method + destination, if any."""
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    row = (
+        await session.execute(
+            text("SELECT payout_method, card_number FROM users WHERE id = :id"),
+            {"id": int(user_id)},
+        )
+    ).first()
+    method = (row[0] if row else None) or ""
+    destination = (row[1] if row else None) or ""
+    return PartnerPayoutMethodResponse(ok=bool(method), method=method, destination=destination)
+
+
 @router.patch("/me/code", response_model=PartnerCodeResponse)
 async def partner_update_my_code(
     body: PartnerCodeUpdateRequest,
@@ -600,6 +621,48 @@ async def partner_create_payout_request(
         amount_rub=float(requested),
         status="pending",
         balance_rub=float(new_balance),
+    )
+
+
+@router.post("/payouts/me/to-balance", response_model=PartnerPayoutToBalanceResponse)
+async def partner_payout_to_balance(
+    body: PartnerPayoutToBalanceRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Moves money from the partner balance onto the user's in-bot balance.
+
+    Unlike `/payouts/me` (which files an external payout request handled
+    manually by an admin), this is an instant internal transfer and is not
+    gated by MIN_PARTNER_PAYOUT — the design allows it for any amount.
+    """
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    row = (
+        await session.execute(
+            text("SELECT COALESCE(partner_balance, 0), COALESCE(balance, 0) FROM users WHERE id = :id"),
+            {"id": int(user_id)},
+        )
+    ).first()
+    partner_balance = float(row[0] or 0.0) if row else 0.0
+    balance = float(row[1] or 0.0) if row else 0.0
+    amount = float(body.amount_rub)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть больше нуля")
+    if amount > partner_balance:
+        raise HTTPException(status_code=400, detail="Недостаточно партнерского баланса")
+    new_partner_balance = partner_balance - amount
+    new_balance = balance + amount
+    await session.execute(
+        text("UPDATE users SET partner_balance = :pb, balance = :b WHERE id = :id"),
+        {"pb": new_partner_balance, "b": new_balance, "id": int(user_id)},
+    )
+    return PartnerPayoutToBalanceResponse(
+        ok=True,
+        message="Средства зачислены на баланс",
+        amount_rub=amount,
+        partner_balance=new_partner_balance,
+        balance=new_balance,
     )
 
 
