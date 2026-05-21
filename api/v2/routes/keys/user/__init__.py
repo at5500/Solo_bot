@@ -1,1 +1,1 @@
-from . import addons, core, devices, hwid, location, renew  # noqa: F401 — trigger registration
+from . import addons, core, devices, hwid, location, renew, tv  # noqa: F401 — trigger registration

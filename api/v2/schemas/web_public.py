@@ -135,6 +135,22 @@ class DeviceCooldownResponse(BaseModel):
     remaining_minutes: int = 0
 
 
+class TvConnectRequest(BaseModel):
+    """Body for pushing a key's subscription to a TV via the Happ web-import code.
+
+    Attributes:
+        code: The short pairing code shown on the TV's Happ "Web import" screen.
+    """
+
+    code: str
+
+
+class TvConnectResponse(AccountKeyActionResponse):
+    """Result of a TV web-import push (inherits ``ok`` and ``message``)."""
+
+    client_id: str
+
+
 class AccountKeyQrResponse(AccountKeyActionResponse):
     link: str = ""
     image_data_url: str = ""
