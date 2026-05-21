@@ -10,6 +10,7 @@ Relaying server-side avoids a cross-origin request from the Mini App and
 keeps the subscription link off the client for this action.
 """
 
+import json
 import re
 
 from base64 import b64encode
@@ -95,12 +96,22 @@ async def user_key_connect_tv(
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
             async with http.post(url, json=payload) as resp:
-                if resp.status in (200, 201, 204):
-                    return TvConnectResponse(ok=True, message="Подписка отправлена на телевизор", client_id=client_id)
-                detail = (await resp.text())[:200]
-                logger.warning("[connect_tv] Happ rejected code=%s status=%s body=%s", code, resp.status, detail)
+                raw = (await resp.text() or "").strip()
     except aiohttp.ClientError as exc:
         logger.warning("[connect_tv] Happ request failed for code=%s: %s", code, exc)
         raise HTTPException(status_code=502, detail="Сервис Happ недоступен, попробуйте позже")
 
-    raise HTTPException(status_code=502, detail="Не удалось отправить подписку. Проверьте код и повторите")
+    # Happ answers HTTP 200 regardless of outcome; the real result is in the
+    # JSON body — {"status":"success"} or {"status":"error","message":"..."}.
+    # Note: Happ only validates the UID *format*, not whether a TV session for
+    # that code actually exists, so a well-formed but stale code still succeeds.
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+
+    if str(data.get("status")).lower() == "success":
+        return TvConnectResponse(ok=True, message="Подписка отправлена на телевизор", client_id=client_id)
+
+    logger.warning("[connect_tv] Happ rejected code=%s body=%s", code, raw[:200])
+    raise HTTPException(status_code=400, detail="Не удалось отправить подписку. Проверьте код и повторите")
