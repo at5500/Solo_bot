@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,31 +42,6 @@ async def me(
 ):
     """Текущая идентичность по HttpOnly cookie `auth_token`."""
     return IdentityResponse.model_validate(identity)
-
-
-class DebugCookieResponse(BaseModel):
-    has_cookie: bool
-    cookie_length: int = 0
-    cookie_prefix: str | None = None
-
-
-@router.get("/debug-cookie", response_model=DebugCookieResponse)
-async def debug_cookie(request: Request):
-    """Diagnostic endpoint: reports whether the auth_token cookie reached the
-    backend. Returns only the length and the first few characters, never the
-    full token, so it can be safely called from a Mini App debug screen.
-
-    REMOVE AFTER COOKIE FLOW IS VALIDATED IN PRODUCTION.
-    """
-    raw = request.cookies.get(AUTH_COOKIE_NAME)
-    if not raw or not raw.strip():
-        return DebugCookieResponse(has_cookie=False)
-    raw = raw.strip()
-    return DebugCookieResponse(
-        has_cookie=True,
-        cookie_length=len(raw),
-        cookie_prefix=raw[:6] if raw else None,
-    )
 
 
 def _current_token_hash(request: Request) -> str | None:

@@ -21,6 +21,12 @@ from logger import logger
 _OBFUSCATED_MIN_SEQ = 15
 _PLACEHOLDER = "<obfuscated>"
 
+# Strings that must never reach admin DMs or log sinks: bot API tokens that
+# aiogram occasionally surfaces in ``TelegramAPIError.__str__``, and the
+# one-shot ``link_<token>`` payloads echoed by `/start link_…` errors.
+_BOT_TOKEN_RE = re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]+", re.IGNORECASE)
+_LINK_PAYLOAD_RE = re.compile(r"\blink_[A-Za-z0-9]{6,}\b")
+
 _ERROR_LOG_THROTTLE: dict[str, float] = {}
 _ERROR_LOG_THROTTLE_WINDOW_SEC = 60
 _ERROR_LOG_THROTTLE_MAX_KEYS = 500
@@ -41,8 +47,50 @@ def _should_log_error(key: str, window_sec: float = _ERROR_LOG_THROTTLE_WINDOW_S
 
 
 def _sanitize_traceback(text: str) -> str:
-    """Убирает из текста длинные последовательности."""
-    return re.sub(r"(\\x[0-9a-fA-F]{2}){" + str(_OBFUSCATED_MIN_SEQ) + r",}", _PLACEHOLDER, text)
+    """Strips long obfuscated byte sequences AND any embedded secrets.
+
+    The original purpose was cosmetic — collapsing long ``\\xHH`` runs that
+    show up when aiogram serialises binary payloads. Extended to also redact
+    bot API tokens and one-shot link-token payloads so that admin DMs and
+    log sinks never carry live credentials.
+
+    Args:
+        text: Raw traceback text from :func:`traceback.format_exc`.
+
+    Returns:
+        Sanitised text with obfuscated sequences and secrets replaced.
+    """
+    out = re.sub(r"(\\x[0-9a-fA-F]{2}){" + str(_OBFUSCATED_MIN_SEQ) + r",}", _PLACEHOLDER, text)
+    out = _BOT_TOKEN_RE.sub("bot<redacted>", out)
+    out = _LINK_PAYLOAD_RE.sub("link_<redacted>", out)
+    return out
+
+
+def _safe_update_repr(update) -> str:
+    """Compact, secret-free representation of an aiogram ``Update``.
+
+    Replaces the default ``repr`` (which includes the raw message text and
+    therefore any ``/start link_<token>`` payload) with just the
+    ``update_id`` plus the event kind. The full update is still available
+    via the sanitised traceback if needed for debugging.
+
+    Args:
+        update: ``aiogram.types.Update`` instance from ``ErrorEvent``.
+
+    Returns:
+        A short string suitable for log lines.
+    """
+    update_id = getattr(update, "update_id", None)
+    kind = "unknown"
+    if getattr(update, "message", None):
+        kind = "message"
+    elif getattr(update, "callback_query", None):
+        kind = "callback_query"
+    elif getattr(update, "inline_query", None):
+        kind = "inline_query"
+    elif getattr(update, "edited_message", None):
+        kind = "edited_message"
+    return f"Update(id={update_id}, kind={kind})"
 
 
 def setup_error_handlers(dp: Dispatcher) -> None:
@@ -116,7 +164,7 @@ def setup_error_handlers(dp: Dispatcher) -> None:
             if _should_log_error("DB_Interface_Operational", 30):
                 logger.warning(
                     "Ошибка соединения с БД (InterfaceError/OperationalError): {}",
-                    str(event.exception)[:200],
+                    _sanitize_traceback(str(event.exception)[:200]),
                 )
             if chat_id:
                 try:
@@ -178,7 +226,8 @@ def setup_error_handlers(dp: Dispatcher) -> None:
                                     "• При необходимости оптимизировать обработку или уменьшить время между нажатием кнопки и ответом."
                                 )
                             else:
-                                caption = f"{hbold(type(event.exception).__name__)}: {error_message[:1021]}..."
+                                safe_msg = _sanitize_traceback(error_message[:1021])
+                                caption = f"{hbold(type(event.exception).__name__)}: {safe_msg}..."
 
                             for admin_id in ADMIN_ID:
                                 await bot.send_document(
@@ -233,9 +282,13 @@ def setup_error_handlers(dp: Dispatcher) -> None:
                 return True
 
         exc = event.exception
+        # Hash the raw ``str(exc)`` into the throttle key (cheap dedupe) but
+        # never log it as-is — exceptions from aiogram/aiohttp can embed the
+        # bot API token in their stringification.
         generic_key = "err:{}:{}".format(type(exc).__name__, str(exc)[:80].replace("\n", " "))
         if _should_log_error(generic_key, _ERROR_LOG_THROTTLE_WINDOW_SEC):
-            logger.exception("Update: {}\nException: {}", event.update, exc)
+            safe_exc = _sanitize_traceback(repr(exc))
+            logger.exception("Update: {}\nException: {}", _safe_update_repr(event.update), safe_exc)
 
         if not ADMIN_ID:
             return True
@@ -243,7 +296,7 @@ def setup_error_handlers(dp: Dispatcher) -> None:
         try:
             if _should_log_error("generic_admin_doc", 60):
                 tb_text = _sanitize_traceback(traceback.format_exc())
-                exc_text = html.escape(str(event.exception)[:1021])
+                exc_text = html.escape(_sanitize_traceback(str(event.exception)[:1021]))
                 for admin_id in ADMIN_ID:
                     await bot.send_document(
                         chat_id=admin_id,

@@ -871,6 +871,57 @@ def _error_signature(name: str, message: str, stack: str | None, url: str | None
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
 
+# Strings that look like sensitive payloads — applied to URL, message and
+# stack before persistence. ``_URL_SECRET_RE`` covers query/form params
+# carrying one-shot tokens, OTP codes, or passwords; ``_JSON_SECRET_RE``
+# does the same for JSON-shaped payloads that sometimes land in
+# ``Error.message`` when frontend code throws ``JSON.stringify(payload)``;
+# ``_BOT_TOKEN_RE`` scrubs Telegram bot tokens accidentally embedded in
+# stringified exceptions; ``_LINK_PAYLOAD_RE`` catches ``link_<token>``
+# payloads from ``/start link_…`` deeplinks that aiogram echoes in error
+# reprs.
+_SECRET_KEY_GROUP = (
+    r"link_token|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth"
+)
+_URL_SECRET_RE = re.compile(
+    r"((?:" + _SECRET_KEY_GROUP + r"|token|code)=)[^&\s#]+",
+    re.IGNORECASE,
+)
+_JSON_SECRET_RE = re.compile(
+    r'("(?:' + _SECRET_KEY_GROUP + r'|token|code)"\s*:\s*")[^"]*(")',
+    re.IGNORECASE,
+)
+_BOT_TOKEN_RE = re.compile(r"\bbot\d{6,}:[A-Za-z0-9_-]+", re.IGNORECASE)
+_LINK_PAYLOAD_RE = re.compile(r"\blink_[A-Za-z0-9]{6,}\b")
+
+
+def _scrub_secret_strings(value: str | None) -> str | None:
+    """Removes secret-looking substrings from free-form text.
+
+    Designed to be safe to apply to URLs, exception messages, and stack
+    traces before they land in the error-report table (which is visible
+    via the admin endpoint and would otherwise hold live ``link_token``
+    values for the remainder of their 30-minute TTL).
+
+    Catches both URL/form-encoded (``key=value``) and JSON-encoded
+    (``"key": "value"``) shapes, so a frontend ``throw new
+    Error(JSON.stringify(payload))`` cannot smuggle a token through.
+
+    Args:
+        value: Raw user-/exception-provided string, or ``None``.
+
+    Returns:
+        Scrubbed string, or ``None`` if the input was ``None``.
+    """
+    if not value:
+        return value
+    out = _URL_SECRET_RE.sub(r"\1<redacted>", value)
+    out = _JSON_SECRET_RE.sub(r"\1<redacted>\2", out)
+    out = _BOT_TOKEN_RE.sub("bot<redacted>", out)
+    out = _LINK_PAYLOAD_RE.sub("link_<redacted>", out)
+    return out
+
+
 def _sanitize_http_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -880,7 +931,7 @@ def _sanitize_http_url(value: str | None) -> str | None:
     lowered = trimmed.lower()
     if not (lowered.startswith("http://") or lowered.startswith("https://") or lowered.startswith("/")):
         return None
-    return trimmed[:500]
+    return _scrub_secret_strings(trimmed[:500])
 
 
 class ErrorReportIngest(BaseModel):
@@ -922,8 +973,14 @@ async def ingest_error_report(
         safe_context = _redact_sensitive(body.context)
 
     safe_url = _sanitize_http_url(body.url)
+    # Message and stack frequently embed request payloads / URL params that
+    # carry one-shot tokens or OTP codes — scrub before persistence and
+    # before signature computation (so signatures dedupe across distinct
+    # token values).
+    safe_message = _scrub_secret_strings(body.message[:4000]) if body.message else ""
+    safe_stack = _scrub_secret_strings(body.stack[:16000]) if body.stack else None
 
-    signature = _error_signature(body.name, body.message, body.stack, safe_url)
+    signature = _error_signature(body.name, safe_message or "", safe_stack, safe_url)
 
     existing = (
         await session.execute(select(WebErrorReport).where(WebErrorReport.signature == signature))
@@ -959,8 +1016,8 @@ async def ingest_error_report(
         id=str(uuid.uuid4()),
         signature=signature,
         error_name=body.name[:255] if body.name else "",
-        error_message=body.message[:4000] if body.message else "",
-        stack=body.stack[:16000] if body.stack else None,
+        error_message=safe_message or "",
+        stack=safe_stack,
         url=safe_url,
         user_agent=body.userAgent[:500] if body.userAgent else None,
         tag=body.tag[:64] if body.tag else None,

@@ -68,6 +68,14 @@ class SendLoginCodeRequest(BaseModel):
 class LoginByCodeRequest(BaseModel):
     email: str = Field(..., min_length=1)
     code: str = Field(..., min_length=1)
+    link_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional one-shot token from /auth/link-tokens/web. When present "
+            "and valid, the freshly logged-in email is attached to the "
+            "originating Telegram identity instead of standing alone."
+        ),
+    )
 
 
 class ConfirmPasswordResetRequest(BaseModel):

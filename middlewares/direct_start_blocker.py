@@ -10,6 +10,7 @@ from core.cache_config import DIRECT_START_USER_EXISTS_CACHE_TTL_SEC
 from core.redis_cache import cache_get, cache_key, cache_set
 from database import check_user_exists
 from logger import logger
+from utils.errors import _sanitize_traceback as _scrub_payload
 
 
 _TTL = DIRECT_START_USER_EXISTS_CACHE_TTL_SEC
@@ -17,7 +18,7 @@ _TTL = DIRECT_START_USER_EXISTS_CACHE_TTL_SEC
 
 class DirectStartBlockerMiddleware(BaseMiddleware):
     def __init__(self) -> None:
-        self.allowed_prefixes = ("gift_", "referral_", "coupons_", "utm", "partner_")
+        self.allowed_prefixes = ("gift_", "referral_", "coupons_", "utm", "partner_", "link_")
 
     async def __call__(
         self,
@@ -88,11 +89,16 @@ class DirectStartBlockerMiddleware(BaseMiddleware):
             return
 
         start_param = parts[1].strip()
+        # ``_scrub_payload`` strips one-shot ``link_<token>`` payloads and any
+        # accidentally-embedded bot tokens, so the deeplink lands in the log
+        # as ``link_<redacted>`` instead of plaintext (the raw value would
+        # be replayable for the rest of the Redis TTL).
+        safe_param = _scrub_payload(repr(start_param))
         if not start_param or not start_param.startswith(self.allowed_prefixes):
             if await user_exists_cached():
                 return await handler(event, data)
-            logger.info(f"[DirectStartBlocker] Отклонена неизвестная ссылка от {tg_id}: {start_param!r}")
+            logger.info(f"[DirectStartBlocker] Отклонена неизвестная ссылка от {tg_id}: {safe_param}")
             return
 
-        logger.info(f"[DirectStartBlocker] Разрешённая ссылка от {tg_id}: {start_param!r}")
+        logger.info(f"[DirectStartBlocker] Разрешённая ссылка от {tg_id}: {safe_param}")
         return await handler(event, data)
