@@ -4,11 +4,10 @@ identity linking.
 Three flows:
 
 * ``POST /auth/link-tokens/telegram`` — caller is a *web*-authenticated user
-  who wants to attach a Telegram account. Returns a Mini App deeplink
-  (``https://t.me/<bot>/<miniapp>?startapp=link_<token>``) when
-  ``MINIAPP_NAME`` env is set, falling back to the bot ``?start=link_<token>``
-  form otherwise. The Mini App side posts the token to
-  ``POST /auth/link-miniapp`` to perform the attach.
+  who wants to attach a Telegram account. Returns a bot ``?start=link_<token>``
+  deeplink plus the raw ``token``; the frontend rewrites it into the
+  Mini App ``?startapp=`` form when its env is configured (the bot URL
+  itself remains the safe fallback).
 
 * ``POST /auth/link-tokens/web`` — caller is a *Telegram WebApp*-authenticated
   user who wants to attach a web account. Returns a web URL with
@@ -22,12 +21,11 @@ Three flows:
 
 The Mini App route exists because Telegram clients silently swallow the
 ``?start=`` payload when the bot is already in the user's chat list — the
-``startapp`` form sidesteps that by opening the Mini App directly.
+``startapp`` form (built client-side from ``VITE_BOT_USERNAME`` /
+``VITE_MINIAPP_NAME``) sidesteps that by opening the Mini App directly.
 
 Tokens themselves are stored in Redis and live in ``utils/identity_link.py``.
 """
-
-import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -54,12 +52,6 @@ router = APIRouter()
 # would otherwise spam 30-minute-lived entries.
 _RATE_LIMIT_MAX = 20
 _RATE_LIMIT_WINDOW_SEC = 600  # 10 minutes
-
-# Short-name of the Mini App registered with @BotFather (``/newapp`` →
-# ``Choose a short name``). When set, the TG-link URL switches to the
-# ``?startapp=`` form, which is reliable even when the bot is already
-# open in the user's Telegram client.
-_MINIAPP_NAME = (os.getenv("MINIAPP_NAME") or "").strip()
 
 
 async def _enforce_link_rate_limit(identity_id: str) -> None:
@@ -91,8 +83,8 @@ async def _enforce_link_rate_limit(identity_id: str) -> None:
 
 
 class LinkTokenResponse(BaseModel):
-    """Ready-to-open URL for the caller. The token itself is opaque to the
-    client — only the URL is meaningful."""
+    """Ready-to-open URL for the caller. The frontend extracts the token
+    from the URL when it needs to rebuild a Mini App ``?startapp=`` form."""
 
     url: str
 
@@ -141,11 +133,7 @@ async def create_telegram_link_token(
     if not bot:
         raise HTTPException(status_code=503, detail="Бот не настроен на сервере")
     token = await store_link_token(LINK_KIND_TG, str(identity.id))
-    if _MINIAPP_NAME:
-        url = f"https://t.me/{bot}/{_MINIAPP_NAME}?startapp=link_{token}"
-    else:
-        url = f"https://t.me/{bot}?start=link_{token}"
-    return LinkTokenResponse(url=url)
+    return LinkTokenResponse(url=f"https://t.me/{bot}?start=link_{token}")
 
 
 @router.post("/link-tokens/web", response_model=LinkTokenResponse)
