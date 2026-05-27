@@ -406,14 +406,25 @@ async def change_identity_password(
 
 
 async def ensure_billing_user_for_identity(session: AsyncSession, identity: Identity) -> int:
-    from database.users import add_user, check_user_exists
+    from database.users import add_user
 
     if identity.tg_id is not None:
         tid = int(identity.tg_id)
-        if not await check_user_exists(session, tid):
-            await add_user(session, tid)
+        # ``add_user`` uses ``INSERT ... ON CONFLICT DO NOTHING`` so calling
+        # it unconditionally is cheap and idempotent. Skipping the
+        # ``check_user_exists`` short-circuit also makes the function
+        # robust to a stale Redis ``user_exists:<tg_id>`` flag — that flag
+        # is set on creation but never cleared on manual ``DELETE FROM
+        # users``, and a stale ``True`` used to blow up the ``scalar_one``
+        # below with ``NoResultFound``.
+        await add_user(session, tid)
         ur = await session.execute(select(User).where(User.tg_id == tid).limit(1))
-        u = ur.scalar_one()
+        u = ur.scalar_one_or_none()
+        if u is None:
+            raise RuntimeError(
+                f"ensure_billing_user_for_identity: user row missing for tg_id={tid} "
+                f"after add_user (DB / migration mismatch?)"
+            )
         await session.execute(update(User).where(User.id == u.id).values(identity_id=identity.id))
         return int(u.id)
     res = await session.execute(select(User).where(User.identity_id == identity.id))
