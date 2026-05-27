@@ -30,6 +30,7 @@ from utils.self_link import (
     ensure_self_link_code,
     resolve_self_link_code,
 )
+from utils.tg_name_cache import invalidate_tg_name_cache
 
 
 router = APIRouter()
@@ -169,9 +170,11 @@ async def consume_self_link(
 
     await session.commit()
 
-    # Refresh the photo cache (target may have just gained a tg_id, or
-    # the caller's previous photo cache is now defunct).
+    # Refresh both per-identity caches: target may have just gained a
+    # tg_id (positive resolution where there used to be none), or the
+    # caller's previous cache entries are now defunct after the absorb.
     await invalidate_photo_cache(str(merged.id))
+    await invalidate_tg_name_cache(str(merged.id))
     # Drop the self-link code that pointed at the caller — the caller
     # identity was absorbed and no longer exists.
     await drop_self_link_code(str(identity.id))

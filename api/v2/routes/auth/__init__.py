@@ -10,6 +10,7 @@ from api.v2.routes.auth import (
     self_link,
     session,
     telegram,
+    tg_name,
     yandex,
 )
 
@@ -25,5 +26,6 @@ router.include_router(email_verify.router)
 router.include_router(session.router)
 router.include_router(photo.router)
 router.include_router(self_link.router)
+router.include_router(tg_name.router)
 
 __all__ = ["router"]
