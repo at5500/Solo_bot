@@ -1,6 +1,17 @@
 from fastapi import APIRouter
 
-from api.v2.routes.auth import email_verify, google, link, link_account, password, photo, session, telegram, yandex
+from api.v2.routes.auth import (
+    email_verify,
+    google,
+    link,
+    link_account,
+    password,
+    photo,
+    self_link,
+    session,
+    telegram,
+    yandex,
+)
 
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -13,5 +24,6 @@ router.include_router(link_account.router)
 router.include_router(email_verify.router)
 router.include_router(session.router)
 router.include_router(photo.router)
+router.include_router(self_link.router)
 
 __all__ = ["router"]

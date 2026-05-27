@@ -63,6 +63,14 @@ class SendLoginCodeRequest(BaseModel):
         description="Если true и email новый — создать идентичность и отправить код (passwordless flow)",
     )
     turnstile_token: str | None = Field(default=None, description="Cloudflare Turnstile CAPTCHA token")
+    partner_code: str | None = Field(
+        default=None,
+        description=(
+            "Optional partner code from a ``?partner=<code>`` web invite. "
+            "Applied only when the email is new (a fresh identity is "
+            "created in this call); otherwise silently ignored."
+        ),
+    )
 
 
 class LoginByCodeRequest(BaseModel):
