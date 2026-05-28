@@ -677,7 +677,12 @@ async def attach_email(session: AsyncSession, identity_id: str, email: str) -> I
         await session.execute(delete(Identity).where(Identity.id == existing.id))
 
     identity.email = email_clean
-    await session.refresh(identity)
+    # ``session.refresh()`` here would re-read attributes from the DB and
+    # silently throw away the in-memory ``email`` assignment above, since
+    # ``refresh`` does not autoflush pending changes. ``flush`` is what we
+    # actually want — it persists the new email so the surrounding
+    # ``session.commit()`` in the caller has something to commit.
+    await session.flush()
     return identity
 
 
@@ -723,7 +728,9 @@ async def attach_telegram(session: AsyncSession, identity_id: str, tg_id: int) -
     if admin_row.scalar_one_or_none():
         identity.is_admin = True
     await session.execute(User.__table__.update().where(User.tg_id == tg_id).values(identity_id=identity_id))
-    await session.refresh(identity)
+    # See note in ``attach_email`` — ``refresh`` would clobber the
+    # in-memory ``identity.tg_id`` / ``is_admin`` assignments above.
+    await session.flush()
     return identity
 
 
@@ -742,7 +749,8 @@ async def detach_email(session: AsyncSession, identity_id: str) -> Identity | No
     identity.email = None
     identity.email_verified = False
     identity.password_hash = None
-    await session.refresh(identity)
+    # See note in ``attach_email``.
+    await session.flush()
     return identity
 
 
@@ -759,7 +767,8 @@ async def detach_telegram(session: AsyncSession, identity_id: str) -> Identity |
     identity.tg_id = None
     identity.is_admin = False
     await session.execute(update(User).where(User.identity_id == identity_id, User.tg_id == old_tg).values(tg_id=None))
-    await session.refresh(identity)
+    # See note in ``attach_email``.
+    await session.flush()
     return identity
 
 
