@@ -14,6 +14,7 @@ Returning a boolean ``applied`` flag lets the caller log/respond
 appropriately without re-implementing all the silent-skip rules.
 """
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import identities as idb
@@ -78,12 +79,28 @@ async def apply_partner_code(
     try:
         inviter_legacy = decode_partner_code(code)
     except Exception:
-        return False
-    if inviter_legacy is None:
-        return False
-    inviter = await resolve_user_optional(session, inviter_legacy)
+        inviter_legacy = None
+    inviter = None
+    if inviter_legacy is not None:
+        inviter = await resolve_user_optional(session, inviter_legacy)
     if inviter is None:
-        return False
+        # ``decode_partner_code`` only handles ``p1_…``, ``r1_…`` and bare
+        # numeric ids. Custom slugs the user picked themselves through
+        # ``/api/v1/partners/.../partner_code`` live in ``users.partner_code``
+        # as plain text — fall back to a direct lookup for those.
+        try:
+            row = await session.execute(
+                text("SELECT id FROM users WHERE partner_code = :code LIMIT 1"),
+                {"code": code},
+            )
+            fallback_id = row.scalar_one_or_none()
+        except Exception:
+            fallback_id = None
+        if fallback_id is None:
+            return False
+        inviter = await resolve_user_optional(session, int(fallback_id))
+        if inviter is None:
+            return False
     billing_user_id = await idb.ensure_billing_user_for_identity(session, identity)
     if int(billing_user_id) == int(inviter.id):
         return False
