@@ -5,6 +5,7 @@ from api.v2.routes.auth import (
     google,
     link,
     link_account,
+    partner,
     password,
     photo,
     self_link,
@@ -27,5 +28,6 @@ router.include_router(session.router)
 router.include_router(photo.router)
 router.include_router(self_link.router)
 router.include_router(tg_name.router)
+router.include_router(partner.router)
 
 __all__ = ["router"]

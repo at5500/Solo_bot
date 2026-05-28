@@ -37,7 +37,7 @@ from utils import (
     web_password_reset_code as pwd_reset,
 )
 from utils.disposable_emails import is_disposable_email
-from utils.referral_codes import decode_partner_code, decode_referral_code
+from utils.referral_codes import decode_referral_code
 from utils.turnstile import turnstile_enabled, verify_turnstile_token
 from utils.web_login_code import (
     delete_code,
@@ -269,18 +269,8 @@ async def send_login_code(
     # link forwarded to an existing user can't quietly rebind them).
     if is_fresh_identity and body.partner_code:
         try:
-            raw = str(body.partner_code).strip()
-            if "/" in raw:
-                raw = raw.split("?", 1)[0].split("#", 1)[0].rstrip("/").split("/")[-1]
-            if raw.startswith("partner_"):
-                raw = raw[len("partner_"):]
-            inviter_legacy = decode_partner_code(raw)
-            if inviter_legacy is not None:
-                inviter = await resolve_user_optional(session, inviter_legacy)
-                if inviter is not None:
-                    billing_user_id = await idb.ensure_billing_user_for_identity(session, identity)
-                    if not await get_referral_by_referred_id(session, billing_user_id):
-                        await add_referral(session, billing_user_id, inviter.id)
+            from utils.partner_apply import apply_partner_code as _apply_partner
+            await _apply_partner(session, identity, body.partner_code)
         except Exception as exc:
             logger.warning("[Auth] partner-link apply failed for {}: {}", email_norm, exc)
 
