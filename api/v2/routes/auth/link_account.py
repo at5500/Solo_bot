@@ -205,6 +205,25 @@ async def consume_miniapp_link(
             message="Эта ссылка ведёт на ваш же аккаунт — связывать нечего.",
         )
 
+    # Guard against silently replacing an already-attached Telegram on
+    # the web side. ``attach_telegram`` would otherwise just overwrite
+    # ``remote_identity.tg_id`` with ours — the old account loses its
+    # Telegram channel without anyone noticing.
+    remote_identity = await idb.get_identity_by_id(session, remote_id)
+    if (
+        remote_identity is not None
+        and remote_identity.tg_id is not None
+        and int(remote_identity.tg_id) != int(tg_id)
+    ):
+        return LinkMiniappResult(
+            ok=True,
+            linked=False,
+            message=(
+                "К этому аккаунту уже привязан другой Telegram. "
+                "Отвяжите его в профиле и попробуйте ещё раз."
+            ),
+        )
+
     merged = await idb.attach_telegram(session, remote_id, int(tg_id))
     if merged is None:
         return LinkMiniappResult(

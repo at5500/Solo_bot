@@ -351,6 +351,24 @@ async def login_by_code(
 
         remote_id = await consume_link_token(LINK_KIND_WEB, body.link_token.strip())
         if remote_id and remote_id != str(identity.id):
+            # Guard against silently overwriting an already-attached email
+            # on the Telegram identity. ``attach_email`` is a blunt
+            # ``identity.email = …`` — without this check, the second
+            # link-OTP from a different address would just clobber the
+            # old one. Mirrors the link-email/confirm guard above.
+            remote_identity = await idb.get_identity_by_id(session, remote_id)
+            if (
+                remote_identity is not None
+                and remote_identity.email
+                and str(remote_identity.email).strip().lower() != email_norm
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "К целевому аккаунту уже привязан другой email. "
+                        "Отвяжите его в профиле и попробуйте ещё раз."
+                    ),
+                )
             merged = await idb.attach_email(session, remote_id, email_norm)
             if merged is None:
                 raise HTTPException(

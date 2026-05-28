@@ -225,6 +225,15 @@ async def link_telegram(
     payload = body.model_dump(mode="json")
     if not verify_telegram_login(payload, API_TOKEN, max_age_seconds=TELEGRAM_LOGIN_MAX_AGE):
         raise HTTPException(status_code=401, detail="Неверная подпись или устаревшие данные от Telegram")
+    # Block silent replacement of an already-attached Telegram. Same
+    # spirit as the link-email guard — switching the channel must go
+    # through an explicit detach first so a stray Login Widget call
+    # can't take over the account.
+    if identity.tg_id is not None and int(identity.tg_id) != int(body.id):
+        raise HTTPException(
+            status_code=409,
+            detail="К аккаунту уже привязан другой Telegram. Сначала отвяжите его.",
+        )
     result = await idb.attach_telegram(session, identity.id, body.id)
     if not result:
         raise HTTPException(

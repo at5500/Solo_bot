@@ -33,8 +33,19 @@ async def link_email_send_code(
     email_norm = email_link_code.normalize_email(body.email)
     if not email_norm:
         raise HTTPException(status_code=400, detail="Укажите корректный email")
-    if identity.email and str(identity.email).strip().lower() == email_norm:
-        raise HTTPException(status_code=409, detail="Этот email уже привязан к аккаунту")
+    # Block any attempt to attach a second email — replacing the existing
+    # address silently would be a credential-takeover footgun on shared
+    # devices. The UI is expected to expose «отвязать» first.
+    if identity.email:
+        if str(identity.email).strip().lower() == email_norm:
+            raise HTTPException(
+                status_code=409,
+                detail="Этот email уже привязан к аккаунту",
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="К аккаунту уже привязан другой email. Сначала отвяжите его.",
+        )
     if not smtp_configured():
         raise HTTPException(
             status_code=503,
@@ -113,6 +124,14 @@ async def link_email_confirm(
         )
     if not await email_link_code.verify_and_consume_code(email_norm, str(body.code).strip()):
         raise HTTPException(status_code=401, detail="Неверный код или срок действия истёк")
+    # Re-check the «email already attached» guard between send-code and
+    # confirm — the row may have been touched by another flow (e.g. a
+    # self-link merge in a parallel tab) since the code was issued.
+    if identity.email and str(identity.email).strip().lower() != email_norm:
+        raise HTTPException(
+            status_code=409,
+            detail="К аккаунту уже привязан другой email. Сначала отвяжите его.",
+        )
     result = await idb.attach_email(session, identity.id, email_norm)
     if not result:
         raise HTTPException(
