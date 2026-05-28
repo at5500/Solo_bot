@@ -17,8 +17,8 @@ appropriately without re-implementing all the silent-skip rules.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import identities as idb
+from database.access.resolution import resolve_user_optional
 from database.referrals import add_referral, get_referral_by_referred_id
-from database.users import resolve_user_optional
 from logger import logger
 from utils.referral_codes import decode_partner_code
 
