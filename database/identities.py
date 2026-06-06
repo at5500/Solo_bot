@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import bcrypt
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import API_TOKEN_TTL_DAYS
@@ -13,18 +13,6 @@ from core.executor import run_cpu, run_io
 from database import identity_sessions as _idsess
 from database.access.tg_mirror import refresh_tg_mirrors_for_user
 from database.models import Admin, Identity, Key, User
-
-
-async def _count_keys_for_billing_user(session: AsyncSession, user_id: int) -> int:
-    """Count VPN keys (rows in keys table) bound to a billing user.
-
-    Used to detect the "subscriptions on both sides" merge-conflict case before
-    we silently fold one Identity into another.
-    """
-    result = await session.execute(
-        select(func.count()).select_from(Key).where(Key.user_id == int(user_id))
-    )
-    return int(result.scalar_one() or 0)
 
 
 def _request_meta(request) -> tuple[str | None, str | None]:
@@ -651,13 +639,17 @@ async def attach_email(session: AsyncSession, identity_id: str, email: str) -> I
         dst_tg = int(identity.tg_id) if identity.tg_id is not None else None
 
         if src_user is not None and int(src_user.id) != int(dst_uid):
-            # Business rule: do not merge when BOTH Identities already have
-            # active VPN keys — there is no unambiguous answer for which
-            # subscription should survive. Caller (link-email/confirm) will
-            # surface this as 409 to the user.
-            src_keys = await _count_keys_for_billing_user(session, int(src_user.id))
-            dst_keys = await _count_keys_for_billing_user(session, int(dst_uid))
-            if src_keys > 0 and dst_keys > 0:
+            # Decide whose keys survive the merge — only an outright
+            # ``ACTIVE`` vs ``ACTIVE`` collision still refuses; any other
+            # combination (trial vs anything, expired vs anything, etc.)
+            # drops the weaker side's keys and continues. See
+            # ``utils/merge_keys.py`` for the full matrix.
+            from utils.merge_keys import prepare_keys_for_merge
+
+            outcome = await prepare_keys_for_merge(
+                session, int(src_user.id), int(dst_uid)
+            )
+            if outcome == "fail":
                 return None
 
             from database.users import update_balance
@@ -704,14 +696,20 @@ async def attach_telegram(session: AsyncSession, identity_id: str, tg_id: int) -
         if not can_merge:
             return None
 
-        # Business rule: refuse merge when both sides already have subscriptions —
-        # we don't know which set of keys to keep. Same guard as attach_email.
+        # Decide whose keys survive the merge — same matrix as
+        # ``attach_email`` (see ``utils/merge_keys.py``). Only a true
+        # ACTIVE↔ACTIVE clash still refuses; trial/expired tiers
+        # collapse cleanly to whichever side wins or to the newer key
+        # on a same-tier tie.
         src_user_row = (await session.execute(select(User).where(User.identity_id == existing.id))).scalars().first()
         dst_uid = await ensure_billing_user_for_identity(session, identity)
         if src_user_row is not None and int(src_user_row.id) != int(dst_uid):
-            src_keys = await _count_keys_for_billing_user(session, int(src_user_row.id))
-            dst_keys = await _count_keys_for_billing_user(session, int(dst_uid))
-            if src_keys > 0 and dst_keys > 0:
+            from utils.merge_keys import prepare_keys_for_merge
+
+            outcome = await prepare_keys_for_merge(
+                session, int(src_user_row.id), int(dst_uid)
+            )
+            if outcome == "fail":
                 return None
 
         existing.email = None
