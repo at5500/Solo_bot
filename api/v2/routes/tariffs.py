@@ -195,6 +195,65 @@ async def purchase_tariff_with_balance(
     identity=Depends(verify_identity_token),
 ):
     tg_id = await idb.ensure_billing_user_for_identity(session, identity)
+
+    # If the user already owns a non-frozen key, treat this purchase as a
+    # renewal of that key — keeps the VLESS link stable (the client
+    # doesn't have to re-add anything to Happ) and prevents «trial leaked
+    # into purchase» / «stale Mini App state lost ``mode=renew``» bugs
+    # from minting parallel subscriptions. Preview is excluded — pricing
+    # calculation must remain idempotent regardless of existing keys.
+    if not preview:
+        from database.keys import get_keys as _get_keys
+
+        existing_keys = await _get_keys(session, int(tg_id))
+        active_keys = [k for k in existing_keys if not getattr(k, "is_frozen", False)]
+        if active_keys:
+            # Pick the most recently created key as the renewal target —
+            # mirrors the front-end's ``sortKeysForDisplay`` priority
+            # (active > expired, newest first) without re-implementing it
+            # here.
+            target_key = max(
+                active_keys,
+                key=lambda k: int(getattr(k, "created_at", 0) or 0),
+            )
+            from api.v2.routes.keys.user.renew_change import (
+                user_key_renew_change_tariff,
+            )
+            from api.v2.schemas.web_public import AccountKeyRenewRequest
+
+            renew_body = AccountKeyRenewRequest(
+                provider_id=body.provider_id,
+                coupon_code=body.coupon_code,
+                success_url=body.success_url,
+                failure_url=body.failure_url,
+            )
+            renew_result = await user_key_renew_change_tariff(
+                client_id=str(getattr(target_key, "client_id")),
+                new_tariff_id=int(body.tariff_id),
+                body=renew_body,
+                request=request,
+                preview=preview,
+                session=session,
+                identity=identity,
+            )
+            # Re-shape ``AccountKeyRenewResponse`` into the
+            # ``TariffPurchaseResponse`` the caller is waiting for so
+            # the front-end can stay agnostic of which path actually ran.
+            return TariffPurchaseResponse(
+                ok=renew_result.ok,
+                message=renew_result.message,
+                key_email=None,
+                charged_rub=int(renew_result.charged_rub or 0),
+                base_price_rub=int(renew_result.base_price_rub or 0),
+                discount_rub=int(renew_result.discount_rub or 0),
+                final_price_rub=int(renew_result.final_price_rub or 0),
+                applied_coupon_code=renew_result.applied_coupon_code,
+                payment_required=bool(renew_result.payment_required),
+                required_amount_rub=int(renew_result.required_amount_rub or 0),
+                payment_id=renew_result.payment_id,
+                payment_url=renew_result.payment_url,
+            )
+
     tariff = await get_tariff_by_id(session, body.tariff_id)
     if not tariff or not tariff.get("is_active", True):
         raise HTTPException(status_code=404, detail="Тариф не найден")
