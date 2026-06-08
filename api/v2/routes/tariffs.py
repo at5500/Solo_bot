@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.depends import get_session, validate_redirect_url, verify_identity_token
 from api.v2.base_crud import generate_crud_router
 from api.v2.routes.coupon_pricing import resolve_percent_coupon_pricing
+from api.v2.routes.keys.user.renew_change import user_key_renew_change_tariff
 from api.v2.schemas import TariffBase, TariffResponse, TariffUpdate
 from api.v2.schemas.tariffs import TariffGroup, TariffPublic
 from api.v2.schemas.web_public import (
+    AccountKeyRenewRequest,
     TariffConfigPriceResponse,
     TariffPurchaseRequest,
     TariffPurchaseResponse,
@@ -24,7 +26,7 @@ from database import (
     identities as idb,
 )
 from database.coupons import mark_coupon_used
-from database.models import Tariff
+from database.models import Key, Tariff
 from database.tariffs import get_tariff_by_id
 from database.temporary_data import create_temporary_data
 from logger import logger
@@ -203,24 +205,29 @@ async def purchase_tariff_with_balance(
     # from minting parallel subscriptions. Preview is excluded — pricing
     # calculation must remain idempotent regardless of existing keys.
     if not preview:
-        from database.keys import get_keys as _get_keys
-
-        existing_keys = await _get_keys(session, int(tg_id))
-        active_keys = [k for k in existing_keys if not getattr(k, "is_frozen", False)]
-        if active_keys:
-            # Pick the most recently created key as the renewal target —
-            # mirrors the front-end's ``sortKeysForDisplay`` priority
-            # (active > expired, newest first) without re-implementing it
-            # here.
-            target_key = max(
-                active_keys,
-                key=lambda k: int(getattr(k, "created_at", 0) or 0),
+        # Pick the most recently created non-frozen key as the renewal
+        # target — mirrors the front-end's ``sortKeysForDisplay`` priority
+        # (active > expired, newest first) without loading the full key
+        # list into memory.
+        #
+        # ``isnot(True)`` rather than ``is_(False)`` so rows with
+        # ``is_frozen IS NULL`` (column has no server_default — old
+        # migrations / non-ORM inserts could have left NULLs in the
+        # table) still count as active, matching the previous
+        # ``not getattr(k, "is_frozen", False)`` behaviour.
+        # ``nulls_last()`` so a row with ``created_at IS NULL`` doesn't
+        # win the sort: Postgres puts NULLs first on ``DESC`` by default,
+        # but the old ``max(..., key=lambda k: int(... or 0))`` treated
+        # NULL as 0 and effectively pushed it to the end.
+        target_key = (
+            await session.execute(
+                select(Key)
+                .where(Key.user_id == int(tg_id), Key.is_frozen.isnot(True))
+                .order_by(Key.created_at.desc().nulls_last())
+                .limit(1)
             )
-            from api.v2.routes.keys.user.renew_change import (
-                user_key_renew_change_tariff,
-            )
-            from api.v2.schemas.web_public import AccountKeyRenewRequest
-
+        ).scalar_one_or_none()
+        if target_key is not None:
             renew_body = AccountKeyRenewRequest(
                 provider_id=body.provider_id,
                 coupon_code=body.coupon_code,
@@ -236,22 +243,16 @@ async def purchase_tariff_with_balance(
                 session=session,
                 identity=identity,
             )
-            # Re-shape ``AccountKeyRenewResponse`` into the
-            # ``TariffPurchaseResponse`` the caller is waiting for so
-            # the front-end can stay agnostic of which path actually ran.
+            # Re-shape ``AccountKeyRenewResponse`` into the response the
+            # caller awaits so the front-end stays agnostic of which path
+            # actually ran. ``client_id`` / ``tariff_id`` / ``balance_rub``
+            # exist on the renew schema but not on the purchase schema —
+            # drop them; ``key_email`` has no counterpart so the default
+            # ``None`` is fine.
             return TariffPurchaseResponse(
-                ok=renew_result.ok,
-                message=renew_result.message,
-                key_email=None,
-                charged_rub=int(renew_result.charged_rub or 0),
-                base_price_rub=int(renew_result.base_price_rub or 0),
-                discount_rub=int(renew_result.discount_rub or 0),
-                final_price_rub=int(renew_result.final_price_rub or 0),
-                applied_coupon_code=renew_result.applied_coupon_code,
-                payment_required=bool(renew_result.payment_required),
-                required_amount_rub=int(renew_result.required_amount_rub or 0),
-                payment_id=renew_result.payment_id,
-                payment_url=renew_result.payment_url,
+                **renew_result.model_dump(
+                    exclude={"client_id", "tariff_id", "balance_rub"}
+                ),
             )
 
     tariff = await get_tariff_by_id(session, body.tariff_id)
