@@ -107,20 +107,20 @@ async def user_key_renew_change_tariff(
     if not current_tariff_id:
         raise HTTPException(status_code=400, detail="Для подписки не назначен тариф")
 
-    # Verify the requested tariff exists and belongs to the same subscription
-    # group as the key's current tariff — switching across groups (e.g. from
-    # basic to admin-only) would be a permission escalation.
+    # Verify the requested tariff exists and is active. The cross-group
+    # guard we used to have here blocked the legitimate trial → paid
+    # upgrade — trials live in their own ``group_code`` and a user
+    # buying their first paid subscription always switches groups.
+    # The bot's renew flow doesn't enforce same-group either; access
+    # control is already done by ``/tariffs/public`` (it only exposes
+    # tariffs the user is allowed to pick), so the extra check here
+    # was redundant and harmful.
     current_tariff = await get_tariff_by_id(session, int(current_tariff_id))
     new_tariff = await get_tariff_by_id(session, int(new_tariff_id))
     if not current_tariff or not new_tariff:
         raise HTTPException(status_code=404, detail="Тариф не найден")
     if not new_tariff.get("is_active", True):
         raise HTTPException(status_code=400, detail="Выбранный тариф недоступен")
-    if (current_tariff.get("group_code") or "") != (new_tariff.get("group_code") or ""):
-        raise HTTPException(
-            status_code=400,
-            detail="Нельзя сменить тариф на принадлежащий другой группе",
-        )
 
     key_email = str(getattr(db_key, "email", "") or "")
     key_server_id = str(getattr(db_key, "server_id", "") or "")
