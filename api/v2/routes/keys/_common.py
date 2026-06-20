@@ -35,6 +35,7 @@ from api.v2.schemas.web_public import (
     AccountKeyApplyAddonsResponse,
     AccountKeyChangeLocationRequest,
     AccountKeyChangeLocationResponse,
+    AccountKeyConnectionResponse,
     AccountKeyDetailsResponse,
     AccountKeyLocationOptionResponse,
     AccountKeyLocationsResponse,
@@ -70,6 +71,7 @@ from database import (
     update_balance,
 )
 from database.access.resolution import resolve_user_optional
+from database.servers import cluster_name_exists, get_cluster_name_for_server_name
 from database.coupons import mark_coupon_used
 from database.models import Key, Server, ServerSpecialgroup, Tariff
 from database.temporary_data import create_temporary_data
@@ -227,6 +229,45 @@ async def _resolve_available_location_servers(session: AsyncSession, db_key: Key
         str(s.get("server_name") or "").strip() for s in available_servers if str(s.get("server_name") or "").strip()
     })
     return names
+
+
+async def resolve_user_squad_uuids(session: AsyncSession, billing_user_id: int) -> set[str]:
+    """Сквады Remnawave, доступные юзеру: кластеры его ключей → все remnawave-серверы
+    этих кластеров → Server.inbound_id (= UUID внутреннего сквада). Учитывает, что
+    Key.server_id может быть как именем сервера, так и именем кластера.
+    Используется блоком «Статус серверов», чтобы показывать только серверы тарифа юзера.
+    """
+    keys = (
+        await session.execute(select(Key).where(Key.user_id == billing_user_id))
+    ).scalars().all()
+    if not keys:
+        return set()
+    cluster_names: set[str] = set()
+    for db_key in keys:
+        sid = str(getattr(db_key, "server_id", "") or "").strip()
+        if not sid:
+            continue
+        cluster = await get_cluster_name_for_server_name(session, sid)
+        if cluster:
+            cluster_names.add(str(cluster))
+        elif await cluster_name_exists(session, sid):
+            cluster_names.add(sid)
+    if not cluster_names:
+        return set()
+    rows = (
+        await session.execute(
+            select(Server.inbound_id, Server.panel_type, Server.enabled).where(
+                Server.cluster_name.in_(cluster_names)
+            )
+        )
+    ).all()
+    squads: set[str] = set()
+    for inbound_id, panel_type, enabled in rows:
+        if enabled is False:
+            continue
+        if str(panel_type or "").lower() == "remnawave" and inbound_id:
+            squads.add(str(inbound_id))
+    return squads
 
 
 async def _resolve_billing_user_id(request: Request, identity, session: AsyncSession) -> int:

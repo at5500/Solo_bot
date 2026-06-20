@@ -12,10 +12,14 @@ from api.v2.schemas.web_public import (
     ReferralApplyRequest,
     ReferralApplyResponse,
     ReferralConditionsResponse,
+    ReferralListEntry,
+    ReferralListResponse,
     ReferralQrResponse,
     ReferralTopEntryResponse,
     ReferralTopResponse,
 )
+from sqlalchemy import select
+from database.models import Referral
 from config import (
     CHECK_REFERRAL_REWARD_ISSUED,
     REFERRAL_BONUS_PERCENTAGES,
@@ -153,6 +157,34 @@ async def referral_top(
         user_position=user_position,
         top=top,
     )
+
+
+@router.get("/list", response_model=ReferralListResponse, tags=["Referrals"])
+async def referral_list(
+    limit: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    if not bool(BUTTONS_CONFIG.get("REFERRAL_BUTTON_ENABLED", REFERRAL_BUTTON)):
+        raise HTTPException(status_code=403, detail="Реферальная программа отключена")
+    billing_uid = await idb.ensure_billing_user_for_identity(session, identity)
+    rows_stmt = (
+        select(Referral)
+        .where(Referral.referrer_user_id == int(billing_uid))
+        .limit(limit)
+    )
+    result = await session.execute(rows_stmt)
+    rows = result.scalars().all()
+    items = [
+        ReferralListEntry(
+            referred_user_id=int(r.referred_user_id),
+            referred_tg_id=int(r.referred_tg_id) if r.referred_tg_id is not None else None,
+            display_id=encode_referral_code(int(r.referred_user_id)),
+            reward_issued=bool(r.reward_issued),
+        )
+        for r in rows
+    ]
+    return ReferralListResponse(total=len(items), items=items)
 
 
 @router.get("/qr", response_model=ReferralQrResponse, tags=["Referrals"])

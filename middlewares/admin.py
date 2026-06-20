@@ -68,4 +68,9 @@ class AdminMiddleware(BaseMiddleware):
             await cache_set(cache_key("admin_access", user_id), bool(is_admin), _ADMIN_CACHE_TTL)
             return is_admin
         except Exception:
+            if session is not None:
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
             return False

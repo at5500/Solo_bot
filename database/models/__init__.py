@@ -4,13 +4,16 @@ from .audit import AuditEvent
 from .coupons import Coupon, CouponUsage
 from .gifts import Gift, GiftUsage
 from .identity import Identity
+from .identity_notif_prefs import IdentityNotifPref
 from .identity_session import IdentitySession
-from .keys import Key
+from .keys import Key, KeyTrafficHistory, KeyTrafficHourly
 from .notifications import Notification, ScheduledBroadcast
 from .payments import Payment
+from .polls import Poll, PollMessage, PollVote
 from .referrals import Referral
 from .servers import Server, ServerSpecialgroup, ServerSubgroup
-from .tariffs import Tariff
+from .subscription_events import DailySubscriptionMetric, SubscriptionEvent
+from .tariffs import Tariff, TariffSubgroupSetting
 from .users import BlockedUser, ManualBan, TemporaryData, TrackingSource, User
 from .web import (
     WebBlock,
@@ -18,6 +21,7 @@ from .web import (
     WebErrorReport,
     WebFlow,
     WebFlowEvent,
+    WebPageView,
     WebNotification,
     WebPage,
     WebPageVariant,
@@ -31,6 +35,7 @@ __all__ = [
     "Base",
     "DictLikeMixin",
     "Identity",
+    "IdentityNotifPref",
     "IdentitySession",
     "User",
     "ManualBan",
@@ -38,7 +43,12 @@ __all__ = [
     "BlockedUser",
     "TrackingSource",
     "Key",
+    "KeyTrafficHistory",
+    "KeyTrafficHourly",
+    "SubscriptionEvent",
+    "DailySubscriptionMetric",
     "Tariff",
+    "TariffSubgroupSetting",
     "Server",
     "ServerSubgroup",
     "ServerSpecialgroup",
@@ -48,6 +58,9 @@ __all__ = [
     "Referral",
     "Notification",
     "ScheduledBroadcast",
+    "Poll",
+    "PollMessage",
+    "PollVote",
     "Gift",
     "GiftUsage",
     "AuditEvent",
@@ -56,6 +69,7 @@ __all__ = [
     "WebPage",
     "WebTheme",
     "WebBlock",
+    "WebPageView",
     "WebPageVariant",
     "WebPageVariantBlock",
     "WebPushSubscription",

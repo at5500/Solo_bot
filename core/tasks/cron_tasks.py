@@ -66,6 +66,186 @@ def cleanup_expired_gifts_process_runner() -> None:
     asyncio.run(cleanup_expired_gifts_job())
 
 
+WEB_ANALYTICS_RETENTION_DAYS = 90
+WEB_ERROR_RETENTION_DAYS = 30
+
+
+async def cleanup_web_analytics_job() -> None:
+    """Удаляет старую веб-аналитику, чтобы таблицы не росли бесконечно."""
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from sqlalchemy import delete as sa_delete
+
+    from database.models import KeyTrafficHistory
+    from database.models.web import WebErrorReport, WebFlowEvent, WebPageView
+
+    now = datetime.now(_tz.utc)
+    analytics_cutoff = now - timedelta(days=WEB_ANALYTICS_RETENTION_DAYS)
+    error_cutoff = now - timedelta(days=WEB_ERROR_RETENTION_DAYS)
+    traffic_cutoff = (now - timedelta(days=180)).date()
+
+    async with async_session_maker() as session:
+        try:
+            pv = await session.execute(sa_delete(WebPageView).where(WebPageView.created_at < analytics_cutoff))
+            fe = await session.execute(sa_delete(WebFlowEvent).where(WebFlowEvent.created_at < analytics_cutoff))
+            er = await session.execute(
+                sa_delete(WebErrorReport).where(
+                    WebErrorReport.resolved.is_(True),
+                    WebErrorReport.last_seen_at < error_cutoff,
+                )
+            )
+            th = await session.execute(sa_delete(KeyTrafficHistory).where(KeyTrafficHistory.snapshot_date < traffic_cutoff))
+            from sqlalchemy import text as _sa_text
+
+            rl_cutoff = int(now.timestamp()) - 3600
+            rl = await session.execute(_sa_text("DELETE FROM rate_limit_counters WHERE window_start < :c"), {"c": rl_cutoff})
+            await session.commit()
+            logger.info(
+                "[WebAnalyticsCleanup] удалено page_views={} flow_events={} error_reports={} traffic_history={} rate_limit={}",
+                pv.rowcount,
+                fe.rowcount,
+                er.rowcount,
+                th.rowcount,
+                rl.rowcount,
+            )
+        except Exception as error:
+            logger.error("[WebAnalyticsCleanup] ошибка очистки: {}", error)
+
+
+def cleanup_web_analytics_process_runner() -> None:
+    asyncio.run(cleanup_web_analytics_job())
+
+
+async def abandoned_checkout_reminder_job() -> None:
+    """Напоминает пользователям о незавершённой оплате (брошенный checkout)."""
+    from services.abandoned_checkout import send_abandoned_checkout_reminders
+
+    async with async_session_maker() as session:
+        try:
+            count = await send_abandoned_checkout_reminders(session)
+            await session.commit()
+            if count:
+                logger.info("[AbandonedCheckout] Напоминаний отправлено: {}", count)
+        except Exception as error:
+            logger.error("[AbandonedCheckout] Ошибка отправки напоминаний: {}", error)
+
+
+def abandoned_checkout_reminder_process_runner() -> None:
+    asyncio.run(abandoned_checkout_reminder_job())
+
+
+async def snapshot_key_traffic_job() -> None:
+    """Дневной снапшот использованного трафика по ключам (для графиков использования)."""
+    from services.traffic_history import snapshot_all_key_traffic
+
+    async with async_session_maker() as session:
+        try:
+            count = await snapshot_all_key_traffic(session)
+            await session.commit()
+            if count:
+                logger.info("[TrafficHistory] Снапшотов трафика записано: {}", count)
+        except Exception as error:
+            logger.error("[TrafficHistory] Ошибка снапшота трафика: {}", error)
+
+
+def snapshot_key_traffic_process_runner() -> None:
+    asyncio.run(snapshot_key_traffic_job())
+
+
+async def snapshot_key_traffic_hourly_job() -> None:
+    """Почасовой снапшот использованного трафика (для графика использования за сутки)."""
+    from services.traffic_history import snapshot_all_key_traffic_hourly
+
+    async with async_session_maker() as session:
+        try:
+            count = await snapshot_all_key_traffic_hourly(session)
+            await session.commit()
+            if count:
+                logger.info("[TrafficHistory] Почасовых снапшотов записано: {}", count)
+        except Exception as error:
+            logger.error("[TrafficHistory] Ошибка почасового снапшота: {}", error)
+
+
+def snapshot_key_traffic_hourly_process_runner() -> None:
+    asyncio.run(snapshot_key_traffic_hourly_job())
+
+
+async def snapshot_subscription_metrics_job() -> None:
+    """Дневной снапшот подписок (активные/отток/тарифы) + одноразовый backfill из платежей."""
+    from database.subscription_events import backfill_from_payments, snapshot_daily_metrics
+
+    async with async_session_maker() as session:
+        try:
+            seeded = await backfill_from_payments(session)
+            await snapshot_daily_metrics(session)
+            await session.commit()
+            if seeded:
+                logger.info("[SubMetrics] backfill из платежей: записано {} событий", seeded)
+        except Exception as error:
+            logger.error("[SubMetrics] Ошибка снапшота подписок: {}", error)
+
+
+def snapshot_subscription_metrics_process_runner() -> None:
+    asyncio.run(snapshot_subscription_metrics_job())
+
+
+async def anomaly_check_job() -> None:
+    """Утренняя проверка аномалий: высокий процент отказов платежей и всплеск оттока."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import func, select
+
+    from database.models import Payment, SubscriptionEvent
+
+    now = datetime.utcnow()
+    y_start = datetime(now.year, now.month, now.day) - timedelta(days=1)
+    y_end = y_start + timedelta(days=1)
+    alerts: list[str] = []
+    async with async_session_maker() as session:
+        try:
+            row = (await session.execute(
+                select(
+                    func.count().filter(Payment.status == "success").label("ok"),
+                    func.count().filter(Payment.status.in_(["failed", "cancelled"])).label("bad"),
+                ).where(Payment.created_at >= y_start).where(Payment.created_at < y_end)
+            )).first()
+            ok = int(row.ok or 0) if row else 0
+            bad = int(row.bad or 0) if row else 0
+            total = ok + bad
+            if total >= 10 and bad / total > 0.3:
+                alerts.append(f"⚠️ Высокий процент отказов платежей за вчера: {bad}/{total} ({round(bad / total * 100)}%).")
+
+            exp_y = (await session.scalar(
+                select(func.count()).select_from(SubscriptionEvent)
+                .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
+                .where(SubscriptionEvent.created_at >= y_start).where(SubscriptionEvent.created_at < y_end)
+            )) or 0
+            week_start = y_start - timedelta(days=7)
+            exp_week = (await session.scalar(
+                select(func.count()).select_from(SubscriptionEvent)
+                .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
+                .where(SubscriptionEvent.created_at >= week_start).where(SubscriptionEvent.created_at < y_start)
+            )) or 0
+            avg = exp_week / 7.0
+            if avg >= 5 and exp_y > avg * 2:
+                alerts.append(f"⚠️ Всплеск оттока за вчера: истекло {exp_y} (среднее за неделю ~{round(avg)}).")
+        except Exception as error:
+            logger.error("[Anomaly] ошибка проверки аномалий: {}", error)
+            return
+
+    if alerts:
+        try:
+            from services.admin_alert import send_admin_alert
+
+            await send_admin_alert("📊 Аналитика — внимание:\n" + "\n".join(alerts))
+        except Exception as error:
+            logger.error("[Anomaly] не удалось отправить алерт: {}", error)
+
+
+def anomaly_check_process_runner() -> None:
+    asyncio.run(anomaly_check_job())
+
+
 async def log_db_pool_status() -> None:
     """Раз в минуту логирует состояние пула соединений: даёт видимость «упираемся ли в лимит»."""
     try:
@@ -91,4 +271,10 @@ AUDIT_DRAIN_TRIGGER = CronTrigger(hour=0, minute=0, timezone="Europe/Moscow")
 DAILY_STATS_REPORT_TRIGGER = CronTrigger(hour=0, minute=1, timezone="Europe/Moscow")
 STALE_PAYMENTS_SWEEP_TRIGGER = CronTrigger(minute=0, timezone="Europe/Moscow")
 EXPIRED_GIFTS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=0, timezone="Europe/Moscow")
+WEB_ANALYTICS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=30, timezone="Europe/Moscow")
+ABANDONED_CHECKOUT_TRIGGER = CronTrigger(minute=20, timezone="Europe/Moscow")
+KEY_TRAFFIC_SNAPSHOT_TRIGGER = CronTrigger(hour=0, minute=10, timezone="Europe/Moscow")
+KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER = CronTrigger(minute=5, timezone="Europe/Moscow")
+SUBSCRIPTION_METRICS_SNAPSHOT_TRIGGER = CronTrigger(hour=0, minute=20, timezone="Europe/Moscow")
+ANOMALY_CHECK_TRIGGER = CronTrigger(hour=9, minute=0, timezone="Europe/Moscow")
 DB_POOL_STATUS_TRIGGER = IntervalTrigger(minutes=1)

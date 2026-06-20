@@ -14,6 +14,7 @@ from logger import logger
 
 _NOTIFICATION_TIME_BATCH_SIZE = 300
 _BULK_ADD_NOTIFICATIONS_BATCH_SIZE = 1000
+_LEGACY_REF_MAP_BATCH_SIZE = 5000
 
 
 def _utc_now() -> datetime:
@@ -34,12 +35,16 @@ async def _map_legacy_refs_to_user_ids(session: AsyncSession, refs: list[int]) -
     from sqlalchemy import or_
 
     uniq = list(dict.fromkeys(refs))
-    r = await session.execute(select(User.id, User.tg_id).where(or_(User.tg_id.in_(uniq), User.id.in_(uniq))))
     m: dict[int, int] = {}
-    for uid, tgid in r.all():
-        m[int(uid)] = int(uid)
-        if tgid is not None:
-            m[int(tgid)] = int(uid)
+    for i in range(0, len(uniq), _LEGACY_REF_MAP_BATCH_SIZE):
+        chunk = uniq[i : i + _LEGACY_REF_MAP_BATCH_SIZE]
+        r = await session.execute(
+            select(User.id, User.tg_id).where(or_(User.tg_id.in_(chunk), User.id.in_(chunk)))
+        )
+        for uid, tgid in r.all():
+            m[int(uid)] = int(uid)
+            if tgid is not None:
+                m[int(tgid)] = int(uid)
     return {ref: m[ref] for ref in uniq if ref in m}
 
 
@@ -118,8 +123,12 @@ async def bulk_add_notifications(
     if not mapped:
         return
     uids = list({uid for uid, _ in mapped})
-    tg_map_r = await session.execute(select(User.id, User.tg_id).where(User.id.in_(uids)))
-    tg_by_uid = {int(r.id): r.tg_id for r in tg_map_r.all()}
+    tg_by_uid: dict[int, int | None] = {}
+    for i in range(0, len(uids), _LEGACY_REF_MAP_BATCH_SIZE):
+        chunk = uids[i : i + _LEGACY_REF_MAP_BATCH_SIZE]
+        tg_map_r = await session.execute(select(User.id, User.tg_id).where(User.id.in_(chunk)))
+        for row in tg_map_r.all():
+            tg_by_uid[int(row.id)] = row.tg_id
     now = _utc_now()
     total = 0
     for i in range(0, len(mapped), _BULK_ADD_NOTIFICATIONS_BATCH_SIZE):
@@ -301,22 +310,56 @@ _HOT_LEAD_NOTIFICATION_TYPES = (
     "hot_lead_step_2_expired",
 )
 
+_COLD_LEAD_NOTIFICATION_TYPES = (
+    "cold_lead_step_1",
+    "cold_lead_step_2",
+    "cold_lead_step_3",
+)
 
-async def get_hot_lead_notification_flags(session: AsyncSession, tg_ids: list[int]) -> dict[int, set[str]]:
+
+async def get_hot_lead_notification_flags(
+    session: AsyncSession, legacy_user_refs: list[int]
+) -> dict[int, set[str]]:
     """
-    Один запрос: для каждого tg_id возвращает множество типов уведомлений hot_lead_*,
-    которые у него уже есть. Используется в notify_hot_leads для устранения N+1.
+    Один запрос: для каждого legacy_user_ref (tg_id или user_id) возвращает множество
+    типов уведомлений hot_lead_*, которые у пользователя уже есть.
     """
-    if not tg_ids:
+    if not legacy_user_refs:
         return {}
+    id_map = await _map_legacy_refs_to_user_ids(session, legacy_user_refs)
+    if not id_map:
+        return {}
+    uids = list(set(id_map.values()))
     stmt = select(Notification.user_id, Notification.notification_type).where(
-        Notification.user_id.in_(tg_ids),
+        Notification.user_id.in_(uids),
         Notification.notification_type.in_(_HOT_LEAD_NOTIFICATION_TYPES),
     )
     result = await session.execute(stmt)
+    uid_to_ref = {id_map[ref]: ref for ref in legacy_user_refs if ref in id_map}
     out = defaultdict(set)
     for uid, ntype in result.all():
-        out[uid].add(ntype)
+        out[uid_to_ref.get(uid, uid)].add(ntype)
+    return dict(out)
+
+
+async def get_cold_lead_notification_flags(
+    session: AsyncSession, legacy_user_refs: list[int]
+) -> dict[int, set[str]]:
+    if not legacy_user_refs:
+        return {}
+    id_map = await _map_legacy_refs_to_user_ids(session, legacy_user_refs)
+    if not id_map:
+        return {}
+    uids = list(set(id_map.values()))
+    stmt = select(Notification.user_id, Notification.notification_type).where(
+        Notification.user_id.in_(uids),
+        Notification.notification_type.in_(_COLD_LEAD_NOTIFICATION_TYPES),
+    )
+    result = await session.execute(stmt)
+    uid_to_ref = {id_map[ref]: ref for ref in legacy_user_refs if ref in id_map}
+    out = defaultdict(set)
+    for uid, ntype in result.all():
+        out[uid_to_ref.get(uid, uid)].add(ntype)
     return dict(out)
 
 

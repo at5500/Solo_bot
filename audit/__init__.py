@@ -11,6 +11,7 @@ from typing import Any
 
 from aiogram.types import CallbackQuery, InlineQuery, Message, TelegramObject, User
 from fastapi import Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.audit import (
@@ -263,6 +264,14 @@ def get_telegram_context(audit_context: AuditContext | dict[str, Any] | None) ->
     return None
 
 
+def _format_actor(tg_id: int | None, identity_id: str | None) -> str:
+    if tg_id:
+        return f"tg {tg_id}"
+    if identity_id:
+        return f"id {str(identity_id)[:8]}"
+    return "anon"
+
+
 def log_api_access(
     request: Request,
     *,
@@ -273,23 +282,14 @@ def log_api_access(
 ) -> None:
     context = ensure_api_context(request)
     client_ip = request.client.host if request.client else "-"
-    logger.debug(
-        f"[AUDIT_ACCESS] {
-            _serialize({
-                'request_id': context.request_id,
-                'channel': 'api',
-                'method': request.method,
-                'path': context.path_or_handler,
-                'status_code': status_code,
-                'duration_ms': duration_ms,
-                'result': result,
-                'reason': reason,
-                'client_ip': client_ip,
-                'actor_identity_id': context.actor_identity_id,
-                'actor_tg_id': context.actor_tg_id,
-            })
-        }"
+    actor = _format_actor(context.actor_tg_id, context.actor_identity_id)
+    line = (
+        f"[API] {request.method} {context.path_or_handler} → {status_code} {result} │ "
+        f"{duration_ms}ms │ ip {client_ip} │ {actor} │ req {str(context.request_id)[:8]}"
     )
+    if reason:
+        line += f" │ {reason}"
+    logger.debug(line)
 
 
 def log_telegram_access(
@@ -305,22 +305,18 @@ def log_telegram_access(
         path_or_handler=describe_telegram_event(event),
     )
     user = _event_user(event)
-    logger.debug(
-        f"[AUDIT_ACCESS] {
-            _serialize({
-                'request_id': context.request_id,
-                'channel': 'telegram',
-                'path_or_handler': context.path_or_handler,
-                'event_type': type(event).__name__,
-                'message': _message_text(event),
-                'result': result,
-                'reason': reason,
-                'actor_identity_id': context.actor_identity_id,
-                'actor_tg_id': context.actor_tg_id or (user.id if user else None),
-                'username': getattr(user, 'username', None) if user else None,
-            })
-        }"
-    )
+    tg_id = context.actor_tg_id or (user.id if user else None)
+    username = getattr(user, "username", None) if user else None
+    actor = f"tg {tg_id}" if tg_id else "anon"
+    if username:
+        actor += f" @{username}"
+    line = f"[TG] {context.path_or_handler} → {result} │ {actor} │ req {str(context.request_id)[:8]}"
+    message_text = _message_text(event)
+    if message_text:
+        line += f" │ «{message_text}»"
+    if reason:
+        line += f" │ {reason}"
+    logger.debug(line)
 
 
 async def record_audit_event(
@@ -1092,6 +1088,20 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                         session,
                         [str(rec.get("request_id")) for rec in batch if rec.get("request_id")],
                     )
+                    identity_ids_in_batch = {
+                        str(rec.get("actor_identity_id"))
+                        for rec in batch
+                        if rec.get("actor_identity_id")
+                    }
+                    if identity_ids_in_batch:
+                        from database.models import Identity
+
+                        rows = await session.execute(
+                            select(Identity.id).where(Identity.id.in_(identity_ids_in_batch))
+                        )
+                        existing_identity_ids = {row[0] for row in rows.all()}
+                    else:
+                        existing_identity_ids = set()
                     inserted_count = 0
                     seen_batch_request_ids: set[str] = set()
                     for rec in batch:
@@ -1100,6 +1110,9 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                             continue
                         if request_id:
                             seen_batch_request_ids.add(request_id)
+                        actor_identity_id = rec.get("actor_identity_id")
+                        if actor_identity_id and actor_identity_id not in existing_identity_ids:
+                            actor_identity_id = None
                         created = rec.get("created_at")
                         if isinstance(created, str):
                             try:
@@ -1115,7 +1128,7 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                             event_type=rec.get("event_type", "telegram_access"),
                             channel=rec.get("channel", "telegram"),
                             path_or_handler=rec.get("path_or_handler") or "telegram",
-                            actor_identity_id=rec.get("actor_identity_id"),
+                            actor_identity_id=actor_identity_id,
                             actor_tg_id=rec.get("actor_tg_id"),
                             entity_type=rec.get("entity_type"),
                             entity_id=rec.get("entity_id"),

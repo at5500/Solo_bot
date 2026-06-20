@@ -75,14 +75,17 @@ def _run_process_loop_task(task_id: str, runner: LoopRunner) -> None:
 async def _run_process_loop_task_async(task_id: str, runner: LoopRunner) -> None:
     from config import API_TOKEN
     from core.bootstrap import bootstrap
+    from core.settings.modes_config import resolve_protect_content
     from database import async_session_maker
     from database.db import reset_async_db_engine
 
-    bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
     logger.info("[PeriodicManager] Process-loop задача {} запущена, PID={}", task_id, os.getpid())
     try:
         reset_async_db_engine()
         await bootstrap()
+        if bot.default is not None:
+            bot.default.protect_content = resolve_protect_content()
         await runner(bot, async_session_maker)
     except Exception as error:
         logger.error("[PeriodicManager] Ошибка process-loop задачи {}: {}", task_id, error)

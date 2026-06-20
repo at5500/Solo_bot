@@ -64,6 +64,14 @@ async def build_panel_kb(
     if row:
         builder.row(*row)
 
+    if can(PERM_KEYS):
+        builder.row(
+            InlineKeyboardButton(
+                text="📦 Массовые действия",
+                callback_data=AdminPanelCallback(action="bulk").pack(),
+            )
+        )
+
     if can(PERM_CLUSTERS):
         builder.row(
             InlineKeyboardButton(

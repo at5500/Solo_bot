@@ -11,8 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import API_TOKEN
 from core.executor import run_io, should_run_heavy_tasks_separately
-from database import save_blocked_user_ids
+from database import async_session_maker, save_blocked_user_ids
+from middlewares.session import release_session_early
 from database.models import Server
+from database.tracking_sources import get_all_tracking_sources
 from database.scheduled_broadcasts import (
     cancel_scheduled_broadcast,
     create_scheduled_broadcast,
@@ -29,12 +31,16 @@ from logger import logger
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_kb
 from .keyboard import (
     AdminSenderCallback,
+    AdminSenderChannelCallback,
     ScheduledBroadcastCallback,
     build_broadcast_preview_kb,
+    build_channel_kb,
     build_clusters_kb,
     build_scheduled_broadcast_detail_kb,
     build_scheduled_broadcasts_list_kb,
     build_sender_kb,
+    build_sources_kb,
+    channel_label,
 )
 from .scheduled_service import (
     execute_scheduled_broadcast,
@@ -44,10 +50,10 @@ from .scheduled_service import (
 )
 from .sender_service import BroadcastService, run_broadcast_in_thread
 from .sender_states import AdminSender
-from .sender_utils import get_recipients, parse_message_buttons
+from .sender_utils import get_recipients, is_telegram_chat_id, parse_message_buttons
 
 
-def _broadcast_progress_text(completed: int, total: int, sent: int, failed: int) -> str:
+def _broadcast_progress_text(completed: int, total: int, sent: int, failed: int, pending: int = 0) -> str:
     """Формирует текст статус-бара рассылки."""
     if total <= 0:
         pct = 0
@@ -56,7 +62,10 @@ def _broadcast_progress_text(completed: int, total: int, sent: int, failed: int)
         pct = min(100, int(100 * completed / total))
         bar_filled = min(10, int(10 * completed / total))
     bar = "█" * bar_filled + "░" * (10 - bar_filled)
-    return f"📤 <b>Рассылка...</b>\n\n[{bar}] <b>{pct}%</b> ({completed}/{total})\n✅ {sent}   ❌ {failed}"
+    base = f"📤 <b>Рассылка...</b>\n\n[{bar}] <b>{pct}%</b> ({completed}/{total})\n✅ {sent}   ❌ {failed}"
+    if pending > 0:
+        base += f"   🔄 {pending}"
+    return base
 
 
 def _compose_message_text() -> str:
@@ -108,6 +117,7 @@ def _scheduled_broadcast_text(item) -> str:
         f"📌 <b>Статус:</b> {_scheduled_status_label(item.status)}",
         f"🕒 <b>Время:</b> {format_moscow_datetime(item.scheduled_for) or '-'}",
         f"👥 <b>Аудитория:</b> {target}",
+        f"📢 <b>Канал:</b> {channel_label(item.channel or 'both')}",
         f"🖼 <b>Фото:</b> {'Да' if item.photo else 'Нет'}",
         f"⌨️ <b>Кнопки:</b> {'Да' if item.keyboard_json else 'Нет'}",
         "",
@@ -202,7 +212,31 @@ async def handle_cluster_select(callback_query: CallbackQuery, session: AsyncSes
 
 
 @router.callback_query(
-    AdminSenderCallback.filter(F.type != "cluster-select"),
+    AdminSenderCallback.filter(F.type == "source-select"),
+    IsAdminFilter(),
+)
+async def handle_source_select(callback_query: CallbackQuery, session: AsyncSession, state: FSMContext):
+    sources = await get_all_tracking_sources(session)
+    if not sources:
+        await callback_query.message.answer(
+            "❌ Нет UTM-источников. Создайте источник трафика, чтобы делать рассылку по метке.",
+            reply_markup=build_admin_back_kb("sender"),
+        )
+        return
+
+    data = await state.get_data()
+    text = "✍️ Выберите UTM-источник для рассылки:"
+    if data.get("edit_action") == "audience":
+        text = "✍️ Выберите новый UTM-источник для запланированной рассылки:"
+
+    await callback_query.message.answer(
+        text,
+        reply_markup=build_sources_kb(sources),
+    )
+
+
+@router.callback_query(
+    AdminSenderCallback.filter((F.type != "cluster-select") & (F.type != "source-select")),
     IsAdminFilter(),
 )
 async def handle_broadcast_type(
@@ -231,6 +265,7 @@ async def handle_broadcast_type(
                 cluster_name=callback_data.data,
                 workers=item.workers,
                 messages_per_second=item.messages_per_second,
+                channel=item.channel,
             )
         except ValueError as exc:
             await callback_query.message.edit_text(str(exc), reply_markup=build_admin_back_kb("sender"))
@@ -255,11 +290,31 @@ async def handle_broadcast_type(
         )
         return
     await callback_query.message.edit_text(
+        text="📢 Куда отправить рассылку?",
+        reply_markup=build_channel_kb(),
+    )
+    await state.update_data(type=callback_data.type, cluster_name=callback_data.data)
+    await state.set_state(AdminSender.waiting_for_channel)
+
+
+@router.callback_query(
+    AdminSenderChannelCallback.filter(),
+    AdminSender.waiting_for_channel,
+    IsAdminFilter(),
+)
+async def handle_channel_select(
+    callback_query: CallbackQuery,
+    callback_data: AdminSenderChannelCallback,
+    state: FSMContext,
+):
+    if callback_data.channel not in ("bot", "site", "both"):
+        return
+    await state.update_data(channel=callback_data.channel)
+    await state.set_state(AdminSender.waiting_for_message)
+    await callback_query.message.edit_text(
         text=_compose_message_text(),
         reply_markup=build_admin_back_kb("sender"),
     )
-    await state.update_data(type=callback_data.type, cluster_name=callback_data.data)
-    await state.set_state(AdminSender.waiting_for_message)
 
 
 @router.message(AdminSender.waiting_for_message, IsAdminFilter())
@@ -281,7 +336,8 @@ async def handle_message_input(message: Message, state: FSMContext, session: Asy
     data = await state.get_data()
     send_to = data.get("type", "all")
     cluster_name = data.get("cluster_name")
-    _, user_count = await get_recipients(session, send_to, cluster_name)
+    channel = data.get("channel", "both")
+    _, user_count = await get_recipients(session, send_to, cluster_name, telegram_only=channel == "bot")
 
     if keyboard:
         try:
@@ -307,7 +363,9 @@ async def handle_message_input(message: Message, state: FSMContext, session: Asy
         await message.answer(text=clean_text, parse_mode="HTML", reply_markup=keyboard)
 
     await message.answer(
-        f"👀 Это предпросмотр рассылки.\n👥 Количество получателей: <b>{user_count}</b>\n\nОтправить?",
+        f"👀 Это предпросмотр рассылки.\n"
+        f"👥 Количество получателей: <b>{user_count}</b>\n"
+        f"📢 Канал: <b>{channel_label(channel)}</b>\n\nОтправить?",
         reply_markup=build_broadcast_preview_kb(),
     )
 
@@ -320,6 +378,7 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
     keyboard_data = data.get("keyboard")
     send_to = data.get("type", "all")
     cluster_name = data.get("cluster_name")
+    channel = data.get("channel", "both")
 
     keyboard = None
     if keyboard_data:
@@ -337,7 +396,12 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
             await state.clear()
             return
 
-    tg_ids, total_users = await get_recipients(session, send_to, cluster_name)
+    tg_ids, total_users = await get_recipients(
+        session,
+        send_to,
+        cluster_name,
+        telegram_only=channel == "bot",
+    )
 
     if not tg_ids:
         await callback_query.message.edit_text(
@@ -348,7 +412,12 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
         return
 
     status_message = callback_query.message
-    total_users_for_bar = len(tg_ids)
+    if channel == "both":
+        total_users_for_bar = sum(1 for tid in tg_ids if is_telegram_chat_id(tid))
+    elif channel == "bot":
+        total_users_for_bar = total_users
+    else:
+        total_users_for_bar = 0
     await status_message.edit_text(
         _broadcast_progress_text(0, total_users_for_bar, 0, 0),
     )
@@ -356,11 +425,13 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
     bot = callback_query.bot
     state_keyboard_data = data.get("keyboard")
 
+    await release_session_early(session)
+
     if should_run_heavy_tasks_separately():
         main_loop = asyncio.get_running_loop()
 
-        async def _edit_progress(completed: int, total: int, sent: int, failed: int) -> None:
-            text = _broadcast_progress_text(completed, total, sent, failed)
+        async def _edit_progress(completed: int, total: int, sent: int, failed: int, pending: int) -> None:
+            text = _broadcast_progress_text(completed, total, sent, failed, pending)
             try:
                 await bot.edit_message_text(
                     chat_id=status_message.chat.id,
@@ -371,10 +442,10 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
                 if "message is not modified" not in str(e).lower():
                     logger.debug(f"[Sender] Обновление прогресса: {e}")
 
-        def progress_cb(completed: int, total: int, sent: int, failed: int) -> None:
+        def progress_cb(completed: int, total: int, sent: int, failed: int, pending: int) -> None:
             main_loop.call_soon_threadsafe(
-                lambda c=completed, t=total, s=sent, f=failed: asyncio.ensure_future(
-                    _edit_progress(c, t, s, f), loop=main_loop
+                lambda c=completed, t=total, s=sent, f=failed, p=pending: asyncio.ensure_future(
+                    _edit_progress(c, t, s, f, p), loop=main_loop
                 )
             )
 
@@ -386,20 +457,16 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
             photo,
             state_keyboard_data,
             progress_cb,
+            channel,
         )
-        if stats.get("blocked_user_ids"):
-            try:
-                await save_blocked_user_ids(session, stats["blocked_user_ids"])
-            except Exception as e:
-                logger.error(f"❌ Ошибка при сохранении заблокированных пользователей: {e}")
     else:
         messages = []
         for tg_id in tg_ids:
             message_data = {"tg_id": tg_id, "text": text_message, "photo": photo, "keyboard": keyboard}
             messages.append(message_data)
 
-        async def on_progress(completed: int, total: int, sent: int, failed: int) -> None:
-            text = _broadcast_progress_text(completed, total, sent, failed)
+        async def on_progress(completed: int, total: int, sent: int, failed: int, pending: int) -> None:
+            text = _broadcast_progress_text(completed, total, sent, failed, pending)
             try:
                 await bot.edit_message_text(
                     chat_id=status_message.chat.id,
@@ -410,14 +477,24 @@ async def handle_broadcast_confirm(callback_query: CallbackQuery, state: FSMCont
                 if "message is not modified" not in str(e).lower():
                     logger.debug(f"[Sender] Обновление прогресса: {e}")
 
-        broadcast_service = BroadcastService(bot=bot, session=session, messages_per_second=30)
+        broadcast_service = BroadcastService(bot=bot, session=None)
         stats = await broadcast_service.broadcast(
             messages,
             workers=5,
             on_progress=on_progress,
             progress_interval=2.0,
             progress_every=200,
+            channel=channel,
         )
+
+    blocked_ids = stats.get("blocked_user_ids")
+    if blocked_ids:
+        try:
+            async with async_session_maker() as db_session:
+                await save_blocked_user_ids(db_session, blocked_ids)
+                await db_session.commit()
+        except Exception as e:
+            logger.error(f"❌ Ошибка при сохранении заблокированных пользователей: {e}")
 
     await callback_query.message.answer(
         text=_broadcast_result_text(total_users, stats),
@@ -458,13 +535,14 @@ async def handle_schedule_datetime_input(message: Message, state: FSMContext, se
         session,
         created_by_tg_id=message.from_user.id if message.from_user else None,
         send_to=data.get("type", "all"),
+        channel=data.get("channel", "both"),
         cluster_name=data.get("cluster_name"),
         text=data.get("text", ""),
         photo=data.get("photo"),
         keyboard_json=data.get("keyboard"),
         scheduled_for=scheduled_for,
         workers=5,
-        messages_per_second=30,
+        messages_per_second=25,
     )
     await state.clear()
     await message.answer(
@@ -690,6 +768,7 @@ async def handle_scheduled_broadcast_send_now(
         )
         return
     await callback_query.message.edit_text("⏳ Запускаю рассылку...")
+    await release_session_early(session)
     try:
         result = await execute_scheduled_broadcast(item, bot=callback_query.bot)
     except Exception as exc:

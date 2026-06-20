@@ -24,6 +24,8 @@ NOTIFICATION_TITLES: Final[dict[str, str]] = {
     "DELETE_KEY_ENABLED": "Удалять просроченные",
     "RENEW_EXPIRED_ENABLED": "Продлевать просроченные",
     "HOT_LEADS_ENABLED": "Горячие лиды",
+    "COLD_LEADS_ENABLED": "Холодные лиды",
+    "RETURNING_ENABLED": "Возврат давно ушедших",
 }
 
 NOTIFICATION_TIME_FIELDS: Final[dict[str, str]] = {
@@ -35,7 +37,11 @@ NOTIFICATION_TIME_FIELDS: Final[dict[str, str]] = {
     "EXTRA_DAYS_AFTER_EXPIRY": "Дни к пробнику",
     "INACTIVE_TRAFFIC_ENABLED": "Трафик неакт. (ч)",
     "HOT_LEADS_INTERVAL_HOURS": "Гор.лиды (ч)",
+    "COLD_LEADS_INTERVAL_HOURS": "Хол.лиды (ч)",
+    "RETURNING_MIN_DAYS": "Давно ушли от (дн)",
+    "RETURNING_MAX_DAYS": "Давно ушли до (дн)",
     "DISCOUNT_ACTIVE_HOURS": "Скидка (ч)",
+    "RENEW_BUTTON_BEFORE_DAYS": "Кнопка продл. за (дн)",
 }
 
 PAYMENT_PROVIDER_TITLES: Final[dict[str, str]] = {
@@ -44,6 +50,13 @@ PAYMENT_PROVIDER_TITLES: Final[dict[str, str]] = {
     "ROBOKASSA": "Robokassa",
     "KASSAI_CARDS": "KassaAI карты",
     "KASSAI_SBP": "KassaAI СБП",
+    "WATA_RU": "WATA карты РФ / СБП",
+    "WATA_INT": "WATA международные",
+    "PARITYPAY_SBP": "ParityPay СБП",
+    "PLATEGA_SBP": "Platega СБП",
+    "PLATEGA_CARDS": "Platega карты РФ",
+    "PLATEGA_INT": "Platega международные",
+    "PLATEGA_CRYPTO": "Platega крипто",
     "TRIBUTE": "Tribute",
     "HELEKET": "Heleket",
     "CRYPTOBOT": "CryptoBot",
@@ -64,6 +77,9 @@ MODES_TITLES: Final[dict[str, str]] = {
     "LEGACY_LINKS_ENABLED": "Старые ссылки",
     "DIRECT_START_DISABLED": "Тихий режим",
     "TRIAL_TIME_DISABLED": "Отключить триал",
+    "SUPPORT_TRIAGE_ENABLED": "Опросник поддержки",
+    "PROTECT_CONTENT_ENABLED": "Защита контента",
+    "TARIFF_OPTIONS_PAGINATION": "Слайдер опций",
 }
 
 MONEY_FIELDS: Final[dict[str, str]] = {

@@ -55,35 +55,98 @@ async def user_key_renew(
     key_email = str(getattr(db_key, "email", "") or "")
     key_server_id = str(getattr(db_key, "server_id", "") or "")
 
+    forbidden_renewal_groups = {"trial", "gifts", "discounts", "discounts_max"}
+    server_tariff_group_row = await session.execute(
+        select(Server.tariff_group)
+        .where((Server.server_name == key_server_id) | (Server.cluster_name == key_server_id))
+        .limit(1)
+    )
+    server_tariff_group = (server_tariff_group_row.scalar() or "").strip()
+
+    if body.tariff_id:
+        chosen_tariff = await get_tariff_by_id(session, int(body.tariff_id))
+        if not chosen_tariff or not chosen_tariff.get("is_active", True):
+            raise HTTPException(status_code=404, detail="Тариф не найден")
+        chosen_group_code = (chosen_tariff.get("group_code") or "").strip()
+        if (
+            not chosen_group_code
+            or chosen_group_code in forbidden_renewal_groups
+            or (server_tariff_group and chosen_group_code != server_tariff_group)
+        ):
+            raise HTTPException(status_code=400, detail="Тариф недоступен для этой подписки")
+        effective_tariff_id = int(body.tariff_id)
+    else:
+        key_tariff = await get_tariff_by_id(session, int(tariff_id))
+        key_tariff_group = (key_tariff.get("group_code") or "").strip() if key_tariff else ""
+        if not key_tariff_group or key_tariff_group in forbidden_renewal_groups:
+            return AccountKeyRenewResponse(
+                ok=True,
+                message="Для продления выберите тариф",
+                client_id=str(client_id),
+                tariff_id=0,
+                requires_tariff_selection=True,
+                available_tariff_group=server_tariff_group or None,
+                payment_required=False,
+            )
+        effective_tariff_id = int(tariff_id)
+
     try:
         pricing = await calculate_renewal_pricing(
             session=session,
             billing_user_id=int(billing_user_id),
             key_email=key_email,
-            tariff_id=int(tariff_id),
+            tariff_id=effective_tariff_id,
             coupon_code=body.coupon_code,
+            selected_device_limit=body.selected_device_limit,
+            selected_traffic_limit=body.selected_traffic_limit,
         )
     except ServiceError as e:
         raise HTTPException(status_code=400, detail=e.message)
+
+    from services.keys import compute_renewal_quote
+
+    quote = await compute_renewal_quote(
+        session,
+        billing_user_id=int(billing_user_id),
+        key_email=key_email,
+        current_tariff_id=getattr(db_key, "tariff_id", None),
+        current_selected_device=getattr(db_key, "selected_device_limit", None),
+        current_selected_traffic=getattr(db_key, "selected_traffic_limit", None),
+        current_expiry_ms=_normalize_expiry_ms(getattr(db_key, "expiry_time", None)),
+        now_ms=int(datetime.utcnow().timestamp() * 1000),
+        new_tariff_id=effective_tariff_id,
+        new_selected_device=body.selected_device_limit,
+        new_selected_traffic=body.selected_traffic_limit,
+        coupon_code=body.coupon_code,
+    )
+    net_cost = quote.net_cost_rub
+    required_amount = max(0, int(round(net_cost - pricing.balance)))
+    payment_required = required_amount > 0
 
     if preview:
         return AccountKeyRenewResponse(
             ok=True,
             message="Расчет обновлен",
             client_id=str(client_id),
-            tariff_id=int(tariff_id),
+            tariff_id=effective_tariff_id,
             charged_rub=0,
             balance_rub=pricing.balance,
             base_price_rub=pricing.base_price_rub,
             discount_rub=pricing.discount_rub,
-            final_price_rub=pricing.final_price_rub,
+            final_price_rub=net_cost,
             applied_coupon_code=pricing.applied_coupon_code,
-            payment_required=pricing.payment_required,
-            required_amount_rub=pricing.required_amount,
+            payment_required=payment_required,
+            required_amount_rub=required_amount,
             payment_id=None,
             payment_url=None,
+            is_switch=quote.is_switch,
+            credit_to_balance_rub=quote.credit_rub,
+            refund_to_balance_rub=quote.refund_to_balance_rub,
+            new_device_limit=quote.selected_device_limit,
+            new_traffic_gb=quote.total_gb,
         )
-    if pricing.payment_required:
+
+    if payment_required:
         provider_id = str(body.provider_id or _resolve_default_web_payment_provider() or "").strip().upper()
         if not provider_id:
             raise HTTPException(status_code=503, detail="Нет доступных провайдеров оплаты")
@@ -92,26 +155,26 @@ async def user_key_renew(
         failure_url = validate_redirect_url(str(body.failure_url or ""), f"{base_url}/payment-failure")
         payment_request = PaymentLinkRequest(
             legacy_user_ref=int(billing_user_id),
-            amount=pricing.required_amount,
+            amount=required_amount,
             currency="RUB",
             provider_id=provider_id,
             success_url=success_url,
             failure_url=failure_url,
             metadata={
                 "payment_flow": "key_renewal",
-                "tariff_id": int(tariff_id),
+                "tariff_id": effective_tariff_id,
                 "client_id": str(client_id),
                 "email": key_email,
-                "cost": pricing.final_price_rub,
-                "selected_duration_days": pricing.duration_days,
-                "selected_device_limit": pricing.selected_device_limit,
-                "selected_traffic_limit": pricing.selected_traffic_limit,
-                "selected_price_rub": pricing.final_price_rub,
-                "total_gb": pricing.total_gb,
+                "cost": net_cost,
+                "selected_duration_days": quote.duration_days,
+                "selected_device_limit": quote.selected_device_limit,
+                "selected_traffic_limit": quote.selected_traffic_limit,
+                "selected_price_rub": quote.new_full_price_rub,
+                "total_gb": quote.total_gb,
                 "base_price_rub": pricing.base_price_rub,
                 "discount_rub": pricing.discount_rub,
-                "applied_coupon_code": pricing.applied_coupon_code,
-                "coupon_id": pricing.coupon_id,
+                "applied_coupon_code": quote.applied_coupon_code,
+                "coupon_id": quote.coupon_id,
             },
         )
         payment_result = await create_payment_link(session, payment_request)
@@ -122,42 +185,44 @@ async def user_key_renew(
             int(billing_user_id),
             "waiting_for_renewal_payment",
             {
-                "tariff_id": int(tariff_id),
+                "tariff_id": effective_tariff_id,
                 "client_id": str(client_id),
                 "email": key_email,
-                "cost": pricing.final_price_rub,
-                "required_amount": pricing.required_amount,
-                "selected_duration_days": pricing.duration_days,
-                "selected_device_limit": pricing.selected_device_limit,
-                "selected_traffic_limit": pricing.selected_traffic_limit,
-                "selected_price_rub": pricing.final_price_rub,
-                "total_gb": pricing.total_gb,
+                "cost": net_cost,
+                "required_amount": required_amount,
+                "new_expiry_time": int(quote.new_expiry_ms),
+                "selected_duration_days": quote.duration_days,
+                "selected_device_limit": quote.selected_device_limit,
+                "selected_traffic_limit": quote.selected_traffic_limit,
+                "selected_price_rub": quote.new_full_price_rub,
+                "total_gb": quote.total_gb,
                 "base_price_rub": pricing.base_price_rub,
                 "discount_rub": pricing.discount_rub,
-                "applied_coupon_code": pricing.applied_coupon_code,
-                "coupon_id": pricing.coupon_id,
+                "applied_coupon_code": quote.applied_coupon_code,
+                "coupon_id": quote.coupon_id,
             },
         )
         return AccountKeyRenewResponse(
             ok=True,
             message="Требуется оплата для продления подписки",
             client_id=str(client_id),
-            tariff_id=int(tariff_id),
+            tariff_id=effective_tariff_id,
             charged_rub=0,
             balance_rub=pricing.balance,
             base_price_rub=pricing.base_price_rub,
             discount_rub=pricing.discount_rub,
-            final_price_rub=pricing.final_price_rub,
+            final_price_rub=net_cost,
             applied_coupon_code=pricing.applied_coupon_code,
             payment_required=True,
-            required_amount_rub=pricing.required_amount,
+            required_amount_rub=required_amount,
             payment_id=payment_result.payment_id,
             payment_url=payment_result.payment_url,
+            is_switch=quote.is_switch,
+            credit_to_balance_rub=quote.credit_rub,
+            refund_to_balance_rub=quote.refund_to_balance_rub,
+            new_device_limit=quote.selected_device_limit,
+            new_traffic_gb=quote.total_gb,
         )
-    expiry_raw = _normalize_expiry_ms(getattr(db_key, "expiry_time", None))
-    now_ms = int(datetime.utcnow().timestamp() * 1000)
-    base_expiry = now_ms if expiry_raw <= now_ms else expiry_raw
-    new_expiry_time = int(base_expiry + pricing.duration_days * 24 * 60 * 60 * 1000)
     if not key_email or not key_server_id:
         raise HTTPException(status_code=400, detail="Некорректные данные подписки")
     try:
@@ -167,14 +232,14 @@ async def user_key_renew(
             client_id=str(client_id),
             key_email=key_email,
             key_server_id=key_server_id,
-            tariff_id=int(tariff_id),
-            new_expiry_time=new_expiry_time,
-            total_gb=pricing.total_gb,
-            cost=float(pricing.final_price_rub),
-            selected_device_limit=pricing.selected_device_limit,
-            selected_traffic_limit=pricing.selected_traffic_limit,
-            selected_price_rub=pricing.final_price_rub,
-            coupon_id=pricing.coupon_id,
+            tariff_id=effective_tariff_id,
+            new_expiry_time=int(quote.new_expiry_ms),
+            total_gb=quote.total_gb,
+            cost=float(net_cost),
+            selected_device_limit=quote.selected_device_limit,
+            selected_traffic_limit=quote.selected_traffic_limit,
+            selected_price_rub=quote.new_full_price_rub,
+            coupon_id=quote.coupon_id,
         )
     except ServiceError as e:
         raise HTTPException(status_code=400, detail=e.message)
@@ -187,6 +252,11 @@ async def user_key_renew(
         balance_rub=result.balance_rub,
         base_price_rub=pricing.base_price_rub,
         discount_rub=pricing.discount_rub,
-        final_price_rub=pricing.final_price_rub,
+        final_price_rub=net_cost,
         applied_coupon_code=pricing.applied_coupon_code,
+        is_switch=quote.is_switch,
+        credit_to_balance_rub=quote.credit_rub,
+        refund_to_balance_rub=quote.refund_to_balance_rub,
+        new_device_limit=quote.selected_device_limit,
+        new_traffic_gb=quote.total_gb,
     )

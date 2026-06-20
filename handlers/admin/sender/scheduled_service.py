@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup
 
 from config import API_TOKEN
+from core.settings.modes_config import resolve_protect_content
 from database import async_session_maker, save_blocked_user_ids
 from database.models import ScheduledBroadcast
 from database.scheduled_broadcasts import (
@@ -35,7 +36,7 @@ def clamp_broadcast_workers(value: int | None) -> int:
 
 
 def clamp_broadcast_rate(value: int | None) -> int:
-    return max(1, min(int(value or 30), 60))
+    return max(1, min(int(value or 25), 60))
 
 
 def ensure_utc_datetime(value: datetime) -> datetime:
@@ -72,13 +73,18 @@ def prepare_broadcast_payload(
     cluster_name: str | None = None,
     workers: int | None = None,
     messages_per_second: int | None = None,
+    channel: str = "both",
 ) -> dict:
     text_raw = (text or "").strip()
     if not text_raw:
         raise ValueError("Broadcast text is required")
+    if channel not in ("bot", "site", "both"):
+        raise ValueError("channel must be one of: bot, site, both")
     normalized_cluster_name = (cluster_name or "").strip() or None
     if send_to == "cluster" and not normalized_cluster_name:
         raise ValueError("Cluster name is required for cluster broadcast")
+    if send_to == "source" and not normalized_cluster_name:
+        raise ValueError("UTM source is required for source broadcast")
     clean_text, keyboard = parse_message_buttons(text_raw)
     max_len = 1024 if photo else 4096
     if len(clean_text) > max_len:
@@ -86,6 +92,7 @@ def prepare_broadcast_payload(
     keyboard_json = keyboard.model_dump() if keyboard else None
     return {
         "send_to": send_to,
+        "channel": channel,
         "text": clean_text,
         "photo": photo,
         "cluster_name": normalized_cluster_name,
@@ -101,6 +108,7 @@ def scheduled_broadcast_to_dict(broadcast: ScheduledBroadcast) -> dict:
         "created_by_tg_id": broadcast.created_by_tg_id,
         "status": broadcast.status,
         "send_to": broadcast.send_to,
+        "channel": broadcast.channel,
         "cluster_name": broadcast.cluster_name,
         "text": broadcast.text,
         "photo": broadcast.photo,
@@ -125,10 +133,16 @@ def scheduled_broadcast_to_dict(broadcast: ScheduledBroadcast) -> dict:
 async def execute_broadcast_payload(payload: dict, bot: Bot | None = None) -> dict:
     own_bot = bot is None
     if own_bot:
-        bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
     try:
         async with async_session_maker() as session:
-            tg_ids, total_users = await get_recipients(session, payload["send_to"], payload.get("cluster_name"))
+            channel = payload.get("channel", "both")
+            tg_ids, total_users = await get_recipients(
+                session,
+                payload["send_to"],
+                payload.get("cluster_name"),
+                telegram_only=channel == "bot",
+            )
             await session.commit()
         if not tg_ids:
             return {
@@ -154,7 +168,11 @@ async def execute_broadcast_payload(payload: dict, bot: Bot | None = None) -> di
             session=None,
             messages_per_second=clamp_broadcast_rate(payload.get("messages_per_second")),
         )
-        stats = await broadcast_service.broadcast(messages, workers=clamp_broadcast_workers(payload.get("workers")))
+        stats = await broadcast_service.broadcast(
+            messages,
+            workers=clamp_broadcast_workers(payload.get("workers")),
+            channel=payload.get("channel", "both"),
+        )
         blocked_ids = stats.get("blocked_user_ids") or []
         if blocked_ids:
             async with async_session_maker() as session:
@@ -177,6 +195,7 @@ async def execute_broadcast_payload(payload: dict, bot: Bot | None = None) -> di
 async def execute_scheduled_broadcast(broadcast: ScheduledBroadcast, bot: Bot | None = None) -> dict:
     payload = {
         "send_to": broadcast.send_to,
+        "channel": broadcast.channel,
         "text": broadcast.text,
         "photo": broadcast.photo,
         "cluster_name": broadcast.cluster_name,

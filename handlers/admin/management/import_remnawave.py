@@ -91,7 +91,7 @@ async def show_remnawave_clients(callback: CallbackQuery, session: AsyncSession)
 
     server_id = server.cluster_name or server.server_name
 
-    added_keys = await import_remnawave_keys(session, users, server_id=server_id)
+    added_keys, updated_keys = await import_remnawave_keys(session, users, server_id=server_id)
 
     preview = ""
     for i, user in enumerate(users[:3], 1):
@@ -102,7 +102,8 @@ async def show_remnawave_clients(callback: CallbackQuery, session: AsyncSession)
     await callback.message.edit_text(
         f"📄 Найдено клиентов: <b>{len(users)}</b>\n"
         f"👤 Импортировано пользователей: <b>{added_users}</b>\n"
-        f"🔐 Импортировано ключей: <b>{added_keys}</b>\n\n"
+        f"🔐 Импортировано новых ключей: <b>{added_keys}</b>\n"
+        f"🔄 Актуализировано существующих: <b>{updated_keys}</b>\n\n"
         f"<b>Первые 3:</b>\n{preview}",
         reply_markup=build_back_to_db_menu(),
     )
@@ -144,8 +145,42 @@ async def import_remnawave_users(session: AsyncSession, users: list[dict]) -> in
     return added
 
 
-async def import_remnawave_keys(session: AsyncSession, users: list[dict], server_id: str) -> int:
+def actualize_remnawave_key(key: Key, user: dict) -> list[str]:
+    changes: list[str] = []
+
+    expire_at = user.get("expireAt")
+    if expire_at:
+        try:
+            expire_ts = int(parser.isoparse(expire_at).timestamp() * 1000)
+            if key.expiry_time != expire_ts:
+                key.expiry_time = expire_ts
+                changes.append("срок")
+        except (ValueError, TypeError):
+            pass
+
+    remnawave_link = user.get("subscriptionUrl")
+    if remnawave_link and key.remnawave_link != remnawave_link:
+        key.remnawave_link = remnawave_link
+        changes.append("ссылка")
+
+    device_limit = user.get("hwidDeviceLimit")
+    if isinstance(device_limit, int) and key.current_device_limit != device_limit:
+        key.current_device_limit = device_limit
+        changes.append("устройства")
+
+    traffic_bytes = user.get("trafficLimitBytes")
+    if isinstance(traffic_bytes, (int, float)):
+        traffic_gb = int(traffic_bytes) // (1024**3)
+        if key.current_traffic_limit != traffic_gb:
+            key.current_traffic_limit = traffic_gb
+            changes.append("трафик")
+
+    return changes
+
+
+async def import_remnawave_keys(session: AsyncSession, users: list[dict], server_id: str) -> tuple[int, int]:
     added = 0
+    updated = 0
 
     for user in users:
         tg_id = extract_tg_id_from_user_payload(user)
@@ -160,9 +195,15 @@ async def import_remnawave_keys(session: AsyncSession, users: list[dict], server
             logger.warning(f"[SKIP] Пропущен клиент: tg_id={tg_id}, client_id={client_id}")
             continue
 
-        exists_stmt = await session.execute(select(Key).where(Key.client_id == client_id))
-        if exists_stmt.scalar():
-            logger.info(f"[SKIP] Ключ уже существует: {client_id}")
+        existing = (
+            await session.execute(select(Key).where(Key.client_id == client_id))
+        ).scalar_one_or_none()
+
+        if existing is not None:
+            changes = actualize_remnawave_key(existing, user)
+            if changes:
+                updated += 1
+                logger.info(f"[SYNC] Ключ обновлён: {client_id} ({', '.join(changes)})")
             continue
 
         try:
@@ -192,5 +233,5 @@ async def import_remnawave_keys(session: AsyncSession, users: list[dict], server
         except Exception as e:
             logger.error(f"[ERROR] Ошибка при добавлении ключа {client_id}: {e}")
 
-    logger.info(f"[IMPORT] Всего добавлено ключей: {added}")
-    return added
+    logger.info(f"[IMPORT] Новых ключей: {added}, актуализировано: {updated}")
+    return added, updated

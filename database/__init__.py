@@ -6,6 +6,7 @@ from .coupons import *
 from .db import Base, async_session_maker, engine, reset_async_db_engine
 from .gifts import *
 from .hot_leads import *
+from .cold_leads import *
 from .keys import *
 from .notifications import *
 from .payments import *

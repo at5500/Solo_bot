@@ -10,13 +10,67 @@ from database.models.users import BlockedUser, ManualBan
 from handlers.notifications.context import NotificationContext
 from handlers.notifications.keyboards import build_notification_expired_kb, build_notification_kb
 from handlers.notifications.renewal import RenewalStatus, try_auto_renew
-from handlers.notifications.sender import send_notification
+from handlers.notifications.sender import send_messages_with_limit
 from handlers.texts import KEY_DELETED_MSG, KEY_EXPIRED_DELAY_MSG, KEY_EXPIRED_NO_DELAY_MSG
 from handlers.utils import format_hours, format_minutes
 from logger import logger
 from services.operations import delete_key_from_cluster
 
 from .expiring import _send_renewed
+
+
+_EXPIRED_PHOTO = "notify_expired.jpg"
+
+
+def _format_remaining_time(total_minutes: int) -> str:
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if hours > 0 and minutes > 0:
+        return f"{format_hours(hours)} и {format_minutes(minutes)}"
+    if hours > 0:
+        return format_hours(hours)
+    return format_minutes(minutes)
+
+
+def _build_grace_message(key, remaining_minutes: int) -> dict:
+    email = key.email or ""
+    text = KEY_EXPIRED_DELAY_MSG.format(
+        email=email,
+        time_formatted=_format_remaining_time(remaining_minutes),
+    )
+    return {
+        "tg_id": key.tg_id,
+        "text": text,
+        "photo": _EXPIRED_PHOTO,
+        "keyboard": build_notification_kb(email, getattr(key, "client_id", None)),
+    }
+
+
+def _build_expired_message(key, delete_delay_minutes: int) -> dict:
+    email = key.email or ""
+    if delete_delay_minutes > 0:
+        text = KEY_EXPIRED_DELAY_MSG.format(
+            email=email,
+            time_formatted=_format_remaining_time(delete_delay_minutes),
+        )
+    else:
+        text = KEY_EXPIRED_NO_DELAY_MSG.format(email=email)
+    return {
+        "tg_id": key.tg_id,
+        "text": text,
+        "photo": _EXPIRED_PHOTO,
+        "keyboard": build_notification_kb(email, getattr(key, "client_id", None)),
+    }
+
+
+def _build_deleted_message(key) -> dict:
+    email = key.email or ""
+    return {
+        "tg_id": key.tg_id,
+        "text": KEY_DELETED_MSG.format(email=email),
+        "photo": _EXPIRED_PHOTO,
+        "keyboard": build_notification_expired_kb(),
+    }
 
 
 async def process_expired_keys(
@@ -52,6 +106,9 @@ async def process_expired_keys(
     notification_pairs = [(k.tg_id, f"{k.email or ''}_key_expired") for k in expired_keys]
     last_times = await get_last_notification_times_bulk(ctx.session, notification_pairs)
 
+    messages: list[dict] = []
+    pending_notifications: list[tuple[int, str]] = []
+
     for key in expired_keys:
         tg_id = key.tg_id
         email = key.email or ""
@@ -85,8 +142,8 @@ async def process_expired_keys(
             if last_notification_time is None and (tg_id, email) in users_set:
                 remaining_ms = delay_ms - expired_ms
                 remaining_minutes = max(1, int(remaining_ms / (60 * 1000)))
-                await _send_expired_grace(ctx, key, remaining_minutes)
-                await add_notification(ctx.session, tg_id, notification_id)
+                messages.append(_build_grace_message(key, remaining_minutes))
+                pending_notifications.append((tg_id, notification_id))
             continue
 
         if is_delete and notify_delete_key:
@@ -102,14 +159,20 @@ async def process_expired_keys(
                     await delete_key_from_cluster(server_id, email, client_id, ctx.session)
                     await delete_key(ctx.session, client_id)
                     logger.info(f"Ключ {client_id} для {tg_id} удалён")
-                    await _send_deleted(ctx, key)
+                    messages.append(_build_deleted_message(key))
                 except Exception as e:
                     logger.error(f"Ошибка удаления ключа {client_id}: {e}")
                 continue
 
         if last_notification_time is None and (tg_id, email) in users_set:
-            await _send_expired(ctx, key, delete_delay_minutes)
-            await add_notification(ctx.session, tg_id, notification_id)
+            messages.append(_build_expired_message(key, delete_delay_minutes))
+            pending_notifications.append((tg_id, notification_id))
+
+    if messages:
+        await send_messages_with_limit(ctx.bot, messages)
+
+    for tg_id, notification_id in pending_notifications:
+        await add_notification(ctx.session, tg_id, notification_id)
 
     logger.info("[Expired] Обработка завершена")
 
@@ -132,45 +195,3 @@ async def _get_blocked_expired_keys(session, current_time: int) -> list:
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
-
-
-async def _send_expired_grace(ctx: NotificationContext, key, remaining_minutes: int) -> bool:
-    email = key.email or ""
-    hours = remaining_minutes // 60
-    minutes = remaining_minutes % 60
-    if hours > 0 and minutes > 0:
-        time_formatted = f"{format_hours(hours)} и {format_minutes(minutes)}"
-    elif hours > 0:
-        time_formatted = format_hours(hours)
-    else:
-        time_formatted = format_minutes(minutes)
-
-    text = KEY_EXPIRED_DELAY_MSG.format(email=email, time_formatted=time_formatted)
-    keyboard = build_notification_kb(email, getattr(key, "client_id", None))
-    return await send_notification(ctx.bot, key.tg_id, "notify_expired.jpg", text, keyboard)
-
-
-async def _send_expired(ctx: NotificationContext, key, delay_minutes: int) -> bool:
-    email = key.email or ""
-    if delay_minutes > 0:
-        hours = delay_minutes // 60
-        minutes = delay_minutes % 60
-        if hours > 0 and minutes > 0:
-            time_formatted = f"{format_hours(hours)} и {format_minutes(minutes)}"
-        elif hours > 0:
-            time_formatted = format_hours(hours)
-        else:
-            time_formatted = format_minutes(minutes)
-        text = KEY_EXPIRED_DELAY_MSG.format(email=email, time_formatted=time_formatted)
-    else:
-        text = KEY_EXPIRED_NO_DELAY_MSG.format(email=email)
-
-    keyboard = build_notification_kb(email, getattr(key, "client_id", None))
-    return await send_notification(ctx.bot, key.tg_id, "notify_expired.jpg", text, keyboard)
-
-
-async def _send_deleted(ctx: NotificationContext, key) -> bool:
-    email = key.email or ""
-    text = KEY_DELETED_MSG.format(email=email)
-    keyboard = build_notification_expired_kb()
-    return await send_notification(ctx.bot, key.tg_id, "notify_expired.jpg", text, keyboard)

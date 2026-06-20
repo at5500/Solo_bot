@@ -12,8 +12,15 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.settings.modes_config import resolve_protect_content
 from database import async_session_maker, save_blocked_user_ids
+from handlers.admin.sender.sender_utils import is_telegram_chat_id
 from logger import logger
+
+
+DEFAULT_MESSAGES_PER_SECOND = 25
+MAX_RETRY_ATTEMPTS = 5
+MAX_RETRY_AFTER_SECONDS = 120.0
 
 
 def run_broadcast_in_thread(
@@ -22,23 +29,26 @@ def run_broadcast_in_thread(
     text_message: str,
     photo: str | None,
     keyboard_data: dict | None,
-    progress_cb: Callable[[int, int, int, int], None] | None = None,
+    progress_cb: Callable[[int, int, int, int, int], None] | None = None,
+    channel: str = "both",
 ) -> dict:
     """
     Синхронная обёртка: запускает рассылку в отдельном event loop в текущем потоке.
+    progress_cb принимает (completed, total, sent, failed, pending_retries).
+    channel: 'bot' / 'site' / 'both'.
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     bot = None
     try:
-        bot = Bot(token=api_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        bot = Bot(token=api_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
         keyboard = InlineKeyboardMarkup.model_validate(keyboard_data) if keyboard_data else None
         messages = [{"tg_id": tg_id, "text": text_message, "photo": photo, "keyboard": keyboard} for tg_id in tg_ids]
-        service = BroadcastService(bot=bot, session=None, messages_per_second=30)
+        service = BroadcastService(bot=bot, session=None, messages_per_second=DEFAULT_MESSAGES_PER_SECOND)
 
-        async def on_progress(completed: int, total: int, sent: int, failed: int) -> None:
+        async def on_progress(completed: int, total: int, sent: int, failed: int, pending: int) -> None:
             if progress_cb:
-                progress_cb(completed, total, sent, failed)
+                progress_cb(completed, total, sent, failed, pending)
 
         return loop.run_until_complete(
             service.broadcast(
@@ -46,6 +56,7 @@ def run_broadcast_in_thread(
                 workers=5,
                 on_progress=on_progress,
                 progress_interval=2.0,
+                channel=channel,
             )
         )
     finally:
@@ -58,17 +69,19 @@ def run_broadcast_in_thread(
 
 
 class BroadcastMessage:
+    __slots__ = ("tg_id", "text", "photo", "keyboard", "attempts", "retry_at")
+
     def __init__(self, tg_id: int, text: str, photo: str | None = None, keyboard: Any = None) -> None:
         self.tg_id = tg_id
         self.text = text
         self.photo = photo
         self.keyboard = keyboard
-        self.retry_after = None
         self.attempts = 0
+        self.retry_at = 0.0
 
 
 class RateLimiter:
-    def __init__(self, max_rate: int = 30, window: float = 1.0) -> None:
+    def __init__(self, max_rate: int = DEFAULT_MESSAGES_PER_SECOND, window: float = 1.0) -> None:
         self.max_rate = max_rate
         self.window = window
         self.send_times = deque()
@@ -102,105 +115,127 @@ class BroadcastService:
         self,
         bot: Bot,
         session: AsyncSession | None = None,
-        messages_per_second: int = 30,
+        messages_per_second: int = DEFAULT_MESSAGES_PER_SECOND,
+        max_attempts: int = MAX_RETRY_ATTEMPTS,
     ) -> None:
         self.bot = bot
         self._session = session
         self.rate_limiter = RateLimiter(max_rate=messages_per_second)
-        self.blocked_users = set()
-        self.queue = asyncio.Queue()
-        self.delayed_queue = asyncio.Queue()
-        self.results = []
+        self.max_attempts = max_attempts
+        self.blocked_users: set[int] = set()
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.results: list[bool] = []
         self.total_sent = 0
-        self.start_time = None
+        self.pending_retries = 0
+        self.start_time: float | None = None
         self.is_running = False
 
-    async def _send_single_message(self, msg: BroadcastMessage) -> bool:
+    async def _send_single_message(self, msg: BroadcastMessage) -> str:
         try:
             await self.rate_limiter.acquire()
 
             if msg.photo:
                 await self.bot.send_photo(
-                    chat_id=msg.tg_id, photo=msg.photo, caption=msg.text, parse_mode="HTML", reply_markup=msg.keyboard
+                    chat_id=msg.tg_id,
+                    photo=msg.photo,
+                    caption=msg.text,
+                    parse_mode="HTML",
+                    reply_markup=msg.keyboard,
                 )
             else:
                 await self.bot.send_message(
-                    chat_id=msg.tg_id, text=msg.text, parse_mode="HTML", reply_markup=msg.keyboard
+                    chat_id=msg.tg_id,
+                    text=msg.text,
+                    parse_mode="HTML",
+                    reply_markup=msg.keyboard,
                 )
 
-            return True
+            return "ok"
 
         except TelegramRetryAfter as e:
-            msg.retry_after = e.retry_after
+            wait_seconds = min(float(e.retry_after), MAX_RETRY_AFTER_SECONDS)
             msg.attempts += 1
+            msg.retry_at = time.time() + wait_seconds
             logger.warning(
-                f"⚠️ Flood control для {msg.tg_id}: повтор через {e.retry_after} сек. (попытка {msg.attempts})"
+                f"⚠️ Flood control для {msg.tg_id}: повтор через {wait_seconds:.0f} сек "
+                f"(попытка {msg.attempts}/{self.max_attempts})"
             )
-            await self.delayed_queue.put(msg)
-            return False
+            return "retry"
 
         except TelegramForbiddenError:
             logger.warning(f"🚫 Бот заблокирован пользователем {msg.tg_id}")
-            self.blocked_users.add(msg.tg_id)
-            return False
+            if is_telegram_chat_id(msg.tg_id):
+                self.blocked_users.add(msg.tg_id)
+            return "fail"
 
         except TelegramBadRequest as e:
             error_msg = str(e).lower()
             if "chat not found" in error_msg:
                 logger.warning(f"🚫 Чат не найден для пользователя {msg.tg_id}")
-                self.blocked_users.add(msg.tg_id)
+                if is_telegram_chat_id(msg.tg_id):
+                    self.blocked_users.add(msg.tg_id)
             else:
                 logger.warning(f"📩 Не удалось отправить сообщение пользователю {msg.tg_id}: {e}")
-            return False
+            return "fail"
 
         except Exception as e:
             logger.error(f"❌ Ошибка отправки сообщения пользователю {msg.tg_id}: {e}")
-            return False
+            return "fail"
 
-    async def _process_delayed_messages(self):
-        while self.is_running:
+    async def _schedule_retry(self, msg: BroadcastMessage) -> None:
+        try:
+            wait = msg.retry_at - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self.queue.put(msg)
+        except asyncio.CancelledError:
+            self.results.append(False)
+            raise
+        except Exception as e:
+            logger.error(f"❌ Ошибка retry-планировщика для {msg.tg_id}: {e}")
+            self.results.append(False)
+        finally:
+            self.pending_retries -= 1
+
+    async def _worker(self) -> None:
+        while True:
             try:
-                if not self.delayed_queue.empty():
-                    msg = await asyncio.wait_for(self.delayed_queue.get(), timeout=0.1)
-
-                    if msg.retry_after:
-                        await asyncio.sleep(msg.retry_after)
-                        msg.retry_after = None
-
-                    if msg.attempts < 3:
-                        await self.queue.put(msg)
-                    else:
-                        logger.error(f"❌ Достигнут лимит попыток для {msg.tg_id}")
-                        self.results.append(False)
-                else:
-                    await asyncio.sleep(0.1)
-
-            except TimeoutError:
+                msg = await asyncio.wait_for(self.queue.get(), timeout=0.5)
+            except (TimeoutError, asyncio.TimeoutError):
+                if not self.is_running:
+                    return
                 continue
-            except Exception as e:
-                logger.error(f"❌ Ошибка в обработчике отложенных сообщений: {e}")
-                await asyncio.sleep(0.1)
 
-    async def _worker(self):
-        while self.is_running:
             try:
-                msg = await asyncio.wait_for(self.queue.get(), timeout=0.1)
+                result = await self._send_single_message(msg)
 
-                success = await self._send_single_message(msg)
-
-                if success:
+                if result == "ok":
                     self.total_sent += 1
                     self.results.append(True)
-                elif msg.attempts == 0:
+                elif result == "retry":
+                    if msg.attempts < self.max_attempts:
+                        try:
+                            asyncio.create_task(self._schedule_retry(msg))
+                            self.pending_retries += 1
+                        except Exception as e:
+                            logger.error(
+                                f"❌ Не удалось запланировать повтор для {msg.tg_id}: {e}"
+                            )
+                            self.results.append(False)
+                    else:
+                        logger.error(
+                            f"❌ Достигнут лимит попыток для {msg.tg_id} "
+                            f"(после {msg.attempts} попыток)"
+                        )
+                        self.results.append(False)
+                else:
                     self.results.append(False)
 
-                self.queue.task_done()
-
-            except TimeoutError:
-                continue
             except Exception as e:
                 logger.error(f"❌ Ошибка в воркере рассылки: {e}")
-                await asyncio.sleep(0.1)
+                self.results.append(False)
+            finally:
+                self.queue.task_done()
 
     async def _save_blocked_users(self) -> None:
         if not self.blocked_users:
@@ -220,24 +255,30 @@ class BroadcastService:
     async def _progress_loop(
         self,
         total: int,
-        on_progress: Callable[[int, int, int, int], Awaitable[None]],
+        on_progress: Callable[[int, int, int, int, int], Awaitable[None]],
         interval: float,
         progress_every: int,
     ) -> None:
-        """Периодически вызывает on_progress(completed, total, sent, failed)."""
+        """Периодически вызывает on_progress(completed, total, sent, failed, pending_retries)."""
         last_reported = 0
+        last_emit_ts = time.time()
+        force_interval = 30.0
         while self.is_running:
             await asyncio.sleep(interval)
             if not self.is_running:
                 break
             completed = len(self.results)
-            if completed - last_reported < progress_every:
+            now = time.time()
+            new_results = completed - last_reported
+            if new_results < progress_every and (now - last_emit_ts) < force_interval:
                 continue
             sent = self.total_sent
             failed = completed - sent
+            pending = self.pending_retries
             try:
-                await on_progress(completed, total, sent, failed)
+                await on_progress(completed, total, sent, failed, pending)
                 last_reported = completed
+                last_emit_ts = now
             except Exception as e:
                 logger.debug(f"[Broadcast] Ошибка обновления прогресса: {e}")
 
@@ -245,43 +286,56 @@ class BroadcastService:
         self,
         messages: list[dict],
         workers: int = 20,
-        on_progress: Callable[[int, int, int, int], Awaitable[None]] | None = None,
+        on_progress: Callable[[int, int, int, int, int], Awaitable[None]] | None = None,
         progress_interval: float = 2.0,
         progress_every: int = 50,
+        channel: str = "both",
     ) -> dict:
+        send_to_bot = channel in ("bot", "both")
+        send_to_site = channel in ("site", "both")
         self.is_running = True
         self.start_time = time.time()
         self.results = []
         self.total_sent = 0
         self.blocked_users = set()
+        self.pending_retries = 0
 
-        for msg_data in messages:
-            msg = BroadcastMessage(
-                tg_id=msg_data["tg_id"],
-                text=msg_data["text"],
-                photo=msg_data.get("photo"),
-                keyboard=msg_data.get("keyboard"),
-            )
-            await self.queue.put(msg)
+        bot_recipient_count = 0
+        if send_to_bot:
+            for msg_data in messages:
+                tg_id = msg_data["tg_id"]
+                if not is_telegram_chat_id(tg_id):
+                    continue
+                bot_recipient_count += 1
+                msg = BroadcastMessage(
+                    tg_id=tg_id,
+                    text=msg_data["text"],
+                    photo=msg_data.get("photo"),
+                    keyboard=msg_data.get("keyboard"),
+                )
+                await self.queue.put(msg)
 
-        logger.info(f"📤 Начата рассылка на {len(messages)} пользователей с {workers} воркерами")
+        total = bot_recipient_count if send_to_bot else 0
+        logger.info(
+            f"📤 Начата рассылка channel={channel} на {len(messages)} получателей "
+            f"(TG: {bot_recipient_count}) с {workers} воркерами "
+            f"(rate={self.rate_limiter.max_rate}/сек, max_attempts={self.max_attempts})"
+        )
 
-        total = len(messages)
-        progress_task = None
+        progress_task: asyncio.Task | None = None
         if on_progress and total > 0:
             progress_task = asyncio.create_task(
                 self._progress_loop(total, on_progress, progress_interval, max(1, progress_every)),
             )
 
-        worker_tasks = [asyncio.create_task(self._worker()) for _ in range(workers)]
+        worker_tasks = [asyncio.create_task(self._worker()) for _ in range(workers)] if send_to_bot else []
 
-        delayed_task = asyncio.create_task(self._process_delayed_messages())
-
-        await self.queue.join()
-
-        await asyncio.sleep(1)
-        while not self.delayed_queue.empty():
-            await asyncio.sleep(1)
+        if send_to_bot:
+            while True:
+                await self.queue.join()
+                if self.pending_retries <= 0:
+                    break
+                await asyncio.sleep(0.5)
 
         self.is_running = False
 
@@ -298,15 +352,14 @@ class BroadcastService:
                     total,
                     self.total_sent,
                     completed - self.total_sent,
+                    0,
                 )
             except Exception as e:
                 logger.debug(f"[Broadcast] Финальное обновление прогресса: {e}")
 
         for task in worker_tasks:
             task.cancel()
-        delayed_task.cancel()
-
-        await asyncio.gather(*worker_tasks, delayed_task, return_exceptions=True)
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
 
         if self._session is not None:
             await self._save_blocked_users()
@@ -328,11 +381,12 @@ class BroadcastService:
         }
 
         logger.info(
-            f"✅ Рассылка завершена: {success_count}/{len(messages)} успешно, "
+            f"✅ Рассылка завершена: {success_count}/{bot_recipient_count or len(messages)} успешно, "
             f"скорость: {avg_speed:.1f} сообщений/сек, время: {total_duration:.1f} сек"
         )
 
-        await self._create_web_notifications(messages)
+        if send_to_site:
+            await self._create_web_notifications(messages)
 
         return stats
 
@@ -349,7 +403,9 @@ class BroadcastService:
             clean = re.sub(r"<[^>]+>", "", text).strip()
             lines = clean.split("\n", 1)
             title = (lines[0][:120] + "…") if len(lines[0]) > 120 else lines[0]
-            body = lines[1].strip()[:300] if len(lines) > 1 else ""
+            body = lines[1].strip() if len(lines) > 1 else ""
+            if len(body) > 4000:
+                body = body[:4000] + "…"
 
             session = self._session
             if session is None:

@@ -61,10 +61,10 @@ def filter_providers_by_currency(
     for p in providers:
         up = p.upper()
         if currency == "RUB":
-            if up in rub_set or up == "WATA":
+            if up in rub_set:
                 out.append(p)
         elif currency == "USD":
-            if (up not in rub_set or up == "WATA") and up != "STARS":
+            if up not in rub_set and up != "STARS":
                 out.append(p)
         elif currency == "STARS":
             if up == "STARS":
@@ -79,8 +79,6 @@ def currency_for_provider(up_provider: str, rub_providers: Iterable[str]) -> str
         return "RUB"
     if up_provider == "STARS":
         return "STARS"
-    if up_provider == "WATA":
-        return None
     return "USD"
 
 

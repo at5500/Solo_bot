@@ -69,6 +69,9 @@ def build_tariff_arrangement_groups_kb(groups: list[str]) -> InlineKeyboardMarku
 
 
 def build_tariffs_arrangement_kb(group_code: str, tariffs: list) -> InlineKeyboardMarkup:
+    from database.tariffs import create_subgroup_hash
+    from handlers.keys.utils import order_tariff_items
+
     builder = InlineKeyboardBuilder()
 
     grouped_tariffs = defaultdict(list)
@@ -76,44 +79,36 @@ def build_tariffs_arrangement_kb(group_code: str, tariffs: list) -> InlineKeyboa
         grouped_tariffs[t.get("subgroup_title")].append(t)
 
     for subgroup in grouped_tariffs:
-        grouped_tariffs[subgroup].sort(key=lambda x: x.get("sort_order"))
+        grouped_tariffs[subgroup].sort(key=lambda x: x.get("sort_order") or 0)
 
-    if grouped_tariffs.get(None):
-        for t in grouped_tariffs[None]:
-            builder.row(
-                InlineKeyboardButton(
-                    text="⬆️",
-                    callback_data=AdminTariffCallback(action=f"quick_move_up|{t.get('id')}|{group_code}").pack(),
-                ),
-                InlineKeyboardButton(
-                    text=f"  {t.get('name')}  ", callback_data=AdminTariffCallback(action=f"view|{t.get('id')}").pack()
-                ),
-                InlineKeyboardButton(
-                    text="⬇️",
-                    callback_data=AdminTariffCallback(action=f"quick_move_down|{t.get('id')}|{group_code}").pack(),
-                ),
-            )
+    def _tariff_row(t: dict) -> None:
+        builder.row(
+            InlineKeyboardButton(
+                text="⬆️",
+                callback_data=AdminTariffCallback(action=f"quick_move_up|{t.get('id')}|{group_code}").pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"  {t.get('name')}  ",
+                callback_data=AdminTariffCallback(action=f"view|{t.get('id')}").pack(),
+            ),
+            InlineKeyboardButton(
+                text="⬇️",
+                callback_data=AdminTariffCallback(action=f"quick_move_down|{t.get('id')}|{group_code}").pack(),
+            ),
+        )
 
-    for subgroup, tariffs_list in grouped_tariffs.items():
-        if subgroup:
+    for kind, payload in order_tariff_items(grouped_tariffs):
+        if kind == "tariff":
+            _tariff_row(payload)
+        else:
+            subgroup_hash = create_subgroup_hash(payload, group_code)
             builder.row(
-                InlineKeyboardButton(text=f"📁 {subgroup}", callback_data=AdminTariffCallback(action="arrange").pack())
+                InlineKeyboardButton(text="⬆️", callback_data=f"submove_up|{subgroup_hash}|{group_code}"),
+                InlineKeyboardButton(text=f"📁 {payload}", callback_data=AdminTariffCallback(action="arrange").pack()),
+                InlineKeyboardButton(text="⬇️", callback_data=f"submove_down|{subgroup_hash}|{group_code}"),
             )
-            for t in tariffs_list:
-                builder.row(
-                    InlineKeyboardButton(
-                        text="⬆️",
-                        callback_data=AdminTariffCallback(action=f"quick_move_up|{t.get('id')}|{group_code}").pack(),
-                    ),
-                    InlineKeyboardButton(
-                        text=f"  {t.get('name')}  ",
-                        callback_data=AdminTariffCallback(action=f"view|{t.get('id')}").pack(),
-                    ),
-                    InlineKeyboardButton(
-                        text="⬇️",
-                        callback_data=AdminTariffCallback(action=f"quick_move_down|{t.get('id')}|{group_code}").pack(),
-                    ),
-                )
+            for t in grouped_tariffs[payload]:
+                _tariff_row(t)
 
     builder.row(
         InlineKeyboardButton(
@@ -178,7 +173,7 @@ def build_tariff_list_kb(tariffs: list[dict]) -> InlineKeyboardMarkup:
         )
 
     for t in grouped.get(None, []):
-        title = f"{t['name']} — {t['price_rub']}₽"
+        title = f"#{t['id']} · {t['name']} — {t['price_rub']}₽"
         builder.row(
             InlineKeyboardButton(
                 text=title,
@@ -262,6 +257,21 @@ def build_single_tariff_kb(
     )
 
 
+def build_tariff_visibility_kb(tariff_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👁 Показывать всем", callback_data=f"tvisset|{tariff_id}|all|none")],
+            [InlineKeyboardButton(text="✅ Только: есть активная подписка", callback_data=f"tvisset|{tariff_id}|only|has_active")],
+            [InlineKeyboardButton(text="🚫 Кроме: есть активная подписка", callback_data=f"tvisset|{tariff_id}|except|has_active")],
+            [InlineKeyboardButton(text="✅ Только: горячий лид", callback_data=f"tvisset|{tariff_id}|only|hot_lead")],
+            [InlineKeyboardButton(text="🚫 Кроме: горячий лид", callback_data=f"tvisset|{tariff_id}|except|hot_lead")],
+            [InlineKeyboardButton(text="✅ Только: активных ≥ N", callback_data=f"tvisset|{tariff_id}|only|active_count")],
+            [InlineKeyboardButton(text="🚫 Кроме: активных ≥ N", callback_data=f"tvisset|{tariff_id}|except|active_count")],
+            [InlineKeyboardButton(text=BACK, callback_data=AdminTariffCallback(action=f"view|{tariff_id}").pack())],
+        ]
+    )
+
+
 def build_edit_tariff_fields_kb(tariff_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -297,6 +307,19 @@ def build_edit_tariff_fields_kb(tariff_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"edit_field|{tariff_id}|external_squad",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="⏳ Задержка покупки (дней)",
+                    callback_data=f"edit_field|{tariff_id}|cooldown_days",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📄 Описание",
+                    callback_data=f"edit_field|{tariff_id}|description",
+                )
+            ],
+            [InlineKeyboardButton(text="👁 Видимость", callback_data=f"tvis|{tariff_id}")],
             [InlineKeyboardButton(text="🔘 Активность", callback_data=f"toggle_active|{tariff_id}")],
             [InlineKeyboardButton(text=BACK, callback_data=AdminTariffCallback(action=f"view|{tariff_id}").pack())],
         ]

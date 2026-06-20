@@ -69,15 +69,24 @@ logger.configure(
 level_mapping = {50: "CRITICAL", 40: "ERROR", 30: "WARNING", 20: "INFO", 10: "DEBUG", 0: "NOTSET"}
 
 
+_HTTP_NOISE_MARKERS = (
+    "Invalid method encountered",
+    "Bad status line",
+    "Pause on PRI/Upgrade",
+    "Expected HTTP/",
+    "invalid constant string",
+)
+
+
 class InterceptHandler(logging.Handler):
     def emit(self, record):
         message = record.getMessage()
-        if (
-            record.name.startswith("aiohttp.")
-            and "Invalid method encountered" in message
-            and "b'\\x16\\x03\\x01'" in message
-        ):
-            logger.opt(depth=6).warning("[HTTP] На порт пришли TLS/HTTPS данные вместо HTTP, соединение закрыто")
+        if record.name.startswith("aiohttp.") and any(m in message for m in _HTTP_NOISE_MARKERS):
+            if "\\x16\\x03" in message:
+                hint = "TLS/HTTPS-данные (ожидался обычный HTTP)"
+            else:
+                hint = "не-HTTP данные (сканер/бот?)"
+            logger.opt(depth=6).warning(f"[HTTP] На порт пришли {hint}, соединение закрыто (400 Bad Request)")
             return
         logger.opt(depth=6, exception=record.exc_info).log(level_mapping.get(record.levelno, "INFO"), message)
 
@@ -93,6 +102,7 @@ for name in (
     "async_api_base",
     "async_api",
     "async_api_client",
+    "charset_normalizer",
 ):
     lg = logging.getLogger(name)
     lg.setLevel(logging.ERROR)
@@ -146,6 +156,16 @@ def _filter(record):
     return True
 
 
+def _file_filter(record):
+    # API-строки доступа пишем в файл всегда, независимо от LOGGING_LEVEL —
+    # чтобы вкладка «Апи» в админке работала при любом уровне (debug/info/warning/...).
+    if "[API]" not in record["message"]:
+        level_no = getattr(record.get("level"), "no", 20)
+        if level_no < BASE_LEVEL:
+            return False
+    return _filter(record)
+
+
 logger.add(
     sys.stderr,
     level=BASE_LEVEL,
@@ -157,11 +177,11 @@ logger.add(
 log_file_path = os.path.join(log_folder, "logging.log")
 logger.add(
     log_file_path,
-    level=BASE_LEVEL,
+    level=0,
     format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {module}:{function}:{line} | {extra[module_tag]} {message}",
     rotation=LOG_ROTATION_TIME,
     retention=timedelta(days=3),
-    filter=_filter,
+    filter=_file_filter,
 )
 
 logger = logger

@@ -3,13 +3,11 @@ from datetime import datetime
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_balance, set_user_balance, update_balance
 from database.access.resolution import resolve_user_optional
-from database.models import Payment
-from database.payments import add_payment
+from database.payments import add_payment, count_balance_activity, get_balance_activity
 from filters.admin import IsAdminFilter
 from utils.csv_export import export_user_all_payments_csv
 
@@ -50,6 +48,15 @@ def format_user_payment(
     )
 
 
+def format_gift_purchase(amount: float, created_at: datetime) -> str:
+    date_str = created_at.strftime("%Y-%m-%d %H:%M:%S")
+    abs_amount = abs(int(amount or 0))
+    return (
+        f"\n<blockquote>🎁 Покупка подарка: -{abs_amount}Р\n"
+        f"⏳ Дата: {date_str}</blockquote>"
+    )
+
+
 async def _render_balance_page(
     callback_query: CallbackQuery,
     session: AsyncSession,
@@ -60,36 +67,25 @@ async def _render_balance_page(
     balance = int(balance or 0)
 
     u = await resolve_user_optional(session, tg_id)
-    uid = u.id if u is not None else tg_id
+    uid = u.id if u is not None else None
+    tg_ref = u.tg_id if u is not None else tg_id
 
-    total_count_result = await session.execute(select(func.count()).where(Payment.user_id == uid))
-    total = total_count_result.scalar() or 0
+    total = await count_balance_activity(session, uid=uid, tg_id=tg_ref)
 
     total_pages = max(1, (total + 4) // 5)
     page = max(0, min(page, total_pages - 1))
 
-    stmt = (
-        select(
-            Payment.amount,
-            Payment.created_at,
-            Payment.payment_system,
-            Payment.status,
-            Payment.payment_id,
-        )
-        .where(Payment.user_id == uid)
-        .order_by(Payment.created_at.desc())
-        .offset(page * 5)
-        .limit(5)
-    )
-    result = await session.execute(stmt)
-    records = result.all()
+    records = await get_balance_activity(session, uid=uid, tg_id=tg_ref, limit=5, offset=page * 5)
 
     text = f"<b>💵 Изменение баланса</b>\n\n🆔 ID: <b>{tg_id}</b>\n💰 Баланс: <b>{balance}Р</b>"
     text += f"\n\n<b>📊 Все операции ({total}), стр. {page + 1}/{total_pages}:</b>"
 
     if records:
-        for amount, created_at, payment_system, status, payment_id in records:
-            text += format_user_payment(amount, created_at, payment_system, status, payment_id)
+        for row in records:
+            if row.kind == "gift":
+                text += format_gift_purchase(row.amount, row.created_at)
+            else:
+                text += format_user_payment(row.amount, row.created_at, row.system, row.status, row.ref)
     else:
         text += "\n<i>🚫 Операции отсутствуют</i>"
 

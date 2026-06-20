@@ -35,6 +35,13 @@ def build_settings_web_kb() -> InlineKeyboardBuilder:
             callback_data=AdminPanelCallback(action="settings_web_url").pack(),
         )
     )
+    email_binding = bool(WEB_CONFIG.get("EMAIL_BINDING_ENABLED", False))
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if email_binding else '❌'} Привязка почты {'включена' if email_binding else 'выключена'}",
+            callback_data=AdminPanelCallback(action="settings_web_email_binding_toggle").pack(),
+        )
+    )
     builder.row(
         InlineKeyboardButton(
             text="🔄 Сбросить сайт к исходнику",
@@ -49,12 +56,16 @@ def build_settings_web_kb() -> InlineKeyboardBuilder:
 def _web_settings_text() -> str:
     enabled = bool(WEB_CONFIG.get("WEB_ENABLED", False))
     url = str(WEB_CONFIG.get("SITE_URL") or "не указан")
+    email_binding = bool(WEB_CONFIG.get("EMAIL_BINDING_ENABLED", False))
     return (
         "<b>🌐 Настройки веб-сайта</b>\n\n"
         f"Статус: {'✅ Включён' if enabled else '❌ Выключен'}\n"
-        f"URL: <code>{url}</code>\n\n"
+        f"URL: <code>{url}</code>\n"
+        f"Привязка почты: {'✅ Включена' if email_binding else '❌ Выключена'}\n\n"
         "Сайт может работать на отдельном домене и сервере.\n"
-        "При выключении кнопка «Личный кабинет» скрывается из бота."
+        "При выключении кнопка «Личный кабинет» скрывается из бота.\n"
+        "Привязка почты — кнопка в боте, через которую пользователь указывает email "
+        "для входа на сайт на случай проблем с Telegram."
     )
 
 
@@ -77,6 +88,23 @@ async def toggle_web_enabled(callback: CallbackQuery) -> None:
         await update_web_config(session, new_config)
 
     status = "✅ Сайт включён" if new_config["WEB_ENABLED"] else "❌ Сайт выключен"
+    await callback.answer(status, show_alert=True)
+    await callback.message.edit_text(
+        text=_web_settings_text(),
+        reply_markup=build_settings_web_kb().as_markup(),
+    )
+
+
+@router.callback_query(AdminPanelCallback.filter(F.action == "settings_web_email_binding_toggle"))
+async def toggle_email_binding(callback: CallbackQuery) -> None:
+    current = bool(WEB_CONFIG.get("EMAIL_BINDING_ENABLED", False))
+    new_config = dict(WEB_CONFIG)
+    new_config["EMAIL_BINDING_ENABLED"] = not current
+
+    async with async_session_maker() as session:
+        await update_web_config(session, new_config)
+
+    status = "✅ Привязка почты включена" if new_config["EMAIL_BINDING_ENABLED"] else "❌ Привязка почты выключена"
     await callback.answer(status, show_alert=True)
     await callback.message.edit_text(
         text=_web_settings_text(),

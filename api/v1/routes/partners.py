@@ -16,8 +16,10 @@ try:
 except Exception:
     PARTNER_BONUS_PERCENTAGES = {1: 0.0}
 
+from api.v2.routes.partners import ensure_partner_available
 
-router = APIRouter()
+
+router = APIRouter(dependencies=[Depends(ensure_partner_available)])
 
 
 def _parse_percent(value: float) -> float | None:

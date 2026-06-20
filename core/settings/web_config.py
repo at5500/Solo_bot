@@ -76,3 +76,7 @@ def get_site_url() -> str:
 
 def is_web_enabled() -> bool:
     return bool(WEB_CONFIG.get("WEB_ENABLED", False))
+
+
+def is_email_binding_enabled() -> bool:
+    return bool(WEB_CONFIG.get("EMAIL_BINDING_ENABLED", False))

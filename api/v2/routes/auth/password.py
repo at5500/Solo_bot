@@ -264,15 +264,13 @@ async def send_login_code(
         identity = await idb.create_identity(session, email=email_norm)
         is_fresh_identity = True
 
-    # Apply the partner code only on the very first sign-up — re-using
-    # someone else's invite later silently does nothing (so a partner
-    # link forwarded to an existing user can't quietly rebind them).
-    if is_fresh_identity and body.partner_code:
-        try:
-            from utils.partner_apply import apply_partner_code as _apply_partner
-            await _apply_partner(session, identity, body.partner_code)
-        except Exception as exc:
-            logger.warning("[Auth] partner-link apply failed for {}: {}", email_norm, exc)
+    # Partner code on first sign-up used to be applied here via the
+    # legacy ``referrals`` table. Since the bot migrated to the
+    # ``partners`` table months ago and ``referrals`` is no longer
+    # consumed by anything, this branch is dropped. New partner
+    # bindings now flow through the bot ``?start=partner_<code>``
+    # handler and the upstream ``POST /api/v2/partners/apply``
+    # endpoint, both of which write into ``partners`` directly.
 
     ip = _client_ip(request)
     if not await try_consume_ip_send_budget(ip):

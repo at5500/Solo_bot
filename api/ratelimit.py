@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import HTTPException, Request
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import _identity_from_cookie
+
+
+async def _db_rate_incr(key: str, window_sec: int) -> int:
+    """Распределённый (общий для всех реплик) fallback-счётчик в Postgres.
+    Используется, когда Redis недоступен. Фиксированное окно."""
+    from database import async_session_maker
+
+    now = int(time.time())
+    window_start = (now // max(1, window_sec)) * max(1, window_sec)
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text(
+                """
+                INSERT INTO rate_limit_counters (bucket, window_start, count)
+                VALUES (:b, :w, 1)
+                ON CONFLICT (bucket, window_start)
+                DO UPDATE SET count = rate_limit_counters.count + 1
+                RETURNING count
+                """
+            ),
+            {"b": key[:255], "w": window_start},
+        )
+        value = res.scalar()
+        await session.commit()
+        return int(value or 1)
 
 
 async def enforce_rate_limit(
@@ -31,14 +59,22 @@ async def enforce_rate_limit(
             pass
 
     if owner == "anon":
-        ip = (request.client.host if request.client else "") or "unknown"
+        try:
+            from api.v2.routes.auth._common import _client_ip
+
+            ip = _client_ip(request) or "unknown"
+        except Exception:
+            ip = (request.client.host if request.client else "") or "unknown"
         owner = f"ip:{ip}"
 
     key = f"rl:{bucket}:{owner}"
     try:
         count, redis_ok = await cache_incr_checked(key, window_sec)
         if not redis_ok:
-            count = check_and_increment(key, max_per_window, window_sec)
+            try:
+                count = await _db_rate_incr(key, window_sec)
+            except Exception:
+                count = check_and_increment(key, max_per_window, window_sec)
     except Exception:
         return
 

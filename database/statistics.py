@@ -4,11 +4,19 @@ from sqlalchemy import and_, exists, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.constants import PAYMENT_SYSTEMS_EXCLUDED
-from database.models import Key, Payment, Referral, Tariff, User
+from database.models import Identity, Key, Payment, Referral, Tariff, User
 
 
 async def count_total_users(session: AsyncSession) -> int:
     return await session.scalar(select(func.count()).select_from(User))
+
+
+async def count_users_with_tg_id(session: AsyncSession) -> int:
+    return await session.scalar(select(func.count()).select_from(User).where(User.tg_id.isnot(None)))
+
+
+async def count_identities_with_email(session: AsyncSession) -> int:
+    return await session.scalar(select(func.count()).select_from(Identity).where(Identity.email.isnot(None)))
 
 
 async def count_users_updated_today(session: AsyncSession, today: date) -> int:

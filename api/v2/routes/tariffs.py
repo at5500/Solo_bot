@@ -10,11 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.depends import get_session, validate_redirect_url, verify_identity_token
 from api.v2.base_crud import generate_crud_router
 from api.v2.routes.coupon_pricing import resolve_percent_coupon_pricing
-from api.v2.routes.keys.user.renew_change import user_key_renew_change_tariff
 from api.v2.schemas import TariffBase, TariffResponse, TariffUpdate
 from api.v2.schemas.tariffs import TariffGroup, TariffPublic
 from api.v2.schemas.web_public import (
-    AccountKeyRenewRequest,
     TariffConfigPriceResponse,
     TariffPurchaseRequest,
     TariffPurchaseResponse,
@@ -26,39 +24,25 @@ from database import (
     identities as idb,
 )
 from database.coupons import mark_coupon_used
-from database.models import Key, Tariff
+from database.models import Server, Tariff
 from database.tariffs import get_tariff_by_id
 from database.temporary_data import create_temporary_data
+from handlers.texts import TARIFF_COOLDOWN_MESSAGE
 from logger import logger
 from services.keys import create_vpn_key_headless
 from services.payments.payment_links import PaymentLinkRequest, create_payment_link
 from services.payments.providers import WEB_LINK_PROVIDER_IDS
-from services.tariffs import calculate_config_price
+from services.tariffs import calculate_config_price, filter_config_options
+from services.tariffs.cooldown import format_cooldown_left, get_tariff_cooldown_remaining
+from services.tariffs.visibility import is_tariff_visible_for
 
 
 def _tariff_to_public(t: Tariff) -> TariffPublic:
     dev_opts = getattr(t, "device_options", None)
     tr_opts = getattr(t, "traffic_options_gb", None)
-    device_options: list[int] | None = None
-    traffic_options_gb: list[int] | None = None
-    if isinstance(dev_opts, list):
-        device_options = []
-        for x in dev_opts:
-            try:
-                device_options.append(int(x))
-            except (TypeError, ValueError):
-                continue
-        if not device_options:
-            device_options = None
-    if isinstance(tr_opts, list):
-        traffic_options_gb = []
-        for x in tr_opts:
-            try:
-                traffic_options_gb.append(int(x))
-            except (TypeError, ValueError):
-                continue
-        if not traffic_options_gb:
-            traffic_options_gb = None
+    filtered_devices, filtered_traffic = filter_config_options(t)
+    device_options = filtered_devices if isinstance(dev_opts, list) and filtered_devices else None
+    traffic_options_gb = filtered_traffic if isinstance(tr_opts, list) and filtered_traffic else None
     return TariffPublic(
         id=t.id,
         name=t.name or "",
@@ -73,6 +57,7 @@ def _tariff_to_public(t: Tariff) -> TariffPublic:
         configurable=bool(getattr(t, "configurable", False)),
         device_options=device_options,
         traffic_options_gb=traffic_options_gb,
+        cooldown_days=int(getattr(t, "cooldown_days", 0) or 0),
     )
 
 
@@ -160,6 +145,13 @@ async def get_tariffs_public(
             raise HTTPException(status_code=422, detail="Некорректный параметр tariff_ids")
     elif group_code:
         q = q.where(Tariff.group_code == group_code)
+    else:
+        allowed_groups_subq = (
+            select(Server.tariff_group)
+            .where(Server.enabled.is_(True), Server.tariff_group.isnot(None))
+            .distinct()
+        )
+        q = q.where(Tariff.group_code.in_(allowed_groups_subq))
     if filter_vless == "router":
         q = q.where(Tariff.vless.is_(True))
     elif filter_vless == "app":
@@ -197,67 +189,33 @@ async def purchase_tariff_with_balance(
     identity=Depends(verify_identity_token),
 ):
     tg_id = await idb.ensure_billing_user_for_identity(session, identity)
-
-    # If the user already owns a non-frozen key, treat this purchase as a
-    # renewal of that key — keeps the VLESS link stable (the client
-    # doesn't have to re-add anything to Happ) and prevents «trial leaked
-    # into purchase» / «stale Mini App state lost ``mode=renew``» bugs
-    # from minting parallel subscriptions. Preview is excluded — pricing
-    # calculation must remain idempotent regardless of existing keys.
-    if not preview:
-        # Pick the most recently created non-frozen key as the renewal
-        # target — mirrors the front-end's ``sortKeysForDisplay`` priority
-        # (active > expired, newest first) without loading the full key
-        # list into memory.
-        #
-        # ``isnot(True)`` rather than ``is_(False)`` so rows with
-        # ``is_frozen IS NULL`` (column has no server_default — old
-        # migrations / non-ORM inserts could have left NULLs in the
-        # table) still count as active, matching the previous
-        # ``not getattr(k, "is_frozen", False)`` behaviour.
-        # ``nulls_last()`` so a row with ``created_at IS NULL`` doesn't
-        # win the sort: Postgres puts NULLs first on ``DESC`` by default,
-        # but the old ``max(..., key=lambda k: int(... or 0))`` treated
-        # NULL as 0 and effectively pushed it to the end.
-        target_key = (
-            await session.execute(
-                select(Key)
-                .where(Key.user_id == int(tg_id), Key.is_frozen.isnot(True))
-                .order_by(Key.created_at.desc().nulls_last())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if target_key is not None:
-            renew_body = AccountKeyRenewRequest(
-                provider_id=body.provider_id,
-                coupon_code=body.coupon_code,
-                success_url=body.success_url,
-                failure_url=body.failure_url,
-            )
-            renew_result = await user_key_renew_change_tariff(
-                client_id=str(getattr(target_key, "client_id")),
-                new_tariff_id=int(body.tariff_id),
-                body=renew_body,
-                request=request,
-                preview=preview,
-                session=session,
-                identity=identity,
-            )
-            # Re-shape ``AccountKeyRenewResponse`` into the response the
-            # caller awaits so the front-end stays agnostic of which path
-            # actually ran. ``client_id`` / ``tariff_id`` / ``balance_rub``
-            # exist on the renew schema but not on the purchase schema —
-            # drop them; ``key_email`` has no counterpart so the default
-            # ``None`` is fine.
-            return TariffPurchaseResponse(
-                **renew_result.model_dump(
-                    exclude={"client_id", "tariff_id", "balance_rub"}
-                ),
-            )
-
     tariff = await get_tariff_by_id(session, body.tariff_id)
     if not tariff or not tariff.get("is_active", True):
         raise HTTPException(status_code=404, detail="Тариф не найден")
+    tariff_group_code = (tariff.get("group_code") or "").strip()
+    if not tariff_group_code:
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    tariff_is_purchasable = await session.scalar(
+        select(Server.id)
+        .where(Server.tariff_group == tariff_group_code, Server.enabled.is_(True))
+        .limit(1)
+    )
+    if not tariff_is_purchasable:
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    if not preview:
+        if not await is_tariff_visible_for(session, int(tg_id), tariff):
+            raise HTTPException(status_code=404, detail="Тариф недоступен")
+        cooldown_left = await get_tariff_cooldown_remaining(
+            session, int(tg_id), int(body.tariff_id), int(tariff.get("cooldown_days") or 0)
+        )
+        if cooldown_left > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=TARIFF_COOLDOWN_MESSAGE.format(
+                    days=int(tariff.get("cooldown_days") or 0),
+                    left=format_cooldown_left(cooldown_left),
+                ),
+            )
     price = int(calculate_config_price(tariff, body.selected_device_limit, body.selected_traffic_gb))
     if price <= 0:
         raise HTTPException(status_code=400, detail="Некорректная цена тарифа")

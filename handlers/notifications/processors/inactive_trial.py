@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config import NOTIFY_EXTRA_DAYS, NOTIFY_INACTIVE
 from core.bootstrap import NOTIFICATIONS_CONFIG
-from database import add_notification, check_notifications_bulk
+from database import check_notifications_bulk
+from database.notifications import bulk_add_notifications
 from database.models import User
 from database.tariffs import get_tariffs
 from handlers.buttons import MAIN_MENU, TRIAL_BONUS
@@ -15,6 +16,9 @@ from handlers.notifications.sender import send_messages_with_limit
 from handlers.texts import TRIAL_INACTIVE_BONUS_MSG, TRIAL_INACTIVE_FIRST_MSG
 from handlers.utils import format_days
 from logger import logger
+
+_INACTIVE_TRIAL_UPDATE_BATCH_SIZE = 1000
+_INACTIVE_TRIAL_NOTIFY_BATCH_SIZE = 1000
 
 
 async def process_inactive_trial(
@@ -77,21 +81,35 @@ async def process_inactive_trial(
         })
 
     if users_to_extend:
-        await session.execute(update(User).where(User.tg_id.in_(users_to_extend)).values(trial=-1))
+        for i in range(0, len(users_to_extend), _INACTIVE_TRIAL_UPDATE_BATCH_SIZE):
+            batch = users_to_extend[i : i + _INACTIVE_TRIAL_UPDATE_BATCH_SIZE]
+            await session.execute(update(User).where(User.tg_id.in_(batch)).values(trial=-1))
+            await session.commit()
         logger.info(f"[InactiveTrial] {len(users_to_extend)} пользователей с расширенным триалом")
 
     if messages:
-        results = await send_messages_with_limit(bot, messages, messages_per_second=25)
+        results = await send_messages_with_limit(bot, messages)
 
         sent_tg_ids = [msg["tg_id"] for msg, result in zip(messages, results, strict=False) if result]
 
         if sent_tg_ids:
             if sessionmaker is not None:
                 async with sessionmaker() as fresh_session:
-                    for tg_id in sent_tg_ids:
-                        await add_notification(fresh_session, tg_id, "inactive_trial")
+                    for i in range(0, len(sent_tg_ids), _INACTIVE_TRIAL_NOTIFY_BATCH_SIZE):
+                        batch = sent_tg_ids[i : i + _INACTIVE_TRIAL_NOTIFY_BATCH_SIZE]
+                        await bulk_add_notifications(
+                            fresh_session,
+                            [(tg_id, "inactive_trial") for tg_id in batch],
+                            commit=False,
+                        )
                     await fresh_session.commit()
             else:
-                for tg_id in sent_tg_ids:
-                    await add_notification(session, tg_id, "inactive_trial")
+                for i in range(0, len(sent_tg_ids), _INACTIVE_TRIAL_NOTIFY_BATCH_SIZE):
+                    batch = sent_tg_ids[i : i + _INACTIVE_TRIAL_NOTIFY_BATCH_SIZE]
+                    await bulk_add_notifications(
+                        session,
+                        [(tg_id, "inactive_trial") for tg_id in batch],
+                        commit=False,
+                    )
+                await session.commit()
             logger.info(f"[InactiveTrial] Отправлено {len(sent_tg_ids)} уведомлений")

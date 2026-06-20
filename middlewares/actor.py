@@ -26,5 +26,11 @@ class ActorMiddleware(BaseMiddleware):
             ):
                 data["actor"] = await resolve_actor_from_legacy_ref(session, int(from_user.id))
         except Exception as error:
-            logger.error(f"[ActorMiddleware] Ошибка резолва actor: {error}")
+            logger.error(f"[ActorMiddleware] Ошибка резолва actor: {error}", exc_info=True)
+            _session = data.get("session")
+            if _session is not None:
+                try:
+                    await _session.rollback()
+                except Exception:
+                    pass
         return await handler(event, data)

@@ -54,6 +54,31 @@ class RenewalPricing:
 
 
 @dataclass
+class RenewalQuote:
+    """Единый расчёт продления/смены тарифа для бота и веба.
+
+    Модель «остаток → баланс»: при смене тарифа неиспользованный остаток прежней
+    подписки целиком возвращается на баланс, а новый тариф — обычная покупка по
+    полной цене. net_cost_rub = new_full_price_rub − credit_rub (со знаком):
+      >0 — столько списать с баланса (с доплатой при нехватке);
+      <0 — на баланс вернётся |net|, оплата не нужна.
+    """
+
+    is_switch: bool
+    duration_days: int
+    selected_device_limit: int | None
+    selected_traffic_limit: int | None
+    total_gb: int
+    new_full_price_rub: int
+    credit_rub: int
+    net_cost_rub: int
+    refund_to_balance_rub: int
+    new_expiry_ms: int
+    coupon_id: int | None = None
+    applied_coupon_code: str | None = None
+
+
+@dataclass
 class RenewalResult:
     """Результат фактического продления."""
 
@@ -124,8 +149,15 @@ async def calculate_renewal_pricing(
     key_email: str,
     tariff_id: int,
     coupon_code: str | None = None,
+    selected_device_limit: int | None = None,
+    selected_traffic_limit: int | None = None,
+    credit_rub: float = 0.0,
 ) -> RenewalPricing:
     """Считает цену продления без фактического выполнения.
+
+    Если тариф configurable и переданы selected_device_limit / selected_traffic_limit —
+    они используются как явный выбор и валидируются по device_options / traffic_options_gb.
+    Иначе берутся текущие значения из подписки.
 
     Raises: NotFoundError, ValidationError
     """
@@ -143,10 +175,43 @@ async def calculate_renewal_pricing(
     if not key_details:
         raise NotFoundError("Подписка не найдена")
 
-    selected_device = key_details.get("selected_device_limit")
-    selected_traffic = key_details.get("selected_traffic_limit")
-    sel_dev_int = int(selected_device) if selected_device is not None else None
-    sel_trf_int = int(selected_traffic) if selected_traffic is not None else None
+    is_configurable = bool(tariff.get("configurable"))
+    current_tariff_id = key_details.get("tariff_id")
+    same_tariff = current_tariff_id is not None and int(current_tariff_id) == int(tariff_id)
+
+    if is_configurable and (selected_device_limit is not None or selected_traffic_limit is not None):
+        device_options_raw = tariff.get("device_options") or []
+        traffic_options_raw = tariff.get("traffic_options_gb") or []
+        device_options = {int(v) for v in device_options_raw if str(v).lstrip("-").isdigit()}
+        traffic_options = {int(v) for v in traffic_options_raw if str(v).lstrip("-").isdigit()}
+
+        if selected_device_limit is not None:
+            if device_options and int(selected_device_limit) not in device_options:
+                raise ValidationError(
+                    f"Недопустимое количество устройств. Доступно: {sorted(device_options)}"
+                )
+            sel_dev_int = int(selected_device_limit)
+        else:
+            existing = key_details.get("selected_device_limit") if same_tariff else None
+            sel_dev_int = int(existing) if existing is not None else None
+
+        if selected_traffic_limit is not None:
+            if traffic_options and int(selected_traffic_limit) not in traffic_options:
+                raise ValidationError(
+                    f"Недопустимый объём трафика. Доступно (ГБ): {sorted(traffic_options)}"
+                )
+            sel_trf_int = int(selected_traffic_limit)
+        else:
+            existing = key_details.get("selected_traffic_limit") if same_tariff else None
+            sel_trf_int = int(existing) if existing is not None else None
+    elif same_tariff:
+        selected_device = key_details.get("selected_device_limit")
+        selected_traffic = key_details.get("selected_traffic_limit")
+        sel_dev_int = int(selected_device) if selected_device is not None else None
+        sel_trf_int = int(selected_traffic) if selected_traffic is not None else None
+    else:
+        sel_dev_int = None
+        sel_trf_int = None
 
     from services.tariffs import calculate_config_price as calc_price_buy
 
@@ -167,13 +232,16 @@ async def calculate_renewal_pricing(
         coupon_code=coupon_code,
     )
 
+    if credit_rub and credit_rub > 0:
+        final_price_rub = int(max(0, round(float(final_price_rub) - float(credit_rub))))
+
     from services.tariffs.tariff_display import GB, get_effective_limits_for_key
 
     _, traffic_bytes = await get_effective_limits_for_key(
         session=session,
         tariff_id=int(tariff_id),
         selected_device_limit=sel_dev_int,
-        selected_traffic_gb=sel_trf_int if sel_trf_int is not None else 0,
+        selected_traffic_gb=sel_trf_int,
     )
     total_gb = int(traffic_bytes / GB) if traffic_bytes else 0
 
@@ -193,6 +261,195 @@ async def calculate_renewal_pricing(
         duration_days=duration_days,
         selected_device_limit=sel_dev_int,
         selected_traffic_limit=sel_trf_int,
+    )
+
+
+_DAY_MS = 86_400_000
+
+
+async def compute_remaining_credit(
+    session: AsyncSession,
+    *,
+    now_ms: int,
+    current_expiry_ms: int,
+    current_tariff_id: int | None,
+    current_selected_device: int | None,
+    current_selected_traffic: int | None,
+) -> float:
+    """Стоимость остатка текущей подписки в рублях — единый источник пересчёта.
+
+    При смене тарифа этот остаток целиком возвращается на баланс пользователя.
+    """
+    if current_tariff_id is None:
+        return 0.0
+    remaining_ms = max(0, int(current_expiry_ms) - int(now_ms))
+    if remaining_ms <= 0:
+        return 0.0
+    old_tariff = await get_tariff_by_id(session, int(current_tariff_id))
+    if not old_tariff:
+        return 0.0
+    old_duration = int(old_tariff.get("duration_days") or 0)
+    if old_duration <= 0:
+        return 0.0
+    from services.tariffs import calculate_config_price
+
+    old_price = float(
+        calculate_config_price(
+            tariff=old_tariff,
+            selected_device_limit=int(current_selected_device) if current_selected_device is not None else None,
+            selected_traffic_gb=int(current_selected_traffic) if current_selected_traffic is not None else None,
+        )
+    )
+    remaining_days = remaining_ms / _DAY_MS
+    return round(remaining_days * (old_price / old_duration), 2)
+
+
+async def compute_renewal_expiry(
+    session: AsyncSession,
+    *,
+    now_ms: int,
+    current_expiry_ms: int,
+    current_tariff_id: int | None,
+    current_selected_device: int | None,
+    current_selected_traffic: int | None,
+    new_tariff_id: int,
+    new_selected_device: int | None,
+    new_selected_traffic: int | None,
+    new_duration_days: int | None = None,
+) -> int:
+    """Новая дата окончания подписки при продлении.
+
+    Тот же тариф/конфиг (или истёкший ключ) — срок прибавляется к остатку.
+    Другой тариф (смена) — только новый период от now: остаток прежней подписки
+    возвращается на баланс деньгами, а не временем.
+    """
+    now_ms = int(now_ms)
+    current_expiry_ms = int(current_expiry_ms)
+    new_tariff = await get_tariff_by_id(session, int(new_tariff_id))
+    new_duration = (
+        int(new_duration_days)
+        if new_duration_days is not None
+        else int((new_tariff or {}).get("duration_days") or 0)
+    )
+    new_dur_ms = new_duration * _DAY_MS
+    remaining_ms = max(0, current_expiry_ms - now_ms)
+
+    if remaining_ms <= 0:
+        return now_ms + new_dur_ms
+
+    def _opt(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    same_subscription = (
+        current_tariff_id is not None
+        and int(current_tariff_id) == int(new_tariff_id)
+        and _opt(current_selected_device) == _opt(new_selected_device)
+        and _opt(current_selected_traffic) == _opt(new_selected_traffic)
+    )
+    if same_subscription:
+        return current_expiry_ms + new_dur_ms
+
+    return now_ms + new_dur_ms
+
+
+async def compute_renewal_quote(
+    session: AsyncSession,
+    *,
+    billing_user_id: int,
+    key_email: str,
+    current_tariff_id: int | None,
+    current_selected_device: int | None,
+    current_selected_traffic: int | None,
+    current_expiry_ms: int,
+    now_ms: int,
+    new_tariff_id: int,
+    new_selected_device: int | None,
+    new_selected_traffic: int | None,
+    coupon_code: str | None = None,
+) -> RenewalQuote:
+    """Единый расчёт: продление это или смена, цена нового, остаток на баланс и нетто."""
+    pricing = await calculate_renewal_pricing(
+        session,
+        billing_user_id=billing_user_id,
+        key_email=key_email,
+        tariff_id=int(new_tariff_id),
+        coupon_code=coupon_code,
+        selected_device_limit=new_selected_device,
+        selected_traffic_limit=new_selected_traffic,
+        credit_rub=0.0,
+    )
+    duration_days = pricing.duration_days
+    eff_dev = pricing.selected_device_limit
+    eff_trf = pricing.selected_traffic_limit
+
+    def _opt(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    is_switch = not (
+        current_tariff_id is not None
+        and int(current_tariff_id) == int(new_tariff_id)
+        and _opt(current_selected_device) == _opt(eff_dev)
+        and _opt(current_selected_traffic) == _opt(eff_trf)
+    )
+
+    new_expiry = await compute_renewal_expiry(
+        session,
+        now_ms=now_ms,
+        current_expiry_ms=current_expiry_ms,
+        current_tariff_id=current_tariff_id,
+        current_selected_device=current_selected_device,
+        current_selected_traffic=current_selected_traffic,
+        new_tariff_id=new_tariff_id,
+        new_selected_device=eff_dev,
+        new_selected_traffic=eff_trf,
+        new_duration_days=duration_days,
+    )
+
+    full_price = int(pricing.final_price_rub)
+
+    if not is_switch:
+        return RenewalQuote(
+            is_switch=False,
+            duration_days=duration_days,
+            selected_device_limit=eff_dev,
+            selected_traffic_limit=eff_trf,
+            total_gb=pricing.total_gb,
+            new_full_price_rub=full_price,
+            credit_rub=0,
+            net_cost_rub=full_price,
+            refund_to_balance_rub=0,
+            new_expiry_ms=new_expiry,
+            coupon_id=pricing.coupon_id,
+            applied_coupon_code=pricing.applied_coupon_code,
+        )
+
+    credit = int(
+        round(
+            await compute_remaining_credit(
+                session,
+                now_ms=now_ms,
+                current_expiry_ms=current_expiry_ms,
+                current_tariff_id=current_tariff_id,
+                current_selected_device=current_selected_device,
+                current_selected_traffic=current_selected_traffic,
+            )
+        )
+    )
+    net_cost = full_price - credit
+
+    return RenewalQuote(
+        is_switch=True,
+        duration_days=duration_days,
+        selected_device_limit=eff_dev,
+        selected_traffic_limit=eff_trf,
+        total_gb=pricing.total_gb,
+        new_full_price_rub=full_price,
+        credit_rub=credit,
+        net_cost_rub=net_cost,
+        refund_to_balance_rub=max(0, -net_cost),
+        new_expiry_ms=new_expiry,
+        coupon_id=pricing.coupon_id,
+        applied_coupon_code=pricing.applied_coupon_code,
     )
 
 
@@ -283,6 +540,9 @@ async def execute_renewal(
     effective_client_id = key_row["client_id"] if key_row else client_id
 
     await update_key_expiry(session, effective_client_id, new_expiry_time)
+    from database.keys import invalidate_keys_list
+
+    await invalidate_keys_list(session, billing_user_id)
 
     new_dev = tariff.get("device_limit")
     new_trf = tariff.get("traffic_limit")

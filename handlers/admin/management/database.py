@@ -35,6 +35,8 @@ from .keyboard import AdminPanelCallback, build_back_to_db_menu, build_database_
 
 DOCKER_POSTGRES_CONTAINER = "solobot-postgres"
 
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
 
 def sync_restore_database(
     tmp_path: str,
@@ -238,6 +240,17 @@ async def restore_database(message: Message, state: FSMContext, bot: Bot):
         await message.answer("❌ Пожалуйста, отправьте файл с расширением .sql.")
         return
 
+    if document.file_size and document.file_size > TELEGRAM_DOWNLOAD_LIMIT:
+        size_mb = document.file_size / (1024 * 1024)
+        await message.answer(
+            "❌ Файл слишком большой для восстановления через бота: "
+            f"{size_mb:.1f} МБ при лимите Telegram 20 МБ.\n\n"
+            "Telegram не отдаёт ботам файлы больше 20 МБ. Варианты:\n"
+            "• выгрузить дамп в сжатом формате (custom/gzip) — он меньше;\n"
+            "• восстановить базу на сервере напрямую через <code>psql</code>/<code>pg_restore</code>.",
+        )
+        return
+
     try:
         with NamedTemporaryFile(delete=False, suffix=".sql") as tmp_file:
             tmp_path = tmp_file.name
@@ -272,6 +285,13 @@ async def restore_database(message: Message, state: FSMContext, bot: Bot):
         sys.exit(0)
 
     except Exception as e:
+        if "file is too big" in str(e).lower():
+            logger.error("[Restore] Файл превышает лимит Telegram 20 МБ")
+            await message.answer(
+                "❌ Telegram не отдаёт боту файлы больше 20 МБ. "
+                "Выгрузите дамп в сжатом формате или восстановите базу на сервере напрямую.",
+            )
+            return
         logger.exception(f"[Restore] Непредвиденная ошибка: {e}")
         await message.answer(
             f"❌ Произошла ошибка:\n<pre>{traceback.format_exc()}</pre>",

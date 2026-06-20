@@ -4,8 +4,10 @@ from aiogram import F, Router, types
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Gift, GiftUsage
+from database.models import Gift, GiftUsage, Tariff
 from filters.admin import IsAdminFilter
+from handlers.texts import get_site_gift_link
+from services.gifts import format_gift_limits_display, format_gift_recipient_display
 
 from .keyboard import (
     AdminUserEditorCallback,
@@ -51,20 +53,51 @@ async def show_gifts_list(message: types.Message, session: AsyncSession, tg_id: 
     usages_stmt = select(GiftUsage).where(GiftUsage.gift_id.in_(gift_ids))
     usages_result = await session.execute(usages_stmt)
     usages = usages_result.scalars().all()
-    usage_map = {u.gift_id: u.tg_id for u in usages}
+    usages_by_gift: dict[str, list[GiftUsage]] = {gid: [] for gid in gift_ids}
+    for usage in usages:
+        usages_by_gift.setdefault(usage.gift_id, []).append(usage)
+
+    tariff_ids = {g.tariff_id for g in page_gifts if g.tariff_id}
+    tariffs_by_id: dict[int, Tariff] = {}
+    if tariff_ids:
+        tariffs_result = await session.execute(select(Tariff).where(Tariff.id.in_(tariff_ids)))
+        tariffs_by_id = {t.id: t for t in tariffs_result.scalars().all()}
 
     lines = [f"🎁 <b>Подарки пользователя</b> <code>{tg_id}</code>\n"]
 
     for i, gift in enumerate(page_gifts, start=start_idx + 1):
-        if gift.is_used:
-            used_by = usage_map.get(gift.gift_id)
-            status = f"✅ Использован: <code>{used_by}</code>" if used_by else "✅ Использован"
+        gift_usages = usages_by_gift.get(gift.gift_id, [])
+        if gift.is_used or gift_usages:
+            recipient = await format_gift_recipient_display(
+                session,
+                gift,
+                gift_usages,
+                detailed=True,
+            )
+            status = f"✅ Использован: {recipient}"
         else:
             status = "⏳ Не использован"
 
         created_str = gift.created_at.replace(tzinfo=pytz.UTC).astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+        site_link = get_site_gift_link(gift.gift_id)
+        tg_link = gift.gift_link or site_link
 
-        lines.append(f"\n<b>{i}.🎁 </b> {gift.selected_months} мес.\n   📅 Создан: {created_str}\n   {status}")
+        tariff = tariffs_by_id.get(gift.tariff_id) if gift.tariff_id else None
+        tariff_dict = None
+        if tariff:
+            tariff_dict = {
+                "device_limit": tariff.device_limit,
+                "traffic_limit": tariff.traffic_limit,
+            }
+        limits = await format_gift_limits_display(session, gift, tariff_dict)
+
+        lines.append(
+            f"\n<b>{i}.🎁 </b> {gift.selected_months} мес.\n"
+            f"   📅 Создан: {created_str}\n"
+            f"   {status}\n"
+            f"   📱 Лимиты: {limits}\n"
+            f"   🌐 <a href=\"{site_link}\">Сайт</a> • 🤖 <a href=\"{tg_link}\">Telegram</a>"
+        )
 
     lines.append("\n\n<i>Нажмите кнопку для удаления:</i>")
 

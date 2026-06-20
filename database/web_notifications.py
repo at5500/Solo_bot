@@ -110,6 +110,53 @@ async def mark_all_read_for_identity(
     return result.rowcount
 
 
+async def mark_one_read_for_identity(
+    session: AsyncSession,
+    identity_id: str,
+    notification_id: str,
+) -> bool:
+    """Mark single notification as read. Returns True if updated."""
+    result = await session.execute(
+        update(WebNotification)
+        .where(
+            WebNotification.identity_id == identity_id,
+            WebNotification.id == notification_id,
+        )
+        .values(read=True)
+    )
+    return (result.rowcount or 0) > 0
+
+
+async def delete_one_for_identity(
+    session: AsyncSession,
+    identity_id: str,
+    notification_id: str,
+) -> bool:
+    """Delete single notification owned by identity. Returns True if deleted."""
+    from sqlalchemy import delete as sql_delete
+
+    result = await session.execute(
+        sql_delete(WebNotification)
+        .where(
+            WebNotification.identity_id == identity_id,
+            WebNotification.id == notification_id,
+        )
+    )
+    return (result.rowcount or 0) > 0
+
+
+async def delete_all_for_identity(
+    session: AsyncSession,
+    identity_id: str,
+) -> int:
+    from sqlalchemy import delete as sql_delete
+
+    result = await session.execute(
+        sql_delete(WebNotification).where(WebNotification.identity_id == identity_id)
+    )
+    return result.rowcount or 0
+
+
 async def resolve_identity_id_by_tg_id(
     session: AsyncSession,
     tg_id: int,
@@ -224,13 +271,18 @@ async def notify_web(
                 subs = await get_push_subscriptions_by_identity(session, identity_id)
                 if subs:
                     sub_infos = [{"endpoint": s.endpoint, "keys": s.keys_json} for s in subs]
-                    sent = await send_push_to_many(
+                    sent, dead = await send_push_to_many(
                         sub_infos,
                         title=resolved_title,
                         body=resolved_message,
                         url="/dashboard/notifications",
                     )
-                    logger.debug("[notify_web] push sent to {}/{} subscriptions", sent, len(sub_infos))
+                    for endpoint in dead:
+                        await delete_push_subscription_by_endpoint(session, endpoint)
+                    logger.debug(
+                        "[notify_web] push sent to {}/{} subscriptions, removed {} dead",
+                        sent, len(sub_infos), len(dead),
+                    )
         except Exception as push_err:
             logger.warning("[notify_web] push delivery failed: {}", push_err)
 

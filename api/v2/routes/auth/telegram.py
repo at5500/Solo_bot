@@ -109,14 +109,8 @@ class LoginTelegramOIDCRequest(BaseModel):
     code_verifier: str = PydanticField(default="", description="PKCE code_verifier")
 
 
-@router.post("/login-telegram-oidc", response_model=LoginResponse)
-async def login_telegram_oidc(
-    body: LoginTelegramOIDCRequest,
-    request: Request,
-    response: Response,
-    session: AsyncSession = Depends(get_session),
-):
-    """Вход через Telegram OIDC (authorization code flow). Обменивает code на id_token, верифицирует JWT."""
+async def _resolve_tg_id_from_oidc_code(body: LoginTelegramOIDCRequest) -> int:
+    """Обменивает authorization code на id_token и возвращает Telegram user id."""
     import base64
 
     import aiohttp
@@ -155,8 +149,8 @@ async def login_telegram_oidc(
             jwks_data = await resp.json()
 
     try:
-        signing_key = pyjwt.PyJWKClient.__new__(pyjwt.PyJWKClient)
         from jwt.api_jwk import PyJWKSet
+
         jwk_set = PyJWKSet.from_dict(jwks_data)
         unverified_header = pyjwt.get_unverified_header(id_token)
         kid = unverified_header.get("kid")
@@ -176,12 +170,15 @@ async def login_telegram_oidc(
             issuer="https://oauth.telegram.org",
         )
     except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="ID токен истёк")
+        raise HTTPException(status_code=401, detail="ID токен истёк") from None
     except pyjwt.InvalidTokenError as exc:
         logger.warning("[Auth] Telegram OIDC JWT invalid: {}", exc)
-        raise HTTPException(status_code=401, detail="Невалидный ID токен")
+        raise HTTPException(status_code=401, detail="Невалидный ID токен") from exc
 
-    logger.info("[Auth] Telegram OIDC claims: {}", {k: v for k, v in claims.items() if k not in ("iat", "exp", "iss", "aud")})
+    logger.info(
+        "[Auth] Telegram OIDC claims: {}",
+        {k: v for k, v in claims.items() if k not in ("iat", "exp", "iss", "aud")},
+    )
 
     tg_id = claims.get("id") or claims.get("telegram_id")
     if not tg_id:
@@ -193,6 +190,18 @@ async def login_telegram_oidc(
         raise HTTPException(status_code=401, detail="Не удалось определить пользователя") from None
     if tg_id_int <= 0 or tg_id_int > 2**53:
         raise HTTPException(status_code=401, detail="Не удалось определить пользователя")
+    return tg_id_int
+
+
+@router.post("/login-telegram-oidc", response_model=LoginResponse)
+async def login_telegram_oidc(
+    body: LoginTelegramOIDCRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+):
+    """Вход через Telegram OIDC (authorization code flow). Обменивает code на id_token, верифицирует JWT."""
+    tg_id_int = await _resolve_tg_id_from_oidc_code(body)
 
     identity = await idb.get_or_create_identity_for_tg(session, tg_id_int)
     await bind_identity_actor(request, session, identity)
@@ -205,12 +214,42 @@ async def login_telegram_oidc(
     logger.info(
         "[Auth] Login success: identity={}, tg_id={}, ip={}, method=telegram_oidc",
         identity.id,
-        tg_id,
+        tg_id_int,
         _client_ip(request),
     )
     set_auth_cookie(response, token, request)
     set_is_admin_cookie(response, identity, request)
     return build_login_response(identity)
+
+
+@router.post("/link-telegram-oidc", response_model=IdentityResponse)
+async def link_telegram_oidc(
+    body: LoginTelegramOIDCRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Привязывает Telegram к текущей identity через OIDC."""
+    if identity.tg_id is not None:
+        raise HTTPException(status_code=409, detail="Telegram уже привязан к этому аккаунту")
+
+    tg_id_int = await _resolve_tg_id_from_oidc_code(body)
+    result = await idb.attach_telegram(session, identity.id, tg_id_int)
+    if not result:
+        raise HTTPException(
+            status_code=409,
+            detail="Этот Telegram уже привязан к другой идентичности",
+        )
+    await bind_identity_actor(request, session, result)
+    set_is_admin_cookie(response, result, request)
+    logger.info(
+        "[Auth] Telegram linked: identity={}, tg_id={}, ip={}, method=telegram_oidc_link",
+        result.id,
+        tg_id_int,
+        _client_ip(request),
+    )
+    return IdentityResponse.model_validate(result)
 
 
 @router.post("/link-telegram", response_model=IdentityResponse)
@@ -222,6 +261,8 @@ async def link_telegram(
     identity=Depends(verify_identity_token),
 ):
     """Привязывает Telegram к текущей идентичности. Требуется подпись от Telegram Login Widget (доказательство владения аккаунтом)."""
+    if identity.tg_id is not None:
+        raise HTTPException(status_code=409, detail="Telegram уже привязан к этому аккаунту")
     payload = body.model_dump(mode="json")
     if not verify_telegram_login(payload, API_TOKEN, max_age_seconds=TELEGRAM_LOGIN_MAX_AGE):
         raise HTTPException(status_code=401, detail="Неверная подпись или устаревшие данные от Telegram")

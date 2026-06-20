@@ -7,35 +7,23 @@ from core.settings.tariffs_config import normalize_tariff_config
 from .tariff_display import GB
 
 
-def calculate_config_price(
-    tariff: dict[str, Any],
-    selected_device_limit: int | None = None,
-    selected_traffic_gb: int | None = None,
-) -> int:
-    """Рассчитывает цену тарифа с учётом выбранных лимитов."""
+def _parse_int_options(raw: Any) -> list[int]:
+    values: list[int] = []
+    if isinstance(raw, list):
+        for value in raw:
+            try:
+                values.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    return values
+
+
+def resolve_config_base_limits(tariff: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Базовые лимиты тарифа: (device_limit, traffic_gb). Это нижняя граница конфигуратора."""
     cfg = normalize_tariff_config(tariff)
 
-    base_price = int(tariff.get("price_rub") or 0)
-
-    raw_device_options = tariff.get("device_options")
-    raw_traffic_options = tariff.get("traffic_options_gb")
-    raw_device_options = raw_device_options if isinstance(raw_device_options, list) else []
-    raw_traffic_options = raw_traffic_options if isinstance(raw_traffic_options, list) else []
-
-    device_values: list[int] = []
-    for value in raw_device_options:
-        try:
-            device_values.append(int(value))
-        except (TypeError, ValueError):
-            continue
-
-    traffic_values: list[int] = []
-    for value in raw_traffic_options:
-        try:
-            traffic_values.append(int(value))
-        except (TypeError, ValueError):
-            continue
-
+    device_values = _parse_int_options(tariff.get("device_options"))
+    traffic_values = _parse_int_options(tariff.get("traffic_options_gb"))
     positive_device_values = [v for v in device_values if v > 0]
     positive_traffic_values = [v for v in traffic_values if v > 0]
 
@@ -64,6 +52,43 @@ def calculate_config_price(
             elif traffic_values:
                 base_traffic_gb = traffic_values[0]
     base_traffic_gb = int(base_traffic_gb) if base_traffic_gb is not None else None
+
+    return base_device_limit, base_traffic_gb
+
+
+def filter_config_options(tariff: dict[str, Any]) -> tuple[list[int], list[int]]:
+    """Опции конфигуратора не ниже базы тарифа; нулевые значения (безлимит) сохраняются."""
+    base_device_limit, base_traffic_gb = resolve_config_base_limits(tariff)
+    device_values = _parse_int_options(tariff.get("device_options"))
+    traffic_values = _parse_int_options(tariff.get("traffic_options_gb"))
+    devices = [
+        v for v in device_values
+        if v <= 0 or base_device_limit is None or base_device_limit <= 0 or v >= base_device_limit
+    ]
+    traffic = [
+        v for v in traffic_values
+        if v <= 0 or base_traffic_gb is None or base_traffic_gb <= 0 or v >= base_traffic_gb
+    ]
+    return devices, traffic
+
+
+def calculate_config_price(
+    tariff: dict[str, Any],
+    selected_device_limit: int | None = None,
+    selected_traffic_gb: int | None = None,
+) -> int:
+    """Рассчитывает цену тарифа с учётом выбранных лимитов."""
+    cfg = normalize_tariff_config(tariff)
+
+    base_price = int(tariff.get("price_rub") or 0)
+
+    device_values = _parse_int_options(tariff.get("device_options"))
+    traffic_values = _parse_int_options(tariff.get("traffic_options_gb"))
+
+    positive_device_values = [v for v in device_values if v > 0]
+    positive_traffic_values = [v for v in traffic_values if v > 0]
+
+    base_device_limit, base_traffic_gb = resolve_config_base_limits(tariff)
 
     device_overrides = cfg.get("device_price_overrides") or tariff.get("device_overrides") or {}
     traffic_overrides = cfg.get("traffic_price_overrides") or tariff.get("traffic_overrides") or {}

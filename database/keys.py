@@ -134,6 +134,23 @@ async def store_key(
         if asyncio.iscoroutine(add_result):
             await add_result
         logger.info(f"[Store Key] Ключ создан: user_id={uid}, client_id={client_id}, server_id={server_id}")
+        try:
+            from database.subscription_events import record_subscription_event
+
+            await record_subscription_event(
+                session,
+                event_type="created",
+                user_id=uid,
+                tg_id=u.tg_id,
+                client_id=client_id,
+                tariff_id=tariff_id,
+                server_id=server_id,
+                price_rub=float(selected_price_rub) if selected_price_rub is not None else None,
+                expiry_time=expiry_time,
+                source="bot",
+            )
+        except Exception:
+            pass
 
     invalidate_user_snapshot(uid)
     if u.tg_id is not None:
@@ -407,14 +424,43 @@ async def count_active_keys_for_user(session: AsyncSession, user_id: int) -> int
     return int(result.scalar() or 0)
 
 
+async def _log_key_deletions(session: AsyncSession, rows, client_ids) -> None:
+    """Пишет событие expired/deleted в журнал ДО удаления ключа (иначе данные теряются)."""
+    try:
+        from database.subscription_events import record_subscription_event
+
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        for r, cid in zip(rows, client_ids):
+            exp = getattr(r, "expiry_time", None)
+            was_expired = bool(exp is not None and exp < now_ms)
+            await record_subscription_event(
+                session,
+                event_type="expired" if was_expired else "deleted",
+                user_id=getattr(r, "user_id", None),
+                tg_id=getattr(r, "tg_id", None),
+                client_id=cid,
+                tariff_id=getattr(r, "tariff_id", None),
+                server_id=getattr(r, "server_id", None),
+                expiry_time=exp,
+                was_expired=was_expired,
+                source="cron",
+            )
+    except Exception:
+        pass
+
+
 async def delete_key(session: AsyncSession, identifier: int | str):
     legacy_for_cache = None
     email_for_cache = None
     if isinstance(identifier, str):
-        res = await session.execute(select(Key.user_id, Key.email).where(Key.client_id == identifier).limit(1))
-        row = res.first()
-        if row:
-            legacy_for_cache, email_for_cache = row[0], row[1]
+        res = await session.execute(
+            select(Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time)
+            .where(Key.client_id == identifier)
+        )
+        deleted_rows = res.all()
+        if deleted_rows:
+            legacy_for_cache, email_for_cache = deleted_rows[0].user_id, deleted_rows[0].email
+        await _log_key_deletions(session, deleted_rows, [identifier] * len(deleted_rows))
         await cache_delete(cache_key("key_email", identifier))
         await session.execute(delete(Key).where(Key.client_id == identifier))
     else:
@@ -423,6 +469,12 @@ async def delete_key(session: AsyncSession, identifier: int | str):
             logger.info(f"Ключ не удалён: пользователь {identifier} не найден")
             return
         legacy_for_cache = u.id
+        res = await session.execute(
+            select(Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time, Key.client_id)
+            .where(Key.user_id == u.id)
+        )
+        deleted_rows = res.all()
+        await _log_key_deletions(session, deleted_rows, [getattr(r, "client_id", None) for r in deleted_rows])
         await session.execute(delete(Key).where(Key.user_id == u.id))
     if legacy_for_cache is not None:
         invalidate_user_snapshot(legacy_for_cache)
@@ -433,9 +485,31 @@ async def delete_key(session: AsyncSession, identifier: int | str):
 
 
 async def update_key_expiry(session: AsyncSession, client_id: str, new_expiry_time: int):
+    try:
+        ctx = (await session.execute(
+            select(Key.user_id, Key.tg_id, Key.tariff_id, Key.server_id).where(Key.client_id == client_id).limit(1)
+        )).first()
+    except Exception:
+        ctx = None
     await session.execute(update(Key).where(Key.client_id == client_id).values(expiry_time=new_expiry_time))
     await invalidate_key_details_by_client_id(session, client_id)
     logger.info(f"Срок действия ключа {client_id} обновлён до {new_expiry_time}")
+    try:
+        from database.subscription_events import record_subscription_event
+
+        await record_subscription_event(
+            session,
+            event_type="renewed",
+            user_id=ctx.user_id if ctx else None,
+            tg_id=ctx.tg_id if ctx else None,
+            client_id=client_id,
+            tariff_id=ctx.tariff_id if ctx else None,
+            server_id=ctx.server_id if ctx else None,
+            expiry_time=new_expiry_time,
+            source="bot",
+        )
+    except Exception:
+        pass
 
 
 async def get_client_id_by_email(session: AsyncSession, email: str):

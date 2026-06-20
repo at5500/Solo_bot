@@ -272,6 +272,16 @@ async def handle_key_extension(
         if tariff:
             key_subgroup = tariff.get("subgroup_title")
 
+        reserved = await create_coupon_usage(session, coupon.id, tg_id)
+        if not reserved:
+            await edit_or_send_message(
+                target_message=callback_query.message,
+                text="❌ Вы уже активировали этот купон.",
+            )
+            await state.clear()
+            return
+        await update_coupon_usage_count(session, coupon.id)
+
         await release_session_early(session)
         await renew_key_in_cluster(
             cluster_id=key.server_id,
@@ -287,8 +297,6 @@ async def handle_key_extension(
             plan=key.tariff_id,
         )
         await update_key_expiry(session, client_id, new_expiry)
-        await update_coupon_usage_count(session, coupon.id)
-        await create_coupon_usage(session, coupon.id, tg_id)
 
         alias = key.alias or key.email
         expiry_date = datetime.fromtimestamp(new_expiry / 1000, tz=pytz.timezone("Europe/Moscow")).strftime(
@@ -301,7 +309,10 @@ async def handle_key_extension(
         await state.clear()
     except Exception as e:
         logger.error(f"Ошибка при продлении ключа: {e}")
-        await callback_query.message.edit_text("❌ Ошибка при активации купона.")
+        await edit_or_send_message(
+            target_message=callback_query.message,
+            text="❌ Ошибка при активации купона.",
+        )
         await state.clear()
 
 

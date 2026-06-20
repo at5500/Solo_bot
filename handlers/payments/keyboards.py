@@ -94,3 +94,11 @@ def back_keyboard(back_cb: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text=BACK, callback_data=back_cb))
     return b.as_markup()
+
+
+def balance_fallback_kb() -> InlineKeyboardMarkup:
+    from handlers.buttons import BALANCE
+
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text=BALANCE, callback_data="balance"))
+    return b.as_markup()

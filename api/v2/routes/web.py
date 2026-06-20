@@ -31,10 +31,13 @@ from database.models import (
     WebFlowEvent,
     WebPage,
     WebPageVariant,
+    WebPageView,
     WebPageVariantBlock,
     WebTheme as WebThemeModel,
 )
 from logger import logger
+
+from api.v2.routes._data_uri_migration import migrate_json_data_uris
 
 
 UPLOAD_DIR = Path("static/web_uploads")
@@ -92,29 +95,132 @@ def _optimize_image_bytes(data: bytes, ext: str) -> bytes:
         return data
 
 
-def _sanitize_svg(data: bytes) -> bytes:
-    import re as _re
+_SVG_NS = "http://www.w3.org/2000/svg"
+_XLINK_NS = "http://www.w3.org/1999/xlink"
+_SVG_ALLOWED_TAGS = frozenset({
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+    "text", "tspan", "textpath", "defs", "lineargradient", "radialgradient", "stop",
+    "clippath", "mask", "pattern", "use", "symbol", "title", "desc", "marker", "metadata",
+    "filter", "fegaussianblur", "feoffset", "feblend", "femerge", "femergenode",
+    "fecolormatrix", "fecomposite", "feflood", "femorphology", "fedropshadow",
+    "fespecularlighting", "fediffuselighting", "fepointlight", "fedistantlight",
+    "fetile", "feturbulence", "fedisplacementmap", "fecomponenttransfer",
+    "fefuncr", "fefuncg", "fefuncb", "fefunca", "switch",
+})
+_SVG_BAD_URL_SCHEMES = ("javascript:", "vbscript:", "data:text/html")
 
+
+def _svg_local(name: str) -> str:
+    return str(name).rsplit("}", 1)[-1].lower()
+
+
+def _scrub_svg_element(elem) -> None:
+    for attr in list(elem.attrib.keys()):
+        local = _svg_local(attr)
+        value = elem.attrib.get(attr) or ""
+        if local.startswith("on"):
+            del elem.attrib[attr]
+            continue
+        if local == "href":
+            clean = re.sub(r"\s", "", value).lower()
+            if any(clean.startswith(scheme.replace(" ", "")) for scheme in _SVG_BAD_URL_SCHEMES):
+                del elem.attrib[attr]
+                continue
+        if local == "style":
+            low = value.lower()
+            if "javascript:" in low or "expression(" in low or "@import" in low or "behavior:" in low:
+                del elem.attrib[attr]
+    for child in list(elem):
+        if _svg_local(child.tag) not in _SVG_ALLOWED_TAGS:
+            elem.remove(child)
+        else:
+            _scrub_svg_element(child)
+
+
+def _sanitize_svg_xml(data: bytes) -> bytes:
+    import xml.etree.ElementTree as ET
+
+    from defusedxml.ElementTree import fromstring
+
+    ET.register_namespace("", _SVG_NS)
+    ET.register_namespace("xlink", _XLINK_NS)
+    root = fromstring(data)
+    if _svg_local(root.tag) != "svg":
+        raise ValueError("not an svg root")
+    _scrub_svg_element(root)
+    return ET.tostring(root, encoding="utf-8")
+
+
+def _sanitize_svg_regex(data: bytes) -> bytes:
     text = data.decode("utf-8", errors="replace")
-    text = _re.sub(r"<script[^>]*>.*?</script>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"<style[^>]*>.*?</style>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"\bon\w+\s*=\s*[\"'][^\"']*[\"']", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"\bon\w+\s*=\s*\S+", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*javascript:[^\"']*[\"']", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*data:\s*text/html[^\"']*[\"']", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*vbscript:[^\"']*[\"']", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"<foreignObject[^>]*>.*?</foreignObject>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"<iframe[^>]*>.*?</iframe>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
-    text = _re.sub(r"<embed[^>]*>", "", text, flags=_re.IGNORECASE)
-    text = _re.sub(r"<object[^>]*>.*?</object>", "", text, flags=_re.DOTALL | _re.IGNORECASE)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"\bon\w+\s*=\s*[\"'][^\"']*[\"']", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bon\w+\s*=\s*\S+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*javascript:[^\"']*[\"']", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*data:\s*text/html[^\"']*[\"']", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:href|xlink:href)\s*=\s*[\"']\s*vbscript:[^\"']*[\"']", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<foreignObject[^>]*>.*?</foreignObject>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<iframe[^>]*>.*?</iframe>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<embed[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<object[^>]*>.*?</object>", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.encode("utf-8")
+
+
+def _sanitize_svg(data: bytes) -> bytes:
+    try:
+        return _sanitize_svg_xml(data)
+    except Exception:
+        return _sanitize_svg_regex(data)
 
 
 router = APIRouter(tags=["Web"])
 
 
+async def _audit_web_admin(
+    session: AsyncSession,
+    identity,
+    action: str,
+    *,
+    entity_type: str | None = None,
+    entity_id: str | int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Пишет действие админа над сайтом в журнал аудита (event_type=web_admin_action)."""
+    try:
+        from audit import safe_record_audit_event
+
+        await safe_record_audit_event(
+            session,
+            event_type="web_admin_action",
+            channel="api",
+            path_or_handler=action,
+            actor_identity_id=getattr(identity, "id", None),
+            actor_tg_id=getattr(identity, "tg_id", None),
+            entity_type=entity_type,
+            entity_id=entity_id,
+            metadata=metadata,
+        )
+    except Exception:
+        pass
+
+
 class WebPagesListResponse(BaseModel):
     slugs: list[str]
+
+
+class WebPageCreateBody(BaseModel):
+    slug: str
+    title: str | None = None
+
+
+CORE_PAGE_SLUGS = frozenset({
+    "landing",
+    "dashboard",
+    "login",
+    "checkout",
+    "tariffs",
+})
 
 
 KNOWN_PAGE_SLUGS = [
@@ -171,10 +277,74 @@ async def list_web_pages(
     return WebPagesListResponse(slugs=slugs)
 
 
+@router.post("/api/web/pages", response_model=WebPagesListResponse)
+async def create_web_page(
+    body: WebPageCreateBody,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_admin),
+):
+    slug = (body.slug or "").strip().lower()
+    if not _SLUG_RE.match(slug) or len(slug) > 64:
+        raise HTTPException(status_code=400, detail="invalid_slug")
+    existing = await session.execute(select(WebPage).where(WebPage.slug == slug))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="slug_already_exists")
+    title = (body.title or slug).strip()[:255] or slug
+    page = WebPage(slug=slug, title=title)
+    session.add(page)
+    await session.flush()
+    variant = WebPageVariant(
+        page_slug=slug,
+        variant_key=DEFAULT_VARIANT_KEY,
+        name=DEFAULT_VARIANT_NAME,
+        is_active=True,
+        theme_tokens={},
+    )
+    session.add(variant)
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "page.create", entity_type="page", entity_id=slug)
+    result = await session.execute(select(WebPage.slug).order_by(WebPage.slug))
+    from_db = {row[0] for row in result.fetchall()}
+    slugs = sorted(from_db | set(KNOWN_PAGE_SLUGS))
+    return WebPagesListResponse(slugs=slugs)
+
+
+@router.delete("/api/web/pages/{slug}", response_model=WebPagesListResponse)
+async def delete_web_page(
+    slug: str,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_admin),
+):
+    if slug in CORE_PAGE_SLUGS:
+        raise HTTPException(status_code=403, detail="core_page_protected")
+    page_q = await session.execute(select(WebPage).where(WebPage.slug == slug))
+    page = page_q.scalar_one_or_none()
+    if page is None:
+        raise HTTPException(status_code=404, detail="page_not_found")
+    variants_q = await session.execute(select(WebPageVariant.id).where(WebPageVariant.page_slug == slug))
+    variant_ids = [row[0] for row in variants_q.fetchall()]
+    if variant_ids:
+        await session.execute(delete(WebPageVariantBlock).where(WebPageVariantBlock.variant_id.in_(variant_ids)))
+        await session.execute(delete(WebPageVariant).where(WebPageVariant.page_slug == slug))
+    await session.execute(delete(WebBlock).where(WebBlock.page_slug == slug))
+    await session.execute(delete(WebThemeModel).where(WebThemeModel.page_slug == slug))
+    await session.delete(page)
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "page.delete", entity_type="page", entity_id=slug)
+    result = await session.execute(select(WebPage.slug).order_by(WebPage.slug))
+    from_db = {row[0] for row in result.fetchall()}
+    slugs = sorted(from_db | set(KNOWN_PAGE_SLUGS))
+    return WebPagesListResponse(slugs=slugs)
+
+
 async def get_or_create_page(session: AsyncSession, slug: str) -> WebPage:
     result = await session.execute(select(WebPage).where(WebPage.slug == slug))
     page = result.scalar_one_or_none()
     if page is None:
+        if slug not in KNOWN_PAGE_SLUGS:
+            raise HTTPException(status_code=404, detail="page_not_found")
         page = WebPage(slug=slug, title=slug)
         session.add(page)
         await session.flush()
@@ -241,17 +411,24 @@ async def _resolve_variant(
     session: AsyncSession,
     slug: str,
     variant_key: str | None,
+    ab_bucket: str | None = None,
 ) -> tuple[WebPageVariant, list[WebPageVariant]]:
     variants = await _ensure_page_variants(session, slug)
     desired_key = _normalize_variant_key(variant_key) if variant_key else ""
-    current = None
     if desired_key:
         current = next((variant for variant in variants if variant.variant_key == desired_key), None)
         if current is None:
             raise HTTPException(404, "Вариант страницы не найден")
-    else:
-        current = next((variant for variant in variants if variant.is_active), variants[0])
-    return current, variants
+        return current, variants
+    active = next((variant for variant in variants if variant.is_active), variants[0])
+    bucket = (ab_bucket or "").strip().lower()
+    if bucket and len(bucket) == 1 and bucket.isalpha() and len(variants) > 1:
+        idx = ord(bucket) - ord("a")
+        if idx > 0:
+            others = [variant for variant in variants if not variant.is_active]
+            if others:
+                return others[min(idx - 1, len(others) - 1)], variants
+    return active, variants
 
 
 async def _get_variant_blocks(session: AsyncSession, variant_id: str) -> list[WebBlockResponse]:
@@ -314,11 +491,12 @@ def _generate_variant_key(existing_keys: set[str], requested_key: str | None, re
 async def get_web_page(
     slug: str,
     variant: str | None = Query(default=None),
+    ab: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ):
     if not slug or len(slug) > 64 or not _SLUG_RE.match(slug):
         raise HTTPException(400, "Некорректный slug страницы")
-    current, variants = await _resolve_variant(session, slug, variant)
+    current, variants = await _resolve_variant(session, slug, variant, ab_bucket=ab)
     return await _build_page_response(session, slug, current, variants)
 
 
@@ -351,14 +529,65 @@ async def update_web_page_theme(
     if not slug or len(slug) > 64 or not _SLUG_RE.match(slug):
         raise HTTPException(400, "Некорректный slug страницы")
     current, _ = await _resolve_variant(session, slug, variant)
-    current.theme_tokens = body.tokens
+    cleaned_tokens, replaced = migrate_json_data_uris(body.tokens)
+    if replaced:
+        logger.info("[web] theme PUT slug={} replaced {} data: URI(s)", slug, replaced)
+    current.theme_tokens = cleaned_tokens
     await session.flush()
     await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "page.theme.update", entity_type="page", entity_id=slug,
+                           metadata={"variant": current.variant_key})
     return WebPageThemeResponse(
         slug=slug,
         variant_key=current.variant_key,
         tokens=dict(current.theme_tokens or {}),
     )
+
+
+class PwaIconUpdate(BaseModel):
+    url: str | None = None
+
+
+def _valid_pwa_icon_url(raw: str | None) -> str:
+    url = (raw or "").strip()
+    if not url:
+        return ""
+    prefix = "/api/web/uploads/"
+    if not url.startswith(prefix) or len(url) > 255 or ".." in url or "\\" in url:
+        raise HTTPException(400, "Недопустимый адрес иконки")
+    filename = url[len(prefix):]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+        raise HTTPException(400, "Недопустимый адрес иконки")
+    return url
+
+
+@router.get("/api/web/pwa-icon")
+async def get_pwa_icon(session: AsyncSession = Depends(get_session)):
+    current, _ = await _resolve_variant(session, "landing", None)
+    tokens = dict(current.theme_tokens or {})
+    url = tokens.get("pwaIconUrl")
+    return {"url": url if isinstance(url, str) and url.strip() else None}
+
+
+@router.put("/api/web/pwa-icon")
+async def set_pwa_icon(
+    body: PwaIconUpdate,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_admin),
+):
+    url = _valid_pwa_icon_url(body.url)
+    current, _ = await _resolve_variant(session, "landing", None)
+    tokens = dict(current.theme_tokens or {})
+    if url:
+        tokens["pwaIconUrl"] = url
+    else:
+        tokens.pop("pwaIconUrl", None)
+    current.theme_tokens = tokens
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "pwa_icon.set", entity_type="setting", entity_id="pwaIconUrl",
+                           metadata={"set": bool(url)})
+    return {"url": url or None}
 
 
 @router.put("/api/web/pages/{slug}")
@@ -373,21 +602,31 @@ async def update_web_page(
     current, _ = await _resolve_variant(session, slug, variant)
     await session.execute(delete(WebPageVariantBlock).where(WebPageVariantBlock.variant_id == current.id))
 
+    total_replaced = 0
     for block in body.blocks:
+        cleaned_data, replaced = migrate_json_data_uris(block.data)
+        total_replaced += replaced
         session.add(
             WebPageVariantBlock(
                 variant_id=current.id,
                 order=block.order,
                 type=block.type,
-                data=block.data,
+                data=cleaned_data,
             )
         )
 
     if body.theme is not None:
-        current.theme_tokens = body.theme.tokens
+        cleaned_theme, theme_replaced = migrate_json_data_uris(body.theme.tokens)
+        total_replaced += theme_replaced
+        current.theme_tokens = cleaned_theme
+
+    if total_replaced:
+        logger.info("[web] page PUT slug={} replaced {} data: URI(s)", slug, total_replaced)
 
     await session.flush()
     await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "page.update", entity_type="page", entity_id=slug,
+                           metadata={"variant": current.variant_key, "blocks": len(body.blocks)})
     refreshed_variants = await _list_variants(session, slug)
     refreshed_current = next((item for item in refreshed_variants if item.id == current.id), current)
     if minimal:
@@ -460,6 +699,8 @@ async def create_web_page_variant(
         )
     await session.flush()
     await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "variant.create", entity_type="page", entity_id=slug,
+                           metadata={"variant": variant_key})
 
     refreshed = await _list_variants(session, slug)
     return WebPageVariantsResponse(
@@ -489,6 +730,8 @@ async def update_web_page_variant(
         variants = await _list_variants(session, slug)
 
     await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "variant.update", entity_type="page", entity_id=slug,
+                           metadata={"variant": current.variant_key, "make_active": body.make_active is True})
     active = next((item for item in variants if item.is_active), current)
     return WebPageVariantsResponse(
         slug=slug,
@@ -519,6 +762,8 @@ async def delete_web_page_variant(
         replacement_variants = await _list_variants(session, slug)
 
     await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "variant.delete", entity_type="page", entity_id=slug,
+                           metadata={"variant": current.variant_key})
     current_variant_key = replacement.variant_key if replacement is not None else DEFAULT_VARIANT_KEY
     active_variant_key = next(
         (item.variant_key for item in replacement_variants if item.is_active),
@@ -634,6 +879,7 @@ def _build_to_dict(b: WebCustomElementBuild) -> dict:
     }
 
 
+@router.get("/api/web/custom-element-builds")
 @router.get("/custom-element-builds")
 async def list_custom_element_builds(
     session: AsyncSession = Depends(get_session),
@@ -644,6 +890,7 @@ async def list_custom_element_builds(
     return [_build_to_dict(b) for b in builds]
 
 
+@router.post("/api/web/custom-element-builds")
 @router.post("/custom-element-builds")
 async def create_custom_element_build(
     body: CustomElementBuildCreate,
@@ -668,6 +915,7 @@ async def create_custom_element_build(
     return _build_to_dict(build)
 
 
+@router.get("/api/web/custom-element-builds/{build_id}")
 @router.get("/custom-element-builds/{build_id}")
 async def get_custom_element_build(
     build_id: str,
@@ -680,6 +928,7 @@ async def get_custom_element_build(
     return _build_to_dict(build)
 
 
+@router.patch("/api/web/custom-element-builds/{build_id}")
 @router.patch("/custom-element-builds/{build_id}")
 async def update_custom_element_build(
     build_id: str,
@@ -705,6 +954,7 @@ async def update_custom_element_build(
     return _build_to_dict(build)
 
 
+@router.delete("/api/web/custom-element-builds/{build_id}")
 @router.delete("/custom-element-builds/{build_id}")
 async def delete_custom_element_build(
     build_id: str,
@@ -748,6 +998,7 @@ class FlowEventBatch(BaseModel):
     events: list[dict]
 
 
+@router.post("/api/web/analytics/flow-events")
 @router.post("/analytics/flow-events")
 async def ingest_flow_events(
     body: FlowEventBatch,
@@ -755,10 +1006,11 @@ async def ingest_flow_events(
     session: AsyncSession = Depends(get_session),
 ):
     try:
+        from api.v2.routes.auth._common import _client_ip
         from api.v2.routes.auth._fallback_limiter import check_and_increment
         from core.redis_cache import cache_incr_checked
 
-        ip = (request.client.host if request.client else "") or "unknown"
+        ip = _client_ip(request) or "unknown"
         count, redis_ok = await cache_incr_checked(f"analytics_rate:{ip}", 60)
         if not redis_ok:
             count = check_and_increment(f"analytics_rate:{ip}", 60, 60)
@@ -769,13 +1021,18 @@ async def ingest_flow_events(
     except Exception:
         pass
     server_identity = await _identity_from_cookie(session, request)
+    if server_identity is not None and getattr(server_identity, "is_admin", False):
+        return {"ingested": 0}
     server_authenticated = server_identity is not None
+    valid_flows = await _known_flow_ids(session)
     created = 0
     for raw in body.events[:100]:
         flow_id = str(raw.get("flowId", ""))[:64]
         node_id = str(raw.get("nodeId", ""))[:64]
         event_type = str(raw.get("eventType", ""))[:32]
         if not flow_id or not node_id or not event_type:
+            continue
+        if valid_flows and flow_id not in valid_flows:
             continue
         metadata = raw.get("collectedDataSnapshot")
         if isinstance(metadata, dict):
@@ -799,6 +1056,7 @@ async def ingest_flow_events(
     return {"ingested": created}
 
 
+@router.get("/api/web/analytics/flow-funnel/{flow_id}")
 @router.get("/analytics/flow-funnel/{flow_id}")
 async def get_flow_funnel(
     flow_id: str,
@@ -845,6 +1103,513 @@ async def get_flow_funnel(
         node["dropOff"] = round((1 - node["entered"] / prev_entered) * 100, 1) if prev_entered > 0 else 0
 
     return {"flowId": flow_id, "days": days, "funnel": funnel}
+
+
+async def _trackable_page_slugs(session: AsyncSession) -> set[str]:
+    rows = await session.execute(
+        select(WebPageVariant.page_slug)
+        .join(WebPageVariantBlock, WebPageVariantBlock.variant_id == WebPageVariant.id)
+        .distinct()
+    )
+    return {slug for (slug,) in rows.all()} | set(KNOWN_PAGE_SLUGS)
+
+
+async def _known_flow_ids(session: AsyncSession) -> set[str]:
+    rows = await session.execute(select(WebFlow.id))
+    return {fid for (fid,) in rows.all()}
+
+
+class PageViewBatch(BaseModel):
+    views: list[dict]
+
+
+@router.post("/api/web/analytics/page-views")
+@router.post("/analytics/page-views")
+async def ingest_page_views(
+    body: PageViewBatch,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        from api.v2.routes.auth._common import _client_ip
+        from api.v2.routes.auth._fallback_limiter import check_and_increment
+        from core.redis_cache import cache_incr_checked
+
+        ip = _client_ip(request) or "unknown"
+        count, redis_ok = await cache_incr_checked(f"analytics_pv_rate:{ip}", 60)
+        if not redis_ok:
+            count = check_and_increment(f"analytics_pv_rate:{ip}", 60, 120)
+        if count > 120:
+            raise HTTPException(status_code=429, detail="Too many events")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    server_identity = await _identity_from_cookie(session, request)
+    if server_identity is not None and getattr(server_identity, "is_admin", False):
+        return {"ingested": 0}
+    server_authenticated = server_identity is not None
+    valid_slugs = await _trackable_page_slugs(session)
+    created = 0
+    for raw in body.views[:50]:
+        visitor_id = str(raw.get("visitorId", ""))[:36].strip()
+        page_slug = str(raw.get("pageSlug", ""))[:64].strip()
+        if not visitor_id or not page_slug or page_slug not in valid_slugs:
+            continue
+        pv = WebPageView(
+            id=str(uuid.uuid4()),
+            visitor_id=visitor_id,
+            page_slug=page_slug,
+            referrer=(str(raw.get("referrer"))[:255] if raw.get("referrer") else None),
+            utm_source=(str(raw.get("utmSource"))[:64] if raw.get("utmSource") else None),
+            utm_medium=(str(raw.get("utmMedium"))[:64] if raw.get("utmMedium") else None),
+            utm_campaign=(str(raw.get("utmCampaign"))[:64] if raw.get("utmCampaign") else None),
+            device=(str(raw.get("device"))[:16] if raw.get("device") else None),
+            locale=(str(raw.get("locale"))[:8] if raw.get("locale") else None),
+            authenticated=server_authenticated,
+            source=("webapp" if str(raw.get("source") or "").strip().lower() == "webapp" else "web"),
+            ab_variant=(str(raw.get("abVariant"))[:16] if raw.get("abVariant") else None),
+        )
+        session.add(pv)
+        created += 1
+    return {"ingested": created}
+
+
+@router.delete("/api/web/analytics/page-views")
+@router.delete("/analytics/page-views")
+async def reset_analytics_page_views(
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Очищает накопленные просмотры страниц (тестовые/девелоперские данные).
+
+    Удаляет только web_page_views — реальные регистрации/платежи не трогаются.
+    """
+    result = await session.execute(delete(WebPageView))
+    await _audit_web_admin(session, _identity, "analytics.reset", entity_type="analytics", entity_id="page_views",
+                           metadata={"deleted": int(result.rowcount or 0)})
+    return {"deleted": int(result.rowcount or 0)}
+
+
+@router.get("/api/web/analytics/overview")
+@router.get("/analytics/overview")
+async def get_analytics_overview(
+    days: int = Query(default=30, ge=1, le=365),
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    from database.models import (
+        CouponUsage,
+        GiftUsage,
+        Identity,
+        Key,
+        Payment,
+        Referral,
+        Tariff,
+        TrackingSource,
+        User,
+    )
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since_naive = since.replace(tzinfo=None)
+
+    # Внутренние «платежи» (бонусы/ручная выдача) — не реальный доход, исключаем из выручки.
+    internal_systems = ("referral", "cashback", "coupon", "admin")
+    real_income = Payment.payment_system.notin_(internal_systems)
+
+    day_col = func.date_trunc("day", WebPageView.created_at).label("day")
+    daily_rows = (
+        await session.execute(
+            select(
+                day_col,
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .group_by(day_col)
+            .order_by(day_col)
+        )
+    ).all()
+
+    totals_row = (
+        await session.execute(
+            select(
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            ).where(WebPageView.created_at >= since)
+        )
+    ).first()
+
+    source_rows = (
+        await session.execute(
+            select(
+                WebPageView.source,
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .group_by(WebPageView.source)
+        )
+    ).all()
+    src_split = {"webapp": {"views": 0, "visitors": 0}, "web": {"views": 0, "visitors": 0}}
+    for s_row in source_rows:
+        key = "webapp" if (s_row.source == "webapp") else "web"
+        src_split[key]["views"] += int(s_row.views or 0)
+        src_split[key]["visitors"] += int(s_row.visitors or 0)
+
+    daily_src_rows = (
+        await session.execute(
+            select(
+                day_col,
+                WebPageView.source,
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .group_by(day_col, WebPageView.source)
+            .order_by(day_col)
+        )
+    ).all()
+    daily_web: dict[str, dict[str, int]] = {}
+    daily_webapp: dict[str, dict[str, int]] = {}
+    for d_row in daily_src_rows:
+        d_key = d_row.day.strftime("%Y-%m-%d")
+        bucket = daily_webapp if (d_row.source == "webapp") else daily_web
+        cur = bucket.setdefault(d_key, {"views": 0, "visitors": 0})
+        cur["views"] += int(d_row.views or 0)
+        cur["visitors"] += int(d_row.visitors or 0)
+
+    top_pages = (
+        await session.execute(
+            select(
+                WebPageView.page_slug,
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .group_by(WebPageView.page_slug)
+            .order_by(func.count().desc())
+            .limit(10)
+        )
+    ).all()
+
+    referrers = (
+        await session.execute(
+            select(
+                WebPageView.referrer,
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .where(WebPageView.referrer.isnot(None))
+            .group_by(WebPageView.referrer)
+            .order_by(func.count(func.distinct(WebPageView.visitor_id)).desc())
+            .limit(10)
+        )
+    ).all()
+
+    devices = (
+        await session.execute(
+            select(
+                WebPageView.device,
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .group_by(WebPageView.device)
+            .order_by(func.count(func.distinct(WebPageView.visitor_id)).desc())
+        )
+    ).all()
+
+    ab_rows = (
+        await session.execute(
+            select(
+                WebPageView.ab_variant,
+                func.count().label("views"),
+                func.count(func.distinct(WebPageView.visitor_id)).label("visitors"),
+            )
+            .where(WebPageView.created_at >= since)
+            .where(WebPageView.ab_variant.isnot(None))
+            .group_by(WebPageView.ab_variant)
+            .order_by(WebPageView.ab_variant)
+        )
+    ).all()
+    ab_checkout = dict(
+        (
+            await session.execute(
+                select(WebPageView.ab_variant, func.count(func.distinct(WebPageView.visitor_id)))
+                .where(WebPageView.created_at >= since)
+                .where(WebPageView.page_slug == "checkout")
+                .where(WebPageView.ab_variant.isnot(None))
+                .group_by(WebPageView.ab_variant)
+            )
+        ).all()
+    )
+
+    checkout_visitors = (
+        await session.scalar(
+            select(func.count(func.distinct(WebPageView.visitor_id)))
+            .where(WebPageView.created_at >= since)
+            .where(WebPageView.page_slug == "checkout")
+        )
+    ) or 0
+
+    registrations = (
+        await session.scalar(
+            select(func.count()).select_from(Identity).where(Identity.created_at >= since_naive)
+        )
+    ) or 0
+    registrations_tg = (
+        await session.scalar(
+            select(func.count())
+            .select_from(Identity)
+            .where(Identity.created_at >= since_naive, Identity.tg_id.isnot(None))
+        )
+    ) or 0
+    registrations_web = int(registrations) - int(registrations_tg)
+
+    web_payment_marker = Payment.metadata_["payment_flow"].astext.isnot(None)
+    payments_row = (
+        await session.execute(
+            select(
+                func.count().label("cnt"),
+                func.count(func.distinct(Payment.user_id)).label("payers"),
+                func.coalesce(func.sum(Payment.amount), 0).label("revenue"),
+            )
+            .where(Payment.created_at >= since_naive)
+            .where(Payment.status == "success")
+            .where(web_payment_marker)
+        )
+    ).first()
+
+    all_payments_row = (
+        await session.execute(
+            select(
+                func.count().label("cnt"),
+                func.coalesce(func.sum(Payment.amount), 0).label("revenue"),
+            )
+            .where(Payment.created_at >= since_naive)
+            .where(Payment.status == "success")
+            .where(real_income)
+        )
+    ).first()
+
+    active_keys = (
+        await session.scalar(
+            select(func.count()).select_from(Key).where(
+                Key.expiry_time > int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+        )
+    ) or 0
+
+    reg_day_col = func.date_trunc("day", Identity.created_at).label("day")
+    daily_reg_rows = (
+        await session.execute(
+            select(reg_day_col, func.count().label("cnt"))
+            .where(Identity.created_at >= since_naive)
+            .group_by(reg_day_col)
+            .order_by(reg_day_col)
+        )
+    ).all()
+
+    pay_day_col = func.date_trunc("day", Payment.created_at).label("day")
+    daily_pay_rows = (
+        await session.execute(
+            select(
+                pay_day_col,
+                func.count().label("cnt"),
+                func.coalesce(func.sum(Payment.amount), 0).label("revenue"),
+                func.count().filter(web_payment_marker).label("site_cnt"),
+                func.coalesce(func.sum(Payment.amount).filter(web_payment_marker), 0).label("site_revenue"),
+            )
+            .where(Payment.created_at >= since_naive)
+            .where(Payment.status == "success")
+            .where(real_income)
+            .group_by(pay_day_col)
+            .order_by(pay_day_col)
+        )
+    ).all()
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    since_ms = int(since.timestamp() * 1000)
+
+    bot_users_total = (await session.scalar(
+        select(func.count()).select_from(User).where(User.created_at >= since_naive)
+    )) or 0
+    bot_user_day = func.date_trunc("day", User.created_at).label("day")
+    daily_bot_rows = (await session.execute(
+        select(bot_user_day, func.count().label("cnt"))
+        .where(User.created_at >= since_naive)
+        .group_by(bot_user_day).order_by(bot_user_day)
+    )).all()
+
+    src_name_map = dict((await session.execute(select(TrackingSource.code, TrackingSource.name))).all())
+    bot_source_rows = (await session.execute(
+        select(User.source_code, func.count().label("cnt"))
+        .where(User.created_at >= since_naive)
+        .group_by(User.source_code).order_by(func.count().desc()).limit(8)
+    )).all()
+
+    method_col = func.lower(func.coalesce(Payment.payment_system, "unknown")).label("method")
+    method_rows = (await session.execute(
+        select(
+            method_col,
+            func.count().label("cnt"),
+            func.coalesce(func.sum(Payment.amount), 0).label("rev"),
+        )
+        .where(Payment.created_at >= since_naive).where(Payment.status == "success").where(real_income)
+        .group_by(method_col).order_by(func.count().desc())
+    )).all()
+
+    all_payers = (await session.scalar(
+        select(func.count(func.distinct(Payment.user_id)))
+        .where(Payment.created_at >= since_naive).where(Payment.status == "success").where(real_income)
+    )) or 0
+    first_pay_sq = (
+        select(Payment.user_id, func.min(Payment.created_at).label("first"))
+        .where(Payment.status == "success").where(real_income).group_by(Payment.user_id)
+    ).subquery()
+    new_buyers = (await session.scalar(
+        select(func.count()).select_from(first_pay_sq).where(first_pay_sq.c.first >= since_naive)
+    )) or 0
+    total_revenue = float(all_payments_row.revenue or 0) if all_payments_row else 0.0
+
+    coupons_used = (await session.scalar(
+        select(func.count()).select_from(CouponUsage).where(CouponUsage.used_at >= since_naive)
+    )) or 0
+    gifts_used = (await session.scalar(
+        select(func.count()).select_from(GiftUsage).where(GiftUsage.used_at >= since_naive)
+    )) or 0
+    referrals_cnt = (await session.scalar(
+        select(func.count()).select_from(Referral)
+        .join(User, Referral.referred_user_id == User.id)
+        .where(User.created_at >= since_naive)
+    )) or 0
+
+    from database.subscription_events import get_retention_metrics, get_subscription_dynamics
+
+    sub_dynamics = await get_subscription_dynamics(session, days)
+    retention = await get_retention_metrics(session, days)
+
+    expiring_soon = (await session.scalar(
+        select(func.count()).select_from(Key)
+        .where(Key.expiry_time > now_ms).where(Key.expiry_time <= now_ms + 7 * 86400 * 1000)
+    )) or 0
+
+    tariff_rows = (await session.execute(
+        select(Tariff.name, func.count().label("cnt"))
+        .select_from(Key).join(Tariff, Key.tariff_id == Tariff.id, isouter=True)
+        .where(Key.expiry_time > now_ms).group_by(Tariff.name).order_by(func.count().desc()).limit(8)
+    )).all()
+    server_rows = (await session.execute(
+        select(Key.server_id, func.count().label("cnt"))
+        .where(Key.expiry_time > now_ms).group_by(Key.server_id).order_by(func.count().desc()).limit(8)
+    )).all()
+
+    return {
+        "days": days,
+        "totals": {
+            "views": int(totals_row.views or 0) if totals_row else 0,
+            "visitors": int(totals_row.visitors or 0) if totals_row else 0,
+            "viewsWeb": src_split["web"]["views"],
+            "viewsWebapp": src_split["webapp"]["views"],
+            "visitorsWeb": src_split["web"]["visitors"],
+            "visitorsWebapp": src_split["webapp"]["visitors"],
+            "registrations": int(registrations),
+            "registrationsTg": int(registrations_tg),
+            "registrationsWeb": int(registrations_web),
+            "checkoutVisitors": int(checkout_visitors),
+            "payments": int(payments_row.cnt or 0) if payments_row else 0,
+            "payers": int(payments_row.payers or 0) if payments_row else 0,
+            "revenueRub": float(payments_row.revenue or 0) if payments_row else 0.0,
+            "totalPayments": int(all_payments_row.cnt or 0) if all_payments_row else 0,
+            "totalRevenueRub": float(all_payments_row.revenue or 0) if all_payments_row else 0.0,
+            "activeKeys": int(active_keys),
+            "botUsers": int(bot_users_total),
+            "allPayers": int(all_payers),
+            "newBuyers": int(new_buyers),
+            "arpuRub": (total_revenue / all_payers) if all_payers else 0.0,
+            "couponsUsed": int(coupons_used),
+            "giftsActivated": int(gifts_used),
+            "referrals": int(referrals_cnt),
+            "expiringSoon": int(expiring_soon),
+        },
+        "daily": [
+            {
+                "date": row.day.strftime("%Y-%m-%d"),
+                "views": int(row.views),
+                "visitors": int(row.visitors),
+            }
+            for row in daily_rows
+        ],
+        "dailyWeb": [
+            {"date": d, "views": v["views"], "visitors": v["visitors"]}
+            for d, v in sorted(daily_web.items())
+        ],
+        "dailyWebapp": [
+            {"date": d, "views": v["views"], "visitors": v["visitors"]}
+            for d, v in sorted(daily_webapp.items())
+        ],
+        "dailyRegistrations": [
+            {"date": row.day.strftime("%Y-%m-%d"), "count": int(row.cnt)}
+            for row in daily_reg_rows
+        ],
+        "dailyPayments": [
+            {
+                "date": row.day.strftime("%Y-%m-%d"),
+                "payments": int(row.cnt),
+                "revenueRub": float(row.revenue or 0),
+                "sitePayments": int(row.site_cnt or 0),
+                "siteRevenueRub": float(row.site_revenue or 0),
+            }
+            for row in daily_pay_rows
+        ],
+        "topPages": [
+            {"slug": row.page_slug, "views": int(row.views), "visitors": int(row.visitors)}
+            for row in top_pages
+        ],
+        "referrers": [
+            {"source": row.referrer, "visitors": int(row.visitors)}
+            for row in referrers
+        ],
+        "devices": [
+            {"device": row.device or "unknown", "visitors": int(row.visitors)}
+            for row in devices
+        ],
+        "abVariants": [
+            {
+                "variant": row.ab_variant,
+                "views": int(row.views),
+                "visitors": int(row.visitors),
+                "checkoutVisitors": int(ab_checkout.get(row.ab_variant, 0) or 0),
+            }
+            for row in ab_rows
+        ],
+        "dailyBotUsers": [
+            {"date": r.day.strftime("%Y-%m-%d"), "count": int(r.cnt)}
+            for r in daily_bot_rows
+        ],
+        "botSources": [
+            {"source": (src_name_map.get(r.source_code) or r.source_code or "Прямой"), "users": int(r.cnt)}
+            for r in bot_source_rows
+        ],
+        "paymentMethods": [
+            {"method": r.method or "unknown", "payments": int(r.cnt), "revenueRub": float(r.rev or 0)}
+            for r in method_rows
+        ],
+        "dailySubs": [
+            {"date": e["date"], "created": e["created"], "expired": e["expired"]}
+            for e in sub_dynamics["dailyEvents"]
+        ],
+        "activeTrend": sub_dynamics["activeTrend"],
+        "retention": retention,
+        "tariffs": [
+            {"tariff": r.name or "Без тарифа", "count": int(r.cnt)}
+            for r in tariff_rows
+        ],
+        "servers": [
+            {"server": r.server_id or "—", "count": int(r.cnt)}
+            for r in server_rows
+        ],
+    }
 
 
 # ── Error aggregation (in-house Sentry) ──
@@ -944,6 +1709,42 @@ class ErrorReportIngest(BaseModel):
     context: dict | None = None
 
 
+_ERROR_ALERT_THRESHOLDS = frozenset({10, 50, 200, 1000})
+_NEW_ERROR_ALERTS_PER_HOUR = 6
+
+
+async def _alert_web_error(name: str, message: str, url: str | None, count: int, is_new: bool) -> None:
+    """Шлёт админам уведомление о новой ошибке сайта или о всплеске по счётчику.
+    Новые ошибки троттлятся глобально, чтобы не заспамить при запуске."""
+    try:
+        if is_new:
+            try:
+                from api.v2.routes.auth._fallback_limiter import check_and_increment
+                from core.redis_cache import cache_incr_checked
+
+                fired, redis_ok = await cache_incr_checked("web_err_new_alert:hour", 3600)
+                if not redis_ok:
+                    fired = check_and_increment("web_err_new_alert:hour", _NEW_ERROR_ALERTS_PER_HOUR, 3600)
+                if fired > _NEW_ERROR_ALERTS_PER_HOUR:
+                    return
+            except Exception:
+                pass
+
+        head = "🆕 Новая ошибка сайта" if is_new else f"📈 Всплеск ошибки сайта (×{count})"
+        parts = [head, f"{(name or 'Error')[:120]}: {(message or '')[:300]}"]
+        if url:
+            parts.append(f"URL: {url[:200]}")
+        if not is_new:
+            parts.append(f"Всего повторов: {count}")
+        parts.append("Подробнее — в админ-панели → Логи и здоровье → ошибки.")
+        from services.admin_alert import send_admin_alert
+
+        await send_admin_alert("\n".join(parts))
+    except Exception as exc:
+        logger.warning("[WebErrorAlert] не удалось отправить алерт: {}", exc)
+
+
+@router.post("/api/web/error-reports")
 @router.post("/error-reports")
 async def ingest_error_report(
     body: ErrorReportIngest,
@@ -951,10 +1752,11 @@ async def ingest_error_report(
     session: AsyncSession = Depends(get_session),
 ):
     try:
+        from api.v2.routes.auth._common import _client_ip
         from api.v2.routes.auth._fallback_limiter import check_and_increment
         from core.redis_cache import cache_incr_checked
 
-        ip = (request.client.host if request.client else "") or "unknown"
+        ip = _client_ip(request) or "unknown"
         count, redis_ok = await cache_incr_checked(f"error_report_rate:{ip}", 60)
         if not redis_ok:
             count = check_and_increment(f"error_report_rate:{ip}", 30, 60)
@@ -994,13 +1796,16 @@ async def ingest_error_report(
             existing.last_context = safe_context
         if server_identity_id:
             existing.last_identity_id = server_identity_id[:36]
+        if existing.count in _ERROR_ALERT_THRESHOLDS:
+            await _alert_web_error(existing.error_name, existing.error_message, existing.url, existing.count, is_new=False)
         return {"ok": True, "id": existing.id, "count": existing.count, "deduplicated": True}
 
     try:
+        from api.v2.routes.auth._common import _client_ip
         from api.v2.routes.auth._fallback_limiter import check_and_increment as _sig_check
         from core.redis_cache import cache_incr_checked as _sig_cache
 
-        ip = (request.client.host if request.client else "") or "unknown"
+        ip = _client_ip(request) or "unknown"
         unique_key = f"error_sig_unique:{ip}"
         count_uniq, redis_ok = await _sig_cache(unique_key, 3600)
         if not redis_ok:
@@ -1027,9 +1832,11 @@ async def ingest_error_report(
         resolved=False,
     )
     session.add(report)
+    await _alert_web_error(report.error_name, report.error_message, report.url, 1, is_new=True)
     return {"ok": True, "id": report.id, "count": 1, "deduplicated": False}
 
 
+@router.get("/api/web/error-reports")
 @router.get("/error-reports")
 async def list_error_reports(
     session: AsyncSession = Depends(get_session),
@@ -1068,6 +1875,7 @@ class ErrorReportPatch(BaseModel):
     resolved: bool | None = None
 
 
+@router.patch("/api/web/error-reports/{report_id}")
 @router.patch("/error-reports/{report_id}")
 async def update_error_report(
     report_id: str,
@@ -1083,6 +1891,7 @@ async def update_error_report(
     return {"ok": True, "resolved": report.resolved}
 
 
+@router.delete("/api/web/error-reports/{report_id}")
 @router.delete("/error-reports/{report_id}")
 async def delete_error_report(
     report_id: str,
@@ -1094,3 +1903,624 @@ async def delete_error_report(
         raise HTTPException(404, "Not found")
     await session.delete(report)
     return {"ok": True}
+
+
+@router.post("/api/web/install-default-design")
+async def install_default_design(
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    from database.web_default_seed import seed_default_site
+
+    try:
+        seeded = await seed_default_site(session, force=True)
+        await session.flush()
+    except Exception as e:
+        logger.exception("[install_default_design] seed_default_site упал: %s", e)
+        raise HTTPException(status_code=500, detail=f"install_default_design: {type(e).__name__}: {e}")
+    await bump_site_revision(session)
+    await _audit_web_admin(session, _identity, "design.install_default", entity_type="site", entity_id="default")
+    return {"ok": True, "seeded": seeded}
+
+
+_PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+
+_BUILTIN_PACK_IDS = {"core", "cyber-mono", "capybara", "default"}
+
+
+@router.get("/api/web/packs")
+async def list_packs(
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Список своих (не встроенных) сохранённых наборов + статус сохранения встроенных дизайн-паков."""
+    from database.web_default_seed import has_builtin_pack_file, list_custom_pack_designs, load_pack_design
+
+    custom = await list_custom_pack_designs(session, _BUILTIN_PACK_IDS)
+    builtin_saved: dict[str, bool] = {}
+    for pid in ("cyber-mono", "capybara"):
+        builtin_saved[pid] = bool(await load_pack_design(session, pid)) or has_builtin_pack_file(pid)
+    return {"custom": custom, "builtinSaved": builtin_saved}
+
+
+@router.get("/api/web/packs/{pack}/design")
+async def get_pack_design_status(
+    pack: str,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Сохранён ли дизайн набора (для состояния кнопки «Установить»)."""
+    if not _PACK_ID_RE.match(pack):
+        raise HTTPException(status_code=400, detail="Некорректный id набора")
+    if pack == "default":
+        return {"pack": pack, "saved": True, "builtin": True}
+    from database.web_default_seed import load_pack_design
+
+    site = await load_pack_design(session, pack)
+    return {"pack": pack, "saved": bool(site), "builtin": pack in _BUILTIN_PACK_IDS}
+
+
+@router.post("/api/web/packs")
+async def create_custom_pack(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Создаёт новый свой набор из текущего сайта (захват) с заданным именем."""
+    from uuid import uuid4
+
+    from database.web_default_seed import capture_and_store_pack_design
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = str((body or {}).get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Укажите название набора")
+    description = str((body or {}).get("description") or "").strip()
+    pack_id = "c" + uuid4().hex[:20]
+    try:
+        await capture_and_store_pack_design(session, pack_id, name=name, description=description)
+        await session.flush()
+    except Exception as e:
+        logger.exception("[create_custom_pack] упал: %s", e)
+        raise HTTPException(status_code=500, detail=f"create_custom_pack: {type(e).__name__}: {e}")
+    await _audit_web_admin(session, _identity, "design.create_pack", entity_type="pack", entity_id=pack_id)
+    return {"ok": True, "id": pack_id, "name": name}
+
+
+@router.post("/api/web/packs/{pack}/capture")
+async def capture_pack_design(
+    pack: str,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Снимает текущий сайт и сохраняет как дизайн существующего набора (встроенного дизайн-пака)."""
+    if not _PACK_ID_RE.match(pack) or pack in {"default", "core"}:
+        raise HTTPException(status_code=400, detail="Нельзя сохранять для этого набора")
+    from database.web_default_seed import capture_and_store_pack_design
+
+    try:
+        site = await capture_and_store_pack_design(session, pack)
+        await session.flush()
+    except Exception as e:
+        logger.exception("[capture_pack_design] упал: %s", e)
+        raise HTTPException(status_code=500, detail=f"capture_pack_design: {type(e).__name__}: {e}")
+    await _audit_web_admin(session, _identity, "design.capture_pack", entity_type="pack", entity_id=pack)
+    pages_count = sum(1 for k, v in site.items() if not k.startswith("_") and isinstance(v, list))
+    return {"ok": True, "pack": pack, "pages": pages_count}
+
+
+@router.post("/api/web/blocks-pack/import")
+async def import_blocks_pack(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Добавляет новые блоки в конструктор из файла набора (бандл blueprints
+    пользовательских элементов). Блоки сливаются в глобальную тему (страница landing)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректный файл набора (ожидается JSON)")
+    if isinstance(body, list):
+        blueprints = body
+    elif isinstance(body, dict):
+        blueprints = body.get("blueprints")
+    else:
+        blueprints = None
+    if not isinstance(blueprints, list) or not blueprints:
+        raise HTTPException(status_code=400, detail="Файл набора не содержит блоков (blueprints)")
+    valid = [b for b in blueprints if isinstance(b, dict) and str(b.get("slug") or "").strip() and str(b.get("runtime") or "").strip()]
+    if not valid:
+        raise HTTPException(status_code=400, detail="Некорректный формат блоков в файле набора")
+    current, _ = await _resolve_variant(session, "landing", None)
+    tokens = dict(current.theme_tokens or {})
+    existing = tokens.get("customElementBlueprints")
+    existing = existing if isinstance(existing, list) else []
+    by_slug: dict = {}
+    for b in existing:
+        if isinstance(b, dict) and b.get("slug"):
+            by_slug[str(b["slug"])] = b
+    added = 0
+    for b in valid:
+        slug = str(b["slug"])
+        if slug not in by_slug:
+            added += 1
+        by_slug[slug] = b
+    tokens["customElementBlueprints"] = list(by_slug.values())
+    cleaned_tokens, _replaced = migrate_json_data_uris(tokens)
+    current.theme_tokens = cleaned_tokens
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, _identity, "blocks.import_pack", entity_type="site", entity_id="blueprints")
+    return {"ok": True, "added": added, "total": len(by_slug)}
+
+
+async def _merge_blueprints_into_landing(session: AsyncSession, blueprints: list) -> tuple[int, int]:
+    valid = [
+        b for b in blueprints
+        if isinstance(b, dict) and str(b.get("slug") or "").strip() and str(b.get("runtime") or "").strip()
+    ]
+    current, _ = await _resolve_variant(session, "landing", None)
+    tokens = dict(current.theme_tokens or {})
+    existing = tokens.get("customElementBlueprints")
+    existing = existing if isinstance(existing, list) else []
+    by_slug: dict = {}
+    for b in existing:
+        if isinstance(b, dict) and b.get("slug"):
+            by_slug[str(b["slug"])] = b
+    added = 0
+    for b in valid:
+        slug = str(b["slug"])
+        if slug not in by_slug:
+            added += 1
+        by_slug[slug] = b
+    tokens["customElementBlueprints"] = list(by_slug.values())
+    cleaned_tokens, _replaced = migrate_json_data_uris(tokens)
+    current.theme_tokens = cleaned_tokens
+    await session.flush()
+    return added, len(by_slug)
+
+
+@router.get("/api/web/packs/export-current.zip")
+async def export_current_as_pack_zip(
+    name: str = Query(default="Набор"),
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Собирает текущий сайт в zip-набор: blocks.json (блоки) + design.json (установка дизайна) + meta.json."""
+    import io
+    import json as _json
+    import zipfile
+
+    from fastapi.responses import Response
+
+    from database.web_default_seed import capture_current_site
+
+    design = await capture_current_site(session)
+    current, _ = await _resolve_variant(session, "landing", None)
+    tokens = dict(current.theme_tokens or {})
+    blueprints = tokens.get("customElementBlueprints")
+    blueprints = blueprints if isinstance(blueprints, list) else []
+    safe_name = str(name or "Набор")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("meta.json", _json.dumps({"name": safe_name, "version": 1, "kind": "solo-pack"}, ensure_ascii=False, indent=2))
+        zf.writestr("blocks.json", _json.dumps({"blueprints": blueprints}, ensure_ascii=False, indent=2))
+        zf.writestr("design.json", _json.dumps(design, ensure_ascii=False, indent=2))
+    buf.seek(0)
+    fallback = "".join(c for c in safe_name if c.isalnum() or c in "-_") or "pack"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fallback}.solopack.zip"'},
+    )
+
+
+@router.post("/api/web/packs/import-zip")
+async def import_pack_zip(
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Добавляет набор из zip-архива: blocks.json → блоки в конструктор, design.json → устанавливаемый дизайн."""
+    import io
+    import json as _json
+    import zipfile
+    from uuid import uuid4
+
+    from database.web_default_seed import store_pack_design
+
+    raw = await file.read()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Файл не является zip-архивом набора")
+
+    names = set(zf.namelist())
+
+    def _read(cands: list[str]):
+        for n in cands:
+            if n in names:
+                try:
+                    return _json.loads(zf.read(n).decode("utf-8"))
+                except Exception:
+                    return None
+        return None
+
+    meta = _read(["meta.json", "pack.json"])
+    meta = meta if isinstance(meta, dict) else {}
+    blocks_doc = _read(["blocks.json", "blueprints.json"])
+    design = _read(["design.json", "site.json", "install.json"])
+    design = design if isinstance(design, dict) else {}
+
+    if isinstance(blocks_doc, dict):
+        blueprints = blocks_doc.get("blueprints")
+    else:
+        blueprints = blocks_doc
+    blueprints = blueprints if isinstance(blueprints, list) else []
+
+    base_name = (file.filename or "Набор").rsplit("/", 1)[-1]
+    base_name = base_name.rsplit(".", 1)[0].replace(".solopack", "")
+    name = str(meta.get("name") or base_name or "Импортированный набор").strip() or "Импортированный набор"
+    description = str(meta.get("description") or "").strip()
+
+    added_blocks = 0
+    if blueprints:
+        added_blocks, _total = await _merge_blueprints_into_landing(session, blueprints)
+
+    pack_id = ""
+    pages_count = 0
+    has_design = any(not k.startswith("_") and isinstance(v, list) for k, v in design.items())
+    if has_design:
+        pack_id = "c" + uuid4().hex[:20]
+        await store_pack_design(session, pack_id, design, meta={"name": name, "description": description, "custom": True})
+        pages_count = sum(1 for k, v in design.items() if not k.startswith("_") and isinstance(v, list))
+
+    if not blueprints and not has_design:
+        raise HTTPException(status_code=400, detail="В архиве нет ни blocks.json, ни design.json")
+
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, _identity, "design.import_pack_zip", entity_type="pack", entity_id=pack_id or "blocks")
+    return {"ok": True, "id": pack_id, "name": name, "addedBlocks": added_blocks, "pages": pages_count}
+
+
+@router.post("/api/web/packs/import-file")
+async def import_pack_file(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Импорт расшариваемого набора из файла: добавляет блоки (blueprints) в конструктор
+    и регистрирует дизайн как устанавливаемый свой набор (кнопка «Установить»)."""
+    from uuid import uuid4
+
+    from database.web_default_seed import store_pack_design
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректный файл набора (ожидается JSON)")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Некорректный формат файла набора")
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    name = str(meta.get("name") or "Импортированный набор").strip() or "Импортированный набор"
+    description = str(meta.get("description") or "").strip()
+    blueprints = body.get("blueprints") if isinstance(body.get("blueprints"), list) else []
+    design = body.get("design") if isinstance(body.get("design"), dict) else {}
+
+    added_blocks = 0
+    if blueprints:
+        added_blocks, _total = await _merge_blueprints_into_landing(session, blueprints)
+
+    pack_id = ""
+    pages_count = 0
+    has_design = any(not k.startswith("_") and isinstance(v, list) for k, v in design.items())
+    if has_design:
+        pack_id = "c" + uuid4().hex[:20]
+        await store_pack_design(session, pack_id, design, meta={"name": name, "description": description, "custom": True})
+        pages_count = sum(1 for k, v in design.items() if not k.startswith("_") and isinstance(v, list))
+
+    if not blueprints and not has_design:
+        raise HTTPException(status_code=400, detail="Файл набора пуст: нет ни блоков, ни дизайна")
+
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, _identity, "design.import_pack_file", entity_type="pack", entity_id=pack_id or "blocks")
+    return {"ok": True, "id": pack_id, "name": name, "addedBlocks": added_blocks, "pages": pages_count}
+
+
+@router.delete("/api/web/packs/{pack}")
+async def delete_custom_pack(
+    pack: str,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Удаляет свой набор (встроенные удалять нельзя)."""
+    if not _PACK_ID_RE.match(pack) or pack in _BUILTIN_PACK_IDS:
+        raise HTTPException(status_code=400, detail="Нельзя удалить встроенный набор")
+    from database.web_default_seed import delete_pack_design
+
+    removed = await delete_pack_design(session, pack)
+    await session.flush()
+    if not removed:
+        raise HTTPException(status_code=404, detail="Набор не найден")
+    await _audit_web_admin(session, _identity, "design.delete_pack", entity_type="pack", entity_id=pack)
+    return {"ok": True, "pack": pack}
+
+
+@router.post("/api/web/packs/{pack}/install")
+async def install_pack_design_endpoint(
+    pack: str,
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Устанавливает (восстанавливает) дизайн набора. Для «default» — встроенный seed."""
+    if not _PACK_ID_RE.match(pack):
+        raise HTTPException(status_code=400, detail="Некорректный id набора")
+    try:
+        if pack == "default":
+            from database.web_default_seed import seed_default_site
+
+            seeded = await seed_default_site(session, force=True)
+        else:
+            from database.web_default_seed import install_pack_design
+
+            seeded = await install_pack_design(session, pack)
+            if not seeded:
+                raise HTTPException(status_code=404, detail="Для этого набора ещё не сохранён дизайн")
+        await session.flush()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[install_pack_design] упал: %s", e)
+        raise HTTPException(status_code=500, detail=f"install_pack_design: {type(e).__name__}: {e}")
+    await bump_site_revision(session)
+    await _audit_web_admin(session, _identity, "design.install_pack", entity_type="pack", entity_id=pack)
+    return {"ok": True, "pack": pack, "seeded": seeded}
+
+
+@router.get("/api/web/admin-audit")
+async def web_admin_audit(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Журнал действий админов над сайтом (event_type=web_admin_action)."""
+    from database.models import Identity
+    from database.models.audit import AuditEvent
+
+    base = AuditEvent.event_type == "web_admin_action"
+    total = await session.scalar(select(func.count()).select_from(AuditEvent).where(base))
+    rows = (
+        await session.execute(
+            select(AuditEvent)
+            .where(base)
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+
+    ident_ids = {r.actor_identity_id for r in rows if r.actor_identity_id}
+    emails: dict[str, str | None] = {}
+    if ident_ids:
+        eres = await session.execute(select(Identity.id, Identity.email).where(Identity.id.in_(ident_ids)))
+        emails = {iid: email for (iid, email) in eres.all()}
+
+    items = [
+        {
+            "id": r.id,
+            "action": r.path_or_handler,
+            "entity_type": r.entity_type,
+            "entity_id": r.entity_id,
+            "result": r.result,
+            "actor_email": emails.get(r.actor_identity_id),
+            "actor_tg_id": r.actor_tg_id,
+            "metadata": r.metadata_,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+    return {"total": int(total or 0), "items": items}
+
+
+
+_BOT_LOG_PATH = Path("logs/logging.log")
+_LEVEL_RANK = {"DEBUG": 0, "TRACE": 0, "INFO": 1, "SUCCESS": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
+
+
+def _tail_lines(path: Path, max_lines: int) -> list[str]:
+    try:
+        if not path.exists():
+            return []
+        size = path.stat().st_size
+        chunk = min(size, 512 * 1024)
+        with path.open("rb") as f:
+            if chunk < size:
+                f.seek(size - chunk)
+            data = f.read()
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        if chunk < size and lines:
+            lines = lines[1:]
+        return lines[-max_lines:]
+    except Exception:
+        return []
+
+
+def _parse_log_line(raw: str) -> dict:
+    parts = raw.split(" | ", 3)
+    if len(parts) >= 3 and parts[1].strip().upper() in _LEVEL_RANK:
+        ts = parts[0].strip()
+        level = parts[1].strip().upper()
+        loc = parts[2].strip() if len(parts) == 4 else ""
+        msg = (parts[3] if len(parts) == 4 else parts[2]).strip()
+        return {"ts": ts, "level": level, "loc": loc, "text": msg}
+    up = raw.upper()
+    level = "INFO"
+    for token, mapped in (("CRITICAL", "CRITICAL"), ("ERROR", "ERROR"), ("WARNING", "WARNING"), ("WARN", "WARNING"), ("DEBUG", "DEBUG")):
+        if token in up:
+            level = mapped
+            break
+    return {"ts": "", "level": level, "loc": "", "text": raw.strip()}
+
+
+def _is_api_log(entry: dict) -> bool:
+    return "[API]" in (entry.get("text") or "") or "log_api_access" in (entry.get("loc") or "")
+
+
+def _site_log_token() -> str:
+    try:
+        from core.settings.web_config import WEB_CONFIG
+
+        tok = str((WEB_CONFIG or {}).get("PLUGIN_BUILDER_TOKEN") or "").strip()
+        if tok:
+            return tok
+    except Exception:
+        pass
+    try:
+        from config import PLUGIN_BUILDER_TOKEN
+
+        return str(PLUGIN_BUILDER_TOKEN or "").strip()
+    except Exception:
+        return ""
+
+
+async def _fetch_site_log_lines(max_lines: int) -> tuple[list[str], bool, str | None]:
+    from core.settings.web_config import get_site_url
+
+    base = (get_site_url() or "").rstrip("/")
+    token = _site_log_token()
+    if not base:
+        logger.warning("[logs] site-log: SITE_URL пуст (Настройки → Сайт), запрос не отправлен")
+        return [], False, "SITE_URL не задан (Настройки → Сайт)."
+    if not token:
+        logger.warning("[logs] site-log: PLUGIN_BUILDER_TOKEN пуст (config.py / WEB_CONFIG), запрос не отправлен")
+        return [], False, "PLUGIN_BUILDER_TOKEN не задан на боте (config.py / WEB_CONFIG)."
+    import aiohttp
+
+    url = f"{base}/api/internal/site-log?limit={max_lines}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.get(url, headers={"Authorization": f"Bearer {token}"}) as resp:
+                if resp.status != 200:
+                    body = (await resp.text())[:200]
+                    logger.warning(
+                        "[logs] site-log: {} вернул HTTP {} (токен len={}); ответ: {}",
+                        url, resp.status, len(token), body,
+                    )
+                    if resp.status in (401, 403):
+                        return [], False, "Токен не подошёл: PLUGIN_BUILDER_TOKEN на боте и в веб-аппе различаются (или пуст в одном из них)."
+                    return [], False, f"Веб-апп вернул HTTP {resp.status} на запрос логов сайта."
+                data = await resp.json()
+        if not isinstance(data, dict):
+            return [], False, "Веб-апп вернул некорректный ответ."
+        lines = data.get("lines") if isinstance(data.get("lines"), list) else []
+        return [str(line) for line in lines], bool(data.get("available", True)), None
+    except Exception as e:
+        logger.warning("[logs] site-log: запрос к {} не удался: {}: {}", url, type(e).__name__, e)
+        return [], False, f"Не удалось связаться с веб-аппом ({type(e).__name__}). Проверь SITE_URL."
+
+
+def _api_logging_enabled() -> bool:
+    try:
+        from config import API_LOGGING
+
+        return bool(API_LOGGING)
+    except Exception:
+        return True
+
+
+@router.get("/api/web/logs")
+@router.get("/logs")
+async def get_logs(
+    source: str = Query("bot"),
+    limit: int = Query(200, ge=1, le=1000),
+    level: str = Query("all"),
+    _identity=Depends(verify_identity_admin),
+):
+    note: str | None = None
+    if source == "site":
+        raw_lines, available, note = await _fetch_site_log_lines(min(limit * 3, 6000))
+    else:
+        raw_lines = _tail_lines(_BOT_LOG_PATH, min(limit * 6, 6000))
+        available = _BOT_LOG_PATH.exists()
+    entries = [_parse_log_line(line) for line in raw_lines if line.strip()]
+    if source == "api":
+        entries = [e for e in entries if _is_api_log(e)]
+        if not _api_logging_enabled():
+            note = "API-логирование отключено в конфиге (API_LOGGING=False)."
+    elif source == "bot":
+        entries = [e for e in entries if not _is_api_log(e)]
+    min_rank = {"warn": 2, "error": 3}.get(level, 0)
+    if min_rank:
+        entries = [e for e in entries if _LEVEL_RANK.get(e["level"], 1) >= min_rank]
+    return {"source": source, "available": available, "entries": entries[-limit:], "note": note}
+
+
+@router.get("/api/web/logs/health")
+@router.get("/logs/health")
+async def get_logs_health(_identity=Depends(verify_identity_admin)):
+    out: dict = {}
+
+    def _count(entries: list[dict]) -> dict:
+        errors = warnings = 0
+        for e in entries:
+            rank = _LEVEL_RANK.get(e["level"], 1)
+            if rank >= 3:
+                errors += 1
+            elif rank == 2:
+                warnings += 1
+        return {"errors": errors, "warnings": warnings, "lines": len(entries)}
+
+    bot_lines = [_parse_log_line(line) for line in _tail_lines(_BOT_LOG_PATH, 500) if line.strip()]
+    bot_available = _BOT_LOG_PATH.exists()
+    out["api"] = {"available": bot_available, **_count([e for e in bot_lines if _is_api_log(e)])}
+    out["bot"] = {"available": bot_available, **_count([e for e in bot_lines if not _is_api_log(e)])}
+
+    site_raw, site_available, _site_note = await _fetch_site_log_lines(500)
+    site_lines = [_parse_log_line(line) for line in site_raw if line.strip()]
+    out["site"] = {"available": site_available, **_count(site_lines)}
+    try:
+        from utils.versioning import get_version
+
+        out["botVersion"] = get_version(include_git_info=True)
+    except Exception:
+        out["botVersion"] = ""
+    return out
+
+
+@router.get("/api/web/node-status")
+async def web_node_status(request: Request, session: AsyncSession = Depends(get_session)):
+    """Статусы серверов для блока в кабинете — только серверы из тарифа юзера (его сквады
+    в Remnawave). Гостю/без подписки отдаём пусто. host:port — для браузерной пробы пинга."""
+    from api.depends import bind_identity_actor
+    from api.v2.routes.keys._common import _resolve_billing_user_id, resolve_user_squad_uuids
+    from services.remnawave_monitor import get_client_node_statuses
+
+    identity = await _identity_from_cookie(session, request)
+    if identity is None:
+        return {"nodes": []}
+    await bind_identity_actor(request, session, identity)
+    billing_user_id = await _resolve_billing_user_id(request, identity, session)
+    squads = await resolve_user_squad_uuids(session, billing_user_id)
+    if not squads:
+        return {"nodes": []}
+    return {"nodes": await get_client_node_statuses(session, allowed_squad_uuids=squads)}
+
+
+@router.get("/api/web/node-status/admin")
+async def web_node_status_admin(
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_admin),
+):
+    """Полный список нод для редактора блока — только админ."""
+    from services.remnawave_monitor import get_client_node_statuses
+
+    return {"nodes": await get_client_node_statuses(session)}

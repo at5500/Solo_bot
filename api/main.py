@@ -12,7 +12,7 @@ from starlette.responses import Response as StarletteResponse
 from starlette.staticfiles import StaticFiles
 
 from audit import ensure_api_context, log_api_access, record_api_access_event_background
-from config import API_LOGGING, API_VERSION, API_CORS_ORIGINS
+from config import API_LOGGING, API_VERSION, API_CORS_ORIGINS, LOGGING_LEVEL
 from database import async_session_maker
 from logger import logger
 
@@ -22,13 +22,15 @@ else:
     from api.v2 import VERSION as API_DOC_VERSION
     from api.v2.router import router as api_router
 
+_docs_enabled = str(LOGGING_LEVEL or "").upper() == "DEBUG" or os.getenv("API_DOCS", "").strip() == "1"
+
 app = FastAPI(
     title=f"SoloBot API (Alpha) — API v{API_DOC_VERSION}",
     version=API_DOC_VERSION,
     description=f"Версия API: **v{API_DOC_VERSION}**.",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json",
+    docs_url="/api/docs" if _docs_enabled else None,
+    redoc_url="/api/redoc" if _docs_enabled else None,
+    openapi_url="/api/openapi.json" if _docs_enabled else None,
     default_response_class=ORJSONResponse,
 )
 
@@ -44,6 +46,34 @@ app.add_middleware(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
+_WEAK_PASSWORDS = frozenset({"111", "1111", "admin", "password", "12345678", "qwerty"})
+
+
+def _log_security_checklist() -> None:
+    import config
+
+    api_token_ttl_days = getattr(config, "API_TOKEN_TTL_DAYS", None)
+    logging_level = getattr(config, "LOGGING_LEVEL", "INFO")
+    web_admin_password = getattr(config, "WEB_ADMIN_PASSWORD", None)
+
+    issues: list[str] = []
+    pwd = (web_admin_password or "").strip()
+    if pwd and (len(pwd) < 8 or pwd.lower() in _WEAK_PASSWORDS):
+        issues.append("WEB_ADMIN_PASSWORD слабый (короче 8 символов или словарный) — смените в config.py")
+    if API_CORS_ORIGINS == ["*"]:
+        issues.append("API_CORS_ORIGINS = ['*'] — укажите конкретные домены в config.py")
+    if str(logging_level).upper() == "DEBUG":
+        issues.append("LOGGING_LEVEL = DEBUG — в проде используйте INFO или WARNING")
+    if api_token_ttl_days is None:
+        issues.append("API_TOKEN_TTL_DAYS не задан — сессии бессрочные, рекомендуется 30-90 дней")
+    for issue in issues:
+        logger.warning("[SECURITY] {}", issue)
+    if issues:
+        logger.warning("[SECURITY] Найдено проблем конфигурации: {}. Не выходите в прод, не устранив их.", len(issues))
+
+
+_log_security_checklist()
 
 
 @app.exception_handler(Exception)
@@ -73,7 +103,7 @@ async def security_and_cache_middleware(request: Request, call_next):
     path = request.url.path
 
     if path.startswith("/api/web/uploads/") and request.method == "GET" and response.status_code == 200:
-        response.headers.setdefault("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
         return response
 
     if request.method == "GET" and response.status_code == 200 and "application/json" in content_type:
@@ -131,6 +161,9 @@ async def api_access_log_middleware(request: Request, call_next):
         response = await call_next(request)
     except Exception as exc:
         duration_ms = int((perf_counter() - started) * 1000)
+        logger.opt(exception=exc).error(
+            f"[API] {request.method} {request.url.path} → 500 ({type(exc).__name__})"
+        )
         log_api_access(
             request,
             status_code=500,

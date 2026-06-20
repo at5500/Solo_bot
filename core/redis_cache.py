@@ -43,17 +43,20 @@ async def _get_redis() -> Any | None:
         return None
 
     try:
-        redis_from_url = import_module("redis.asyncio").from_url
-        client = redis_from_url(
+        redis_asyncio = import_module("redis.asyncio")
+        blocking_pool_cls = import_module("redis.asyncio.connection").BlockingConnectionPool
+        pool = blocking_pool_cls.from_url(
             REDIS_URL,
             encoding="utf-8",
             decode_responses=True,
-            max_connections=64,
+            max_connections=128,
+            timeout=10,
             health_check_interval=30,
             socket_connect_timeout=5,
             socket_timeout=5,
             retry_on_timeout=True,
         )
+        client = redis_asyncio.Redis(connection_pool=pool)
         await client.ping()
         _REDIS_CLIENTS[client_key] = client
         return client

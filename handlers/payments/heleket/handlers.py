@@ -8,6 +8,7 @@ from database import get_temporary_data
 from database.models import User
 from handlers.buttons import MAIN_MENU, PAY_2
 from handlers.texts import DEFAULT_PAYMENT_MESSAGE
+from handlers.payments.keyboards import balance_fallback_kb
 from handlers.utils import edit_or_send_message
 from logger import logger
 from services.payments.currency_rates import format_for_user
@@ -71,6 +72,7 @@ async def handle_custom_amount_input_heleket(
         await edit_or_send_message(
             target_message=message,
             text="❌ Минимальная сумма для оплаты криптовалютой — 10₽ (≈0.1$).",
+            reply_markup=balance_fallback_kb(),
         )
         return
 

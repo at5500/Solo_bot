@@ -1,4 +1,38 @@
 from ._common import *  # noqa: F401,F403
+from database.subscription_events import get_recent_renewals
+
+_RENEWAL_SOURCE_LABELS = {"bot": "бот", "web": "сайт", "webapp": "WebApp", "admin": "админ", "balance": "баланс"}
+
+
+async def _build_renewals_block(session, client_id) -> str:
+    renewals = await get_recent_renewals(session, client_id, limit=5)
+    if not renewals:
+        return ""
+    tariff_names: dict[int, str] = {}
+    lines = []
+    for ev in renewals:
+        when = (
+            ev["created_at"].replace(tzinfo=timezone.utc).astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
+            if ev.get("created_at")
+            else "—"
+        )
+        parts = [f"📅 {when}"]
+        tid = ev.get("tariff_id")
+        if tid is not None:
+            if tid not in tariff_names:
+                t = await get_tariff_by_id(session, tid)
+                tariff_names[tid] = (t.get("name") if t else None) or f"#{tid}"
+            parts.append(tariff_names[tid])
+        if ev.get("duration_days"):
+            parts.append(f"+{ev['duration_days']} дн.")
+        if ev.get("expiry_time"):
+            parts.append(
+                "до " + datetime.fromtimestamp(int(ev["expiry_time"]) / 1000, tz=MOSCOW_TZ).strftime("%d.%m.%Y")
+            )
+        src = ev.get("source") or ""
+        parts.append(_RENEWAL_SOURCE_LABELS.get(src, src) if src else "—")
+        lines.append("• " + " · ".join(parts))
+    return "\n\n🔄 <b>Последние продления:</b>\n" + "\n".join(lines)
 
 
 @router.callback_query(
@@ -95,6 +129,8 @@ async def handle_key_edit(
             )
             traffic_line = f"📊 <b>Трафик:</b> {base_traf} ГБ{extra}\n"
 
+    renewals_block = await _build_renewals_block(session, key_obj.client_id)
+
     text = (
         "<b>🔑 Информация о подписке</b>\n\n"
         "<blockquote>"
@@ -110,6 +146,7 @@ async def handle_key_edit(
         f"{devices_line}"
         f"{traffic_line}"
         "</blockquote>"
+        f"{renewals_block}"
     )
 
     if not update or not getattr(callback_data, "edit", False):

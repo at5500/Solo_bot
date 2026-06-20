@@ -147,6 +147,29 @@ class WebFlowEvent(DictLikeMixin, Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class WebPageView(DictLikeMixin, Base):
+    __tablename__ = "web_page_views"
+    __table_args__ = (
+        Index("ix_web_page_views_created", "created_at"),
+        Index("ix_web_page_views_slug_created", "page_slug", "created_at"),
+        Index("ix_web_page_views_visitor", "visitor_id"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    visitor_id = Column(String(36), nullable=False)
+    page_slug = Column(String(64), nullable=False)
+    referrer = Column(String(255), nullable=True)
+    utm_source = Column(String(64), nullable=True)
+    utm_medium = Column(String(64), nullable=True)
+    utm_campaign = Column(String(64), nullable=True)
+    device = Column(String(16), nullable=True)
+    locale = Column(String(8), nullable=True)
+    authenticated = Column(Boolean, nullable=True)
+    source = Column(String(16), nullable=True)
+    ab_variant = Column(String(16), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 class WebCustomElementBuild(DictLikeMixin, Base):
     __tablename__ = "web_custom_element_builds"
     __table_args__ = (

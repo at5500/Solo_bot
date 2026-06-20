@@ -13,6 +13,7 @@ from core.executor import run_cpu, run_io
 from database import identity_sessions as _idsess
 from database.access.tg_mirror import refresh_tg_mirrors_for_user
 from database.models import Admin, Identity, Key, User
+from logger import logger
 
 
 def _request_meta(request) -> tuple[str | None, str | None]:
@@ -315,6 +316,7 @@ async def create_identity_with_token(
     identity = await create_identity(session, email=email, tg_id=tg_id)
     if password:
         identity.password_hash = await run_cpu(hash_password, password)
+        await session.flush()
         await session.refresh(identity)
     token = await issue_token_for_identity(session, identity, request=request)
     return identity, token
@@ -357,6 +359,7 @@ async def set_initial_password(
     if not identity or identity.password_hash:
         return None
     identity.password_hash = await run_cpu(hash_password, password)
+    await session.flush()
     await session.refresh(identity)
     return identity
 
@@ -370,6 +373,7 @@ async def set_password_for_identity(
     if not identity:
         return None
     identity.password_hash = await run_cpu(hash_password, new_password)
+    await session.flush()
     await session.refresh(identity)
     return identity
 
@@ -389,8 +393,18 @@ async def change_identity_password(
     if not await run_cpu(check_password, current_password, identity.password_hash):
         return "wrong_password"
     identity.password_hash = await run_cpu(hash_password, new_password)
+    await session.flush()
     await session.refresh(identity)
     return None
+
+
+async def _assign_synthetic_tg_id(session: AsyncSession, uid: int) -> None:
+    synthetic = -int(uid)
+    try:
+        async with session.begin_nested():
+            await session.execute(update(User).where(User.id == uid).values(tg_id=synthetic))
+    except Exception as exc:
+        logger.warning("[ensure_billing_user] синтетический tg_id для user {} не присвоен: {}", uid, exc)
 
 
 async def ensure_billing_user_for_identity(session: AsyncSession, identity: Identity) -> int:
@@ -419,14 +433,12 @@ async def ensure_billing_user_for_identity(session: AsyncSession, identity: Iden
     row = res.scalars().first()
     if row is not None:
         if row.tg_id is None:
-            synthetic = -int(row.id)
-            await session.execute(update(User).where(User.id == row.id).values(tg_id=synthetic))
+            await _assign_synthetic_tg_id(session, row.id)
         return int(row.id)
     new_u = User(identity_id=identity.id, tg_id=None)
     session.add(new_u)
     await session.flush()
-    synthetic = -int(new_u.id)
-    await session.execute(update(User).where(User.id == new_u.id).values(tg_id=synthetic))
+    await _assign_synthetic_tg_id(session, new_u.id)
     return int(new_u.id)
 
 

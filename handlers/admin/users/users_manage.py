@@ -1,3 +1,7 @@
+import re
+
+from datetime import datetime, timezone
+
 import pytz
 
 from aiogram import F, Router, types
@@ -8,18 +12,22 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    WebAppInfo,
 )
-from aiogram.utils.formatting import BlockQuote, Bold, Text
+from aiogram.utils.formatting import BlockQuote, Bold, Code, Text
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from config import USERNAME_BOT
 
 from database import (
     get_key_details,
     update_trial,
 )
 from database.access.resolution import resolve_user_optional
-from database.models import Admin, Identity, Key, ManualBan, Payment, Referral, User
+from database.models import Admin, Identity, Key, ManualBan, Payment, Referral, Tariff, User
+from database.subscription_events import get_user_subscription_history, resolve_user_ref_by_client_id
 from filters.admin import IsAdminFilter
 from handlers.utils import sanitize_key_name
 from logger import logger
@@ -31,14 +39,18 @@ from ..panel.keyboard import (
     build_admin_back_kb,
 )
 from .keyboard import (
+    SITE_TAB_LABELS,
     AdminUserEditorCallback,
     build_editor_kb,
     build_user_edit_kb,
+    build_user_site_send_kb,
+    build_user_site_tabs_kb,
 )
 from .users_states import UserEditorState
 
 
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 router = Router()
 
@@ -50,10 +62,12 @@ router = Router()
 async def handle_search_user(callback_query: CallbackQuery, state: FSMContext):
     text = (
         "<b>🔍 Поиск пользователя</b>"
-        "\n\n📌 Введите ID, Username, Email или перешлите сообщение пользователя."
+        "\n\n📌 Введите ID, Username, Email, UUID веб-аккаунта, ID подписки или перешлите сообщение пользователя."
         "\n\n🆔 ID - числовой айди"
         "\n📝 Username - юзернейм пользователя"
         "\n📧 Email - почта веб-кабинета"
+        "\n🧬 UUID - идентификатор веб-аккаунта (identity_id)"
+        "\n🔗 ID подписки - текущий или прошлый client_id (ищется и в истории)"
         "\n\n<i>✉️ Для поиска, вы можете просто переслать сообщение от пользователя.</i>"
     )
 
@@ -111,6 +125,41 @@ async def handle_user_data_input(message: Message, state: FSMContext, session: A
 
     if raw.isdigit():
         tg_id = int(raw)
+    elif UUID_RE.match(raw):
+        identity_id = raw.lower()
+        ident = (
+            await session.execute(select(Identity).where(func.lower(Identity.id) == identity_id).limit(1))
+        ).scalar_one_or_none()
+
+        if ident is None:
+            ref, src = await resolve_user_ref_by_client_id(session, raw)
+            if ref is None:
+                await message.answer(
+                    text="🚫 По этому UUID не найдено ни веб-аккаунта, ни подписки.",
+                    reply_markup=kb,
+                )
+                return
+            if src == "history":
+                await message.answer("🗂 ID найден в истории подписок (сейчас не активен).")
+            else:
+                await message.answer("🔑 Найдена активная подписка с этим ID.")
+            await process_user_search(message, state, session, ref, actor_tg_id=message.from_user.id)
+            return
+
+        if ident.tg_id is not None:
+            tg_id = ident.tg_id
+        else:
+            user_id = (
+                await session.execute(select(User.id).where(User.identity_id == ident.id).limit(1))
+            ).scalar_one_or_none()
+            if user_id is None:
+                label = ident.email or ident.id
+                await message.answer(
+                    text=f"🚫 Веб-аккаунт <code>{label}</code> не имеет биллинг-профиля.",
+                    reply_markup=kb,
+                )
+                return
+            tg_id = user_id
     elif "@" in raw and "." in raw.split("@", 1)[-1]:
         email = raw.lower()
         ident = (
@@ -485,6 +534,8 @@ async def process_user_search(
         f"🎁 Триал: {trial_status}\n",
     )
 
+    body += Text("🌐 Кабинет: ", Code(f"https://t.me/{USERNAME_BOT}?start=tab_keys"), "\n")
+
     if referrer_text:
         body += Text(referrer_text, "\n")
 
@@ -540,6 +591,195 @@ async def handle_users_editor(
         edit=callback_data.edit,
         actor_tg_id=callback.from_user.id,
     )
+
+
+@router.callback_query(
+    AdminUserEditorCallback.filter(F.action == "users_site"),
+    IsAdminFilter(),
+)
+async def handle_users_site(callback: CallbackQuery, callback_data: AdminUserEditorCallback):
+    text = (
+        "🌐 <b>Ссылки на кабинет</b>\n\n"
+        "Выберите вкладку — бот покажет ссылку, которую можно отправить клиенту. "
+        "По ней откроется его личный кабинет на нужной вкладке."
+    )
+    try:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=build_user_site_tabs_kb(callback_data.tg_id),
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(
+    AdminUserEditorCallback.filter(F.action == "users_site_tab"),
+    IsAdminFilter(),
+)
+async def handle_users_site_tab(callback: CallbackQuery, callback_data: AdminUserEditorCallback):
+    tab = str(callback_data.data or "")
+    label = SITE_TAB_LABELS.get(tab)
+    if not label:
+        await callback.answer("Неизвестная вкладка", show_alert=True)
+        return
+    text = Text(
+        "🌐 Вкладка: ",
+        Bold(label),
+        "\n\n",
+        f"Нажмите «Отправить» — клиент получит в чате с ботом кнопку, "
+        f"открывающую личный кабинет на вкладке «{label}».",
+    ).as_html()
+    try:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=build_user_site_send_kb(callback_data.tg_id, tab),
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(
+    AdminUserEditorCallback.filter(F.action == "users_site_send"),
+    IsAdminFilter(),
+)
+async def handle_users_site_send(callback: CallbackQuery, callback_data: AdminUserEditorCallback):
+    tab = str(callback_data.data or "")
+    label = SITE_TAB_LABELS.get(tab)
+    if not label:
+        await callback.answer("Неизвестная вкладка", show_alert=True)
+        return
+
+    from core.settings.web_config import get_site_url, is_web_enabled
+
+    if not is_web_enabled():
+        await callback.answer("Веб-кабинет отключён", show_alert=True)
+        return
+    site_url = get_site_url()
+    if not site_url:
+        await callback.answer("Не задан адрес сайта", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🌐 {label}",
+            web_app=WebAppInfo(url=f"{site_url}/dashboard?tab={tab}&webapp=1"),
+        )
+    )
+
+    from bot import bot
+
+    try:
+        await bot.send_message(
+            callback_data.tg_id,
+            "Откройте раздел в личном кабинете 👇",
+            reply_markup=builder.as_markup(),
+        )
+    except Exception as e:
+        logger.warning(f"[users_site_send] send to {callback_data.tg_id} failed: {e}")
+        await callback.answer("❌ Не удалось отправить (клиент не запускал бота?)", show_alert=True)
+        return
+    await callback.answer(f"✅ Отправлено клиенту: {label}", show_alert=True)
+
+
+SUB_HISTORY_LIMIT = 20
+
+
+@router.callback_query(
+    AdminUserEditorCallback.filter(F.action == "users_sub_history"),
+    IsAdminFilter(),
+)
+async def handle_user_sub_history(
+    callback: CallbackQuery,
+    callback_data: AdminUserEditorCallback,
+    session: AsyncSession,
+):
+    u = await resolve_user_optional(session, callback_data.tg_id)
+    if u is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    history = await get_user_subscription_history(session, user_id=u.id, tg_id=u.tg_id)
+
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=AdminUserEditorCallback(action="users_editor", tg_id=callback_data.tg_id, edit=True).pack(),
+            )
+        ]]
+    )
+
+    if not history:
+        await callback.message.edit_text(
+            "🧾 <b>История подписок</b>\n\n📭 У пользователя не было подписок (в журнале нет записей).",
+            reply_markup=back_kb,
+        )
+        return
+
+    tariff_ids = {g["tariff_id"] for g in history if g["tariff_id"] is not None}
+    tariff_names: dict[int, str] = {}
+    if tariff_ids:
+        rows = (await session.execute(select(Tariff.id, Tariff.name).where(Tariff.id.in_(tariff_ids)))).all()
+        tariff_names = {r.id: r.name for r in rows}
+
+    client_ids = [g["client_id"] for g in history]
+    active_expiry: dict[str, int] = {}
+    if client_ids:
+        rows = (
+            await session.execute(select(Key.client_id, Key.expiry_time).where(Key.client_id.in_(client_ids)))
+        ).all()
+        active_expiry = {r.client_id: r.expiry_time for r in rows}
+
+    active_count = sum(1 for g in history if g["client_id"] in active_expiry)
+    shown = history[:SUB_HISTORY_LIMIT]
+
+    lines = [
+        "🧾 <b>История подписок</b>",
+        "",
+        f"Всего: <b>{len(history)}</b> · активных сейчас: <b>{active_count}</b>",
+        "",
+    ]
+
+    for i, g in enumerate(shown, 1):
+        cid = g["client_id"]
+        short = f"{cid[:8]}…" if cid and len(cid) > 8 else (cid or "—")
+        tariff = tariff_names.get(g["tariff_id"]) or (f"тариф #{g['tariff_id']}" if g["tariff_id"] else "—")
+        created_str = g["first_at"].replace(tzinfo=pytz.UTC).astimezone(MOSCOW_TZ).strftime("%d.%m.%Y")
+
+        if cid in active_expiry:
+            status = "🟢 активна"
+            exp_ms = active_expiry[cid]
+        else:
+            exp_ms = g["max_expiry"]
+            if g["last_event"] == "deleted":
+                status = "⚪️ удалена"
+            elif g["last_event"] == "expired":
+                status = "🔴 истекла"
+            else:
+                status = "⚪️ завершена"
+
+        if exp_ms:
+            exp_str = datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc).astimezone(MOSCOW_TZ).strftime("%d.%m.%Y")
+        else:
+            exp_str = "—"
+
+        renew = f" · продлений: {g['renewals']}" if g["renewals"] else ""
+        lines.append(f"{i}. {status} · <code>{short}</code> · {tariff}")
+        lines.append(f"     с {created_str} → до {exp_str}{renew}")
+
+    if len(history) > len(shown):
+        lines.append("")
+        lines.append(f"…показаны последние {len(shown)} из {len(history)}")
+
+    try:
+        await callback.message.edit_text("\n".join(lines), reply_markup=back_kb)
+    except TelegramBadRequest:
+        pass
 
 
 async def _resolve_identity_for_user(session: AsyncSession, legacy_ref: int) -> Identity | None:

@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import case, delete, func, insert, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.access.resolution import resolve_user_optional
@@ -116,17 +117,24 @@ async def _coupon_usage_billing_match(session: AsyncSession, legacy_user_ref: in
     return or_(CouponUsage.user_id == legacy_user_ref, CouponUsage.tg_id == legacy_user_ref)
 
 
-async def create_coupon_usage(session: AsyncSession, coupon_id: int, user_id: int):
+async def create_coupon_usage(session: AsyncSession, coupon_id: int, user_id: int) -> bool:
     u = await resolve_user_optional(session, user_id)
     uid = u.id if u is not None else user_id
-    stmt = insert(CouponUsage).values(
-        coupon_id=coupon_id,
-        user_id=uid,
-        tg_id=u.tg_id if u is not None else None,
-        used_at=datetime.utcnow(),
+    stmt = (
+        pg_insert(CouponUsage)
+        .values(
+            coupon_id=coupon_id,
+            user_id=uid,
+            tg_id=u.tg_id if u is not None else None,
+            used_at=datetime.utcnow(),
+        )
+        .on_conflict_do_nothing(index_elements=["coupon_id", "user_id"])
     )
-    await session.execute(stmt)
-    logger.info(f"✅ Купон {coupon_id} использован пользователем {user_id}")
+    result = await session.execute(stmt)
+    inserted = bool(result.rowcount)
+    if inserted:
+        logger.info(f"✅ Купон {coupon_id} использован пользователем {user_id}")
+    return inserted
 
 
 async def check_coupon_usage(session: AsyncSession, coupon_id: int, legacy_user_ref: int) -> bool:

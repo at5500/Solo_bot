@@ -1,3 +1,5 @@
+from typing import Any
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -5,6 +7,9 @@ from core.settings.money_config import get_currency_mode
 from handlers.buttons import BACK
 
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_btn
+
+
+REMNAWAVE_HOSTS_PER_PAGE = 6
 from .settings_config import (
     BUTTON_TITLES,
     MODES_TITLES,
@@ -84,8 +89,12 @@ def build_settings_kb() -> InlineKeyboardMarkup:
         text="🌐 Сайт",
         callback_data=AdminPanelCallback(action="settings_web").pack(),
     )
+    builder.button(
+        text="🌀 Remnawave",
+        callback_data=AdminPanelCallback(action="settings_remnawave").pack(),
+    )
 
-    builder.adjust(2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 1, 1)
     builder.row(build_admin_back_btn())
 
     return builder.as_markup()
@@ -273,4 +282,241 @@ def build_settings_money_kb(money_state: dict[str, object]) -> InlineKeyboardMar
         )
     )
 
+    return builder.as_markup()
+
+
+def build_settings_remnawave_kb(
+    node_enabled: bool,
+    rotation_enabled: bool,
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if node_enabled else '❌'} Проверка нод",
+            callback_data=AdminPanelCallback(action="rw_node_menu").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if rotation_enabled else '❌'} Ротация хостов",
+            callback_data=AdminPanelCallback(action="rw_rot_menu").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=AdminPanelCallback(action="settings").pack(),
+        )
+    )
+    return builder.as_markup()
+
+
+def build_settings_remnawave_node_kb(
+    node_enabled: bool, interval_min: int, auto_disable_enabled: bool = False
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Выключить проверку" if node_enabled else "❌ Включить проверку",
+            callback_data=AdminPanelCallback(action="rw_node_toggle").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"⏱ Интервал: {interval_min} мин.",
+            callback_data=AdminPanelCallback(action="rw_node_interval").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"{'✅' if auto_disable_enabled else '❌'} Авто-отключение хостов нод",
+            callback_data=AdminPanelCallback(action="rw_autodisable_toggle").pack(),
+        )
+    )
+    if auto_disable_enabled:
+        builder.row(
+            InlineKeyboardButton(
+                text="🔌 Синхронизировать хосты сейчас",
+                callback_data=AdminPanelCallback(action="rw_node_sync_now").pack(),
+            )
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="🖧 Выбрать ноды для проверки",
+            callback_data=AdminPanelCallback(action="rw_node_sel").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=AdminPanelCallback(action="settings_remnawave").pack(),
+        )
+    )
+    return builder.as_markup()
+
+
+def build_settings_remnawave_health_nodes_kb(
+    page: int,
+    nodes: list[tuple[str, dict[str, Any]]],
+    allowed: set[str],
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    total_pages = max(1, (len(nodes) + REMNAWAVE_HOSTS_PER_PAGE - 1) // REMNAWAVE_HOSTS_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * REMNAWAVE_HOSTS_PER_PAGE
+    chunk = nodes[start : start + REMNAWAVE_HOSTS_PER_PAGE]
+
+    for idx, (_, node) in enumerate(chunk):
+        node_uuid = str(node.get("uuid"))
+        marker = "✅" if node_uuid in allowed else "▫️"
+        name = (node.get("name") or node.get("address") or node_uuid)[:30]
+        global_idx = start + idx
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{marker} {name}",
+                callback_data=AdminPanelCallback(action="rw_node_sel_toggle", page=global_idx).pack(),
+            )
+        )
+
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=AdminPanelCallback(action="rw_node_sel", page=page - 1).pack(),
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=AdminPanelCallback(action="rw_node_sel", page=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=AdminPanelCallback(action="rw_node_sel", page=page + 1).pack(),
+                )
+            )
+        builder.row(*nav_row)
+
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Выбрать все на странице",
+            callback_data=AdminPanelCallback(action="rw_node_sel_all", page=page).pack(),
+        ),
+        InlineKeyboardButton(
+            text="▫️ Сбросить страницу",
+            callback_data=AdminPanelCallback(action="rw_node_sel_clear", page=page).pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=AdminPanelCallback(action="rw_node_menu").pack(),
+        )
+    )
+    return builder.as_markup()
+
+
+def build_settings_remnawave_rotation_kb(rotation_enabled: bool, interval_min: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Выключить ротацию" if rotation_enabled else "❌ Включить ротацию",
+            callback_data=AdminPanelCallback(action="rw_rot_toggle").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"⏱ Интервал: {interval_min} мин.",
+            callback_data=AdminPanelCallback(action="rw_rot_interval").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="📋 Выбрать хосты",
+            callback_data=AdminPanelCallback(action="rw_rot_hosts", page=1).pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🔀 Перемешать сейчас",
+            callback_data=AdminPanelCallback(action="rw_rot_run_now").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=AdminPanelCallback(action="settings_remnawave").pack(),
+        )
+    )
+    return builder.as_markup()
+
+
+def build_settings_remnawave_hosts_kb(
+    page: int,
+    hosts: list[tuple[str, dict[str, Any]]],
+    allowed: set[str],
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    total_pages = max(1, (len(hosts) + REMNAWAVE_HOSTS_PER_PAGE - 1) // REMNAWAVE_HOSTS_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * REMNAWAVE_HOSTS_PER_PAGE
+    chunk = hosts[start : start + REMNAWAVE_HOSTS_PER_PAGE]
+
+    for idx, (_, host) in enumerate(chunk):
+        host_uuid = str(host.get("uuid"))
+        marker = "✅" if host_uuid in allowed else "▫️"
+        remark = (host.get("remark") or host.get("address") or host_uuid)[:30]
+        global_idx = start + idx
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{marker} {remark}",
+                callback_data=AdminPanelCallback(action="rw_rot_toggle_host", page=global_idx).pack(),
+            )
+        )
+
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=AdminPanelCallback(action="rw_rot_hosts", page=page - 1).pack(),
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=AdminPanelCallback(action="rw_rot_hosts", page=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=AdminPanelCallback(action="rw_rot_hosts", page=page + 1).pack(),
+                )
+            )
+        builder.row(*nav_row)
+
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Включить все на странице",
+            callback_data=AdminPanelCallback(action="rw_rot_select_all", page=page).pack(),
+        ),
+        InlineKeyboardButton(
+            text="▫️ Сбросить страницу",
+            callback_data=AdminPanelCallback(action="rw_rot_clear_page", page=page).pack(),
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=BACK,
+            callback_data=AdminPanelCallback(action="rw_rot_menu").pack(),
+        )
+    )
     return builder.as_markup()

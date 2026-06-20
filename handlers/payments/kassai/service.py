@@ -25,6 +25,7 @@ from database import async_session_maker, register_pending_payment
 from database.models import User
 from handlers.buttons import BACK, KASSAI_CARDS, KASSAI_SBP, PAY_2
 from handlers.payments.keyboards import (
+    balance_fallback_kb,
     build_amounts_keyboard,
     parse_amount_from_callback,
     pay_keyboard,
@@ -241,7 +242,7 @@ async def handle_custom_amount_input(message: types.Message, state: FSMContext, 
                 await edit_or_send_message(
                     target_message=message,
                     text=f"❌ Минимальная сумма для оплаты картой — {currency_symbol}{min_amount}.",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                    reply_markup=balance_fallback_kb(),
                 )
                 return
         elif method_name == "sbp":
@@ -251,7 +252,7 @@ async def handle_custom_amount_input(message: types.Message, state: FSMContext, 
                 await edit_or_send_message(
                     target_message=message,
                     text=f"❌ Минимальная сумма для оплаты через СБП — {currency_symbol}{min_amount}.",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                    reply_markup=balance_fallback_kb(),
                 )
                 return
     except Exception:
@@ -320,14 +321,14 @@ async def process_amount_selection(callback_query: types.CallbackQuery, state: F
         await edit_or_send_message(
             target_message=callback_query.message,
             text="❌ Минимальная сумма для оплаты картой — 50₽.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            reply_markup=balance_fallback_kb(),
         )
         return
     elif method_name == "sbp" and amount < 10:
         await edit_or_send_message(
             target_message=callback_query.message,
             text="❌ Минимальная сумма для оплаты через СБП — 10₽.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            reply_markup=balance_fallback_kb(),
         )
         return
 

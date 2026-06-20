@@ -8,9 +8,9 @@ class PaymentLinkCreateRequest(BaseModel):
     identity_id: str | None = Field(None, description="ID идентичности; tg_id будет взят из привязки")
     amount: int | float = Field(..., gt=0, description="Сумма оплаты")
     currency: str = Field(default="RUB", description="Валюта (например RUB)")
-    provider_id: str = Field(
-        ...,
-        description="Идентификатор кассы: ROBOKASSA, FREEKASSA, YOOKASSA, YOOMONEY, KASSAI_CARDS, KASSAI_SBP, HELEKET и др.",
+    provider_id: str | None = Field(
+        default=None,
+        description="Идентификатор кассы: ROBOKASSA, FREEKASSA, YOOKASSA, YOOMONEY, KASSAI_CARDS, KASSAI_SBP, HELEKET и др. Если не задан — берётся первый доступный.",
     )
     success_url: str | None = Field(None, description="URL перенаправления после успешной оплаты")
     failure_url: str | None = Field(None, description="URL перенаправления после неуспешной оплаты")

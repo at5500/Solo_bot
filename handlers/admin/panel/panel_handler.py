@@ -20,14 +20,18 @@ router = Router()
 
 @router.callback_query(AdminPanelCallback.filter(F.action == "admin"), IsAdminFilter())
 async def handle_admin_callback_query(callback_query: CallbackQuery, state: FSMContext, session: AsyncSession):
-    text = f"🤖 Панель администратора\n\nВерсия бота:\n<blockquote>{await run_io(get_version)}</blockquote>"
-
     await state.clear()
 
     result = await session.execute(select(Admin.role).where(Admin.tg_id == callback_query.from_user.id))
     role = result.scalar_one_or_none() or "admin"
 
-    _, _, perms = await get_admin_context(callback_query.from_user.id)
+    _, is_super, perms = await get_admin_context(callback_query.from_user.id)
+    if is_super:
+        version_text = await run_io(get_version, is_super)
+        text = f"🤖 Панель администратора\n\nВерсия бота:\n<blockquote>{version_text}</blockquote>"
+    else:
+        text = "🤖 Панель администратора"
+
     markup = await build_panel_kb(admin_role=role, permissions=perms)
 
     if callback_query.message.text:
@@ -62,14 +66,18 @@ async def handle_admin_callback_query_simple(callback_query: CallbackQuery, stat
 
 @router.message(Command("admin"), IsAdminFilter())
 async def handle_admin_message(message: Message, state: FSMContext, session: AsyncSession):
-    text = f"🤖 Панель администратора\n\nВерсия бота:\n<blockquote>{await run_io(get_version)}</blockquote>"
-
     await state.clear()
 
     result = await session.execute(select(Admin.role).where(Admin.tg_id == message.from_user.id))
     role = result.scalar_one_or_none() or "admin"
 
-    _, _, perms = await get_admin_context(message.from_user.id)
+    _, is_super, perms = await get_admin_context(message.from_user.id)
+    if is_super:
+        version_text = await run_io(get_version, is_super)
+        text = f"🤖 Панель администратора\n\nВерсия бота:\n<blockquote>{version_text}</blockquote>"
+    else:
+        text = "🤖 Панель администратора"
+
     await message.answer(
         text=text,
         reply_markup=await build_panel_kb(admin_role=role, permissions=perms),

@@ -37,9 +37,10 @@ from handlers.buttons import (
     CHANGE_LOCATION,
     CONNECT_DEVICE,
     DELETE,
-    HWID_BUTTON,
     MAIN_MENU,
+    MY_DEVICES,
     QR,
+    UNBIND_DEVICE,
     RENEW_KEY,
     ROUTER_BUTTON,
     TV_BUTTON,
@@ -65,7 +66,6 @@ from handlers.utils import (
 )
 from hooks.hook_buttons import insert_hook_buttons
 from hooks.processors import (
-    process_after_hwid_reset,
     process_remnawave_webapp_override,
     process_view_key_menu,
 )
@@ -389,6 +389,12 @@ async def build_key_view_payload(session: AsyncSession, tg_id: int, key_ref_or_e
                     traffic_limit_gb = int(traffic_limit_bytes_actual / GB) if traffic_limit_bytes_actual > 0 else 0
                 except (TypeError, ValueError):
                     pass
+            hwid_device_limit_actual = profile.get("hwid_device_limit")
+            if hwid_device_limit_actual is not None:
+                try:
+                    device_limit = int(hwid_device_limit_actual)
+                except (TypeError, ValueError):
+                    pass
 
     country_selection_enabled = bool(MODES_CONFIG.get("COUNTRY_SELECTION_ENABLED", USE_COUNTRY_SELECTION))
     remnawave_webapp_enabled = bool(MODES_CONFIG.get("REMNAWAVE_WEBAPP_ENABLED", REMNAWAVE_WEBAPP))
@@ -482,7 +488,10 @@ async def build_key_view_payload(session: AsyncSession, tg_id: int, key_ref_or_e
     delete_key_enabled = bool(BUTTONS_CONFIG.get("DELETE_KEY_BUTTON_ENABLE", ENABLE_DELETE_KEY_BUTTON))
     if hwid_reset_enabled and hwid_count > 0:
         builder.row(
-            InlineKeyboardButton(text=HWID_BUTTON, callback_data=build_key_callback("reset_hwid", client_id, key_name))
+            InlineKeyboardButton(
+                text=MY_DEVICES,
+                callback_data=build_key_callback("my_devices", client_id, key_name) + "|0",
+            )
         )
 
     if qrcode_enabled:
@@ -523,17 +532,75 @@ async def render_key_info(message: Message, session: AsyncSession, key_ref_or_em
     )
 
 
-@router.callback_query(F.data.startswith("reset_hwid|"))
-async def handle_reset_hwid(callback_query: CallbackQuery, session: AsyncSession):
-    key_ref = callback_query.data.split("|", 1)[1]
+DEVICES_PER_PAGE = 3
+
+
+def _format_device_block(idx: int, device: dict) -> str:
+    hwid = html.escape(str(device.get("hwid") or "—"))
+    model = html.escape(str(device.get("deviceModel") or "—"))
+    platform = html.escape(str(device.get("platform") or "—"))
+    os_version = html.escape(str(device.get("osVersion") or "—"))
+    user_agent = html.escape(str(device.get("userAgent") or "—"))
+    created_raw = str(device.get("createdAt") or "")[:19].replace("T", " ")
+    created = html.escape(created_raw or "—")
+    return (
+        f"<blockquote expandable><b>#{idx} · {model}</b>\n"
+        f"📟 <code>{hwid}</code>\n"
+        f"🧠 {platform} · {os_version}\n"
+        f"🌐 <i>{user_agent}</i>\n"
+        f"🕓 {created}</blockquote>"
+    )
+
+
+def _build_devices_keyboard(
+    key_ref: str,
+    page: int,
+    total_pages: int,
+    devices_on_page: int,
+) -> InlineKeyboardBuilder:
+    builder = InlineKeyboardBuilder()
+    for idx in range(devices_on_page):
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{UNBIND_DEVICE} #{page * DEVICES_PER_PAGE + idx + 1}",
+                callback_data=f"unbind_dev|{key_ref}|{page}|{idx}",
+            )
+        )
+    nav_buttons: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton(text="◀️", callback_data=f"my_devices|{key_ref}|{page - 1}")
+        )
+    if total_pages > 0:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data=f"my_devices|{key_ref}|{page}",
+            )
+        )
+    if page + 1 < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(text="▶️", callback_data=f"my_devices|{key_ref}|{page + 1}")
+        )
+    if nav_buttons:
+        builder.row(*nav_buttons)
+    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}"))
+    return builder
+
+
+async def _render_my_devices(
+    callback_query: CallbackQuery,
+    session: AsyncSession,
+    key_ref: str,
+    page: int,
+    *,
+    notice: str | None = None,
+) -> None:
     key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
     key_name = key_obj.email if key_obj else key_ref
     record = await get_key_details(session, key_name)
-    if not record:
+    if not record or not key_owned_by_user(record, callback_query.from_user.id):
         await safe_answer_callback(callback_query, "❌ Ключ не найден.", show_alert=True)
-        return
-    if not key_owned_by_user(record, callback_query.from_user.id):
-        await safe_answer_callback(callback_query, "Доступ запрещён.", show_alert=True)
         return
 
     client_id = record.get("client_id")
@@ -541,60 +608,112 @@ async def handle_reset_hwid(callback_query: CallbackQuery, session: AsyncSession
         await safe_answer_callback(callback_query, "❌ У ключа отсутствует client_id.", show_alert=True)
         return
 
-    remna_api_url = await resolve_remnawave_api_url(session, str(record.get("server_id") or ""), fallback_any=True)
-    if not remna_api_url:
-        await safe_answer_callback(callback_query, "❌ Remnawave-сервер не найден.", show_alert=True)
-        return
+    server_id = str(record.get("server_id") or "")
 
-    async def _reset_devices(api):
-        devices = await api.get_user_hwid_devices(client_id)
-        if not devices:
-            return 0, 0
-        deleted_local = 0
-        for device in devices:
-            if await api.delete_user_hwid_device(client_id, device["hwid"]):
-                deleted_local += 1
-        return len(devices), deleted_local
+    async def _fetch(api):
+        return await api.get_user_hwid_devices(client_id)
 
-    reset_result = await with_remnawave_api(
-        session,
-        str(record.get("server_id") or ""),
-        _reset_devices,
-        fallback_any=True,
-        timeout_sec=12.0,
-    )
-    if reset_result is None:
-        await safe_answer_callback(callback_query, "❌ Авторизация в Remnawave не удалась.", show_alert=True)
-        return
+    devices = await with_remnawave_api(session, server_id, _fetch, fallback_any=True, timeout_sec=10.0)
+    if devices is None:
+        devices = []
 
-    total, deleted = reset_result
-    await invalidate_remnawave_profile(
-        session,
-        str(record.get("server_id") or ""),
-        str(client_id),
-        fallback_any=True,
-    )
+    total = len(devices)
     if total == 0:
-        await safe_answer_callback(callback_query, "✅ Устройства не были привязаны.", show_alert=True)
-    else:
-        await safe_answer_callback(callback_query, f"✅ Устройства сброшены ({deleted})", show_alert=True)
-
-    if await process_after_hwid_reset(
-        chat_id=callback_query.from_user.id,
-        admin=False,
-        session=session,
-        key_name=key_name,
-    ):
+        text = "💻 <b>Мои устройства</b>\n\n🔌 Нет привязанных устройств."
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
-        if callback_query.message.text:
-            await callback_query.message.edit_text("✅ Устройства сброшены", reply_markup=builder.as_markup())
-        else:
-            await callback_query.message.edit_caption(
-                caption="✅ Устройства сброшены",
-                reply_markup=builder.as_markup(),
-            )
+        builder.row(
+            InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}")
+        )
+        await edit_or_send_message(
+            target_message=callback_query.message,
+            text=text,
+            reply_markup=builder.as_markup(),
+            media_path=None,
+        )
         return
 
-    image_path = os.path.join("img", "pic_view.jpg")
-    await render_key_info(callback_query.message, session, key_ref, image_path)
+    total_pages = (total + DEVICES_PER_PAGE - 1) // DEVICES_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    start = page * DEVICES_PER_PAGE
+    page_devices = devices[start : start + DEVICES_PER_PAGE]
+
+    header = (
+        f"💻 <b>Мои устройства</b>\n"
+        f"🔗 Привязано: <b>{total}</b>\n\n"
+    )
+    if notice:
+        header += f"{notice}\n\n"
+    body = "\n".join(_format_device_block(start + i + 1, dev) for i, dev in enumerate(page_devices))
+    text = header + body
+
+    builder = _build_devices_keyboard(key_ref, page, total_pages, len(page_devices))
+    await edit_or_send_message(
+        target_message=callback_query.message,
+        text=text,
+        reply_markup=builder.as_markup(),
+        media_path=None,
+    )
+
+
+@router.callback_query(F.data.startswith("my_devices|"))
+async def handle_my_devices(callback_query: CallbackQuery, session: AsyncSession):
+    parts = callback_query.data.split("|")
+    if len(parts) < 3:
+        await safe_answer_callback(callback_query, "❌ Некорректный запрос.", show_alert=True)
+        return
+    key_ref = parts[1]
+    try:
+        page = int(parts[2])
+    except ValueError:
+        page = 0
+    await _render_my_devices(callback_query, session, key_ref, page)
+
+
+@router.callback_query(F.data.startswith("unbind_dev|"))
+async def handle_unbind_device(callback_query: CallbackQuery, session: AsyncSession):
+    parts = callback_query.data.split("|")
+    if len(parts) < 4:
+        await safe_answer_callback(callback_query, "❌ Некорректный запрос.", show_alert=True)
+        return
+    key_ref = parts[1]
+    try:
+        page = int(parts[2])
+        idx = int(parts[3])
+    except ValueError:
+        await safe_answer_callback(callback_query, "❌ Некорректный запрос.", show_alert=True)
+        return
+
+    key_obj = await resolve_key(session, callback_query.from_user.id, key_ref)
+    key_name = key_obj.email if key_obj else key_ref
+    record = await get_key_details(session, key_name)
+    if not record or not key_owned_by_user(record, callback_query.from_user.id):
+        await safe_answer_callback(callback_query, "❌ Ключ не найден.", show_alert=True)
+        return
+
+    client_id = record.get("client_id")
+    if not client_id:
+        await safe_answer_callback(callback_query, "❌ У ключа отсутствует client_id.", show_alert=True)
+        return
+
+    server_id = str(record.get("server_id") or "")
+
+    async def _delete(api):
+        devices = await api.get_user_hwid_devices(client_id) or []
+        target_idx = page * DEVICES_PER_PAGE + idx
+        if target_idx >= len(devices):
+            return None
+        target_hwid = devices[target_idx].get("hwid")
+        if not target_hwid:
+            return False
+        return await api.delete_user_hwid_device(client_id, target_hwid)
+
+    result = await with_remnawave_api(session, server_id, _delete, fallback_any=True, timeout_sec=10.0)
+    if result is None:
+        await safe_answer_callback(callback_query, "❌ Устройство не найдено.", show_alert=True)
+    elif result is False:
+        await safe_answer_callback(callback_query, "❌ Не удалось отвязать устройство.", show_alert=True)
+    else:
+        await invalidate_remnawave_profile(session, server_id, str(client_id), fallback_any=True)
+        await safe_answer_callback(callback_query, "✅ Устройство отвязано.")
+
+    await _render_my_devices(callback_query, session, key_ref, page)

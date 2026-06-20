@@ -46,7 +46,7 @@ ping3==4.0.8
 propcache==0.2.0
 psutil==7.0.0
 psycopg2-binary==2.9.10
-py3xui==0.3.4
+py3xui==0.7.0
 pycparser==2.22
 pydantic==2.9.2
 pywebpush>=2.0.0
@@ -73,3 +73,4 @@ uvicorn[standard]==0.35.0
 wrapt==1.16.0
 yarl>=1.17.0,<2.0
 yookassa==3.9.0
+defusedxml==0.7.1

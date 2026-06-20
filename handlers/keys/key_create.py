@@ -28,7 +28,7 @@ from database import (
 from database.access.resolution import notify_telegram_chat_id
 from database.models import Admin
 from database.notifications import check_hot_lead_discount
-from database.tariffs import create_subgroup_hash, find_subgroup_by_hash, get_tariffs
+from database.tariffs import create_subgroup_hash, find_subgroup_by_hash, get_subgroup_description, get_tariffs
 from database.users import get_balance
 from handlers.admin.panel.keyboard import AdminPanelCallback
 from handlers.buttons import BACK, MAIN_MENU
@@ -47,10 +47,11 @@ from hooks.processors import (
     process_tariff_menu,
 )
 from logger import logger
+from services.tariffs.visibility import filter_visible_tariffs
 
 from .key_mode.key_cluster_mode import key_cluster_mode
 from .key_mode.key_country_mode import key_country_mode
-from .utils import add_tariff_button_generic
+from .utils import add_tariff_button_generic, format_subgroup_description, format_tariff_descriptions, order_tariff_items
 
 
 router = Router()
@@ -230,7 +231,9 @@ async def handle_key_creation(
                     group_code=group_code,
                     with_subgroup_weights=True,
                 )
-                tariffs = [t for t in tariffs_data["tariffs"] if t.get("is_active")]
+                tariffs = await filter_visible_tariffs(
+                    session, tg_id, [t for t in tariffs_data["tariffs"] if t.get("is_active")]
+                )
                 subgroup_weights = tariffs_data["subgroup_weights"]
 
                 if not tariffs and discount_info and discount_info.get("available"):
@@ -241,7 +244,9 @@ async def handle_key_creation(
                         group_code=group_code,
                         with_subgroup_weights=True,
                     )
-                    tariffs = [t for t in tariffs_data["tariffs"] if t.get("is_active")]
+                    tariffs = await filter_visible_tariffs(
+                        session, tg_id, [t for t in tariffs_data["tariffs"] if t.get("is_active")]
+                    )
                     subgroup_weights = tariffs_data["subgroup_weights"]
                     discount_info = None
                     await state.update_data(discount_info=None)
@@ -295,29 +300,24 @@ async def handle_key_creation(
 
         builder = InlineKeyboardBuilder()
 
-        for tariff in grouped_tariffs.get(None, []):
-            await add_tariff_button_generic(
-                builder=builder,
-                tariff=tariff,
-                session=session,
-                tg_id=tg_id,
-                language_code=language_code,
-                callback_prefix="select_tariff_plan",
-            )
-
-        sorted_subgroups = sorted(
-            [key for key in grouped_tariffs if key],
-            key=lambda title: (subgroup_weights.get(title, 999999) if subgroup_weights else 999999, title),
-        )
-
-        for subgroup in sorted_subgroups:
-            subgroup_hash = create_subgroup_hash(subgroup, group_code)
-            builder.row(
-                InlineKeyboardButton(
-                    text=subgroup,
-                    callback_data=f"tariff_subgroup_user|{subgroup_hash}",
+        for kind, payload in order_tariff_items(grouped_tariffs):
+            if kind == "tariff":
+                await add_tariff_button_generic(
+                    builder=builder,
+                    tariff=payload,
+                    session=session,
+                    tg_id=tg_id,
+                    language_code=language_code,
+                    callback_prefix="select_tariff_plan",
                 )
-            )
+            else:
+                subgroup_hash = create_subgroup_hash(payload, group_code)
+                builder.row(
+                    InlineKeyboardButton(
+                        text=payload,
+                        callback_data=f"tariff_subgroup_user|{subgroup_hash}",
+                    )
+                )
 
         tariff_menu_buttons = await process_tariff_menu(
             group_code=group_code,
@@ -342,7 +342,7 @@ async def handle_key_creation(
 
         await edit_or_send_message(
             target_message=target_message,
-            text=SELECT_TARIFF_PLAN_MSG + discount_message,
+            text=SELECT_TARIFF_PLAN_MSG + format_tariff_descriptions(grouped_tariffs.get(None, [])) + discount_message,
             reply_markup=builder.as_markup(),
             media_path=os.path.join("img", "tariffs.jpg"),
             disable_web_page_preview=False,
@@ -386,9 +386,11 @@ async def show_tariffs_in_subgroup_user(callback: CallbackQuery, state: FSMConte
         group_code = tariffs_for_cluster[0].get("group_code")
         if group_code:
             tariffs = await get_tariffs(session, group_code=group_code)
-            filtered = [
-                tariff for tariff in tariffs if tariff.get("subgroup_title") == subgroup and tariff.get("is_active")
-            ]
+            filtered = await filter_visible_tariffs(
+                session,
+                callback.from_user.id,
+                [tariff for tariff in tariffs if tariff.get("subgroup_title") == subgroup and tariff.get("is_active")],
+            )
 
     if not filtered:
         await edit_or_send_message(
@@ -415,9 +417,10 @@ async def show_tariffs_in_subgroup_user(callback: CallbackQuery, state: FSMConte
     builder.row(InlineKeyboardButton(text=BACK, callback_data="back_to_tariff_group_list"))
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
+    sub_desc = await get_subgroup_description(session, group_code, subgroup)
     await edit_or_send_message(
         target_message=callback.message,
-        text=f"<b>{subgroup}</b>\n\nВыберите тариф:",
+        text=f"<b>{subgroup}</b>\n\n" + format_subgroup_description(sub_desc) + "Выберите тариф:" + format_tariff_descriptions(filtered),
         reply_markup=builder.as_markup(),
     )
 
@@ -455,7 +458,11 @@ async def back_to_subgroup_tariffs(callback: CallbackQuery, state: FSMContext, s
         gc = tariffs_for_cluster[0].get("group_code")
         if gc:
             tariffs = await get_tariffs(session, group_code=gc)
-            filtered = [t for t in tariffs if t.get("subgroup_title") == subgroup and t.get("is_active")]
+            filtered = await filter_visible_tariffs(
+                session,
+                callback.from_user.id,
+                [t for t in tariffs if t.get("subgroup_title") == subgroup and t.get("is_active")],
+            )
 
     if not filtered:
         await back_to_tariff_group_list(callback, state, session)
@@ -476,9 +483,10 @@ async def back_to_subgroup_tariffs(callback: CallbackQuery, state: FSMContext, s
     builder.row(InlineKeyboardButton(text=BACK, callback_data="back_to_tariff_group_list"))
     builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
+    sub_desc = await get_subgroup_description(session, group_code, subgroup)
     await edit_or_send_message(
         target_message=callback.message,
-        text=f"<b>{subgroup}</b>\n\nВыберите тариф:",
+        text=f"<b>{subgroup}</b>\n\n" + format_subgroup_description(sub_desc) + "Выберите тариф:" + format_tariff_descriptions(filtered),
         reply_markup=builder.as_markup(),
     )
     await callback.answer()

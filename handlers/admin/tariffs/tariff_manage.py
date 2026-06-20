@@ -27,6 +27,7 @@ from .keyboard import (
     build_tariff_groups_kb,
     build_tariff_list_kb,
     build_tariff_menu_kb,
+    build_tariff_visibility_kb,
 )
 from .tariff_states import TariffCreateState, TariffEditState
 from .tariff_utils import render_tariff_card, validate_tariff_name
@@ -207,9 +208,14 @@ async def select_vless_creation(callback: CallbackQuery, state: FSMContext, sess
         },
     )
 
+    from .tariff_utils import check_tariff_price_monotonicity, format_price_monotonicity_warning
+
+    warn_block = format_price_monotonicity_warning(await check_tariff_price_monotonicity(session, new_tariff))
+
     await state.set_state(TariffCreateState.confirm_more)
     await callback.message.edit_text(
-        f"✅ Тариф <b>{new_tariff.name}</b> добавлен в группу <code>{data['group_code']}</code>.\n\n"
+        f"✅ Тариф <b>{new_tariff.name}</b> добавлен в группу <code>{data['group_code']}</code>."
+        f"{warn_block}\n\n"
         "➕ Хотите добавить ещё один тариф в эту группу?",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
@@ -481,6 +487,8 @@ async def ask_new_value(callback: CallbackQuery, state: FSMContext):
         "device_limit": "лимит устройств (0 — безлимит)",
         "vless": "VLESS (да/нет)",
         "external_squad": "внешний сквад (0 — убрать)",
+        "cooldown_days": "задержку между покупками в днях (0 — без задержки)",
+        "description": "описание тарифа — что в него входит («-» — убрать)",
     }
 
     await callback.message.edit_text(
@@ -508,6 +516,65 @@ async def set_vless_flag(callback: CallbackQuery, state: FSMContext, session: As
 
     text, markup = render_tariff_card(tariff)
     await callback.message.edit_text(text=text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("tvis|"), IsAdminFilter())
+async def show_visibility_menu(callback: CallbackQuery, state: FSMContext):
+    tariff_id = int(callback.data.split("|")[1])
+    await state.clear()
+    await callback.message.edit_text(
+        "👁 Кому показывать тариф:",
+        reply_markup=build_tariff_visibility_kb(tariff_id),
+    )
+
+
+@router.callback_query(F.data.startswith("tvisset|"), IsAdminFilter())
+async def set_visibility(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    _, tid, mode, predicate = callback.data.split("|", 3)
+    tariff_id = int(tid)
+
+    if predicate == "active_count" and mode in ("only", "except"):
+        await state.set_state(TariffEditState.visibility_count)
+        await state.update_data(vis_tariff_id=tariff_id, vis_mode=mode)
+        await callback.message.edit_text(
+            "Введите минимальное число активных подписок (N):",
+            reply_markup=build_cancel_kb(),
+        )
+        return
+
+    result = await session.execute(select(Tariff).where(Tariff.id == tariff_id))
+    tariff = result.scalar_one_or_none()
+    if not tariff:
+        await callback.message.edit_text("❌ Тариф не найден.")
+        return
+    tariff.visibility_rules = None if (mode == "all" or predicate == "none") else {"mode": mode, "predicate": predicate}
+    tariff.updated_at = datetime.utcnow()
+
+    text, markup = render_tariff_card(tariff)
+    await callback.message.edit_text(text=text, reply_markup=markup)
+
+
+@router.message(TariffEditState.visibility_count, IsAdminFilter())
+async def apply_visibility_count(message: Message, state: FSMContext, session: AsyncSession):
+    if not message.text or not message.text.strip().isdigit() or int(message.text.strip()) <= 0:
+        await message.answer("❌ Введите положительное число.")
+        return
+    data = await state.get_data()
+    tariff_id = data.get("vis_tariff_id")
+    mode = data.get("vis_mode")
+    n = int(message.text.strip())
+    await state.clear()
+
+    result = await session.execute(select(Tariff).where(Tariff.id == tariff_id))
+    tariff = result.scalar_one_or_none()
+    if not tariff:
+        await message.answer("❌ Тариф не найден.")
+        return
+    tariff.visibility_rules = {"mode": mode, "predicate": "active_count", "min_count": n}
+    tariff.updated_at = datetime.utcnow()
+
+    text, markup = render_tariff_card(tariff)
+    await message.answer(text=text, reply_markup=markup)
 
 
 @router.message(TariffEditState.editing_value, IsAdminFilter())
@@ -545,7 +612,16 @@ async def apply_edit(message: Message, state: FSMContext, session: AsyncSession)
         await message.answer(text=text, reply_markup=markup)
         return
 
-    if field in ["duration_days", "price_rub", "traffic_limit", "device_limit"]:
+    if field == "description":
+        tariff.description = None if value in ("", "0", "-") else value[:1000]
+        tariff.updated_at = datetime.utcnow()
+        await state.clear()
+
+        text, markup = render_tariff_card(tariff)
+        await message.answer(text=text, reply_markup=markup)
+        return
+
+    if field in ["duration_days", "price_rub", "traffic_limit", "device_limit", "cooldown_days"]:
         try:
             num = int(value)
             if num < 0:
@@ -564,6 +640,10 @@ async def apply_edit(message: Message, state: FSMContext, session: AsyncSession)
     await state.clear()
 
     text, markup = render_tariff_card(tariff)
+    if field in ["duration_days", "price_rub", "traffic_limit", "device_limit"]:
+        from .tariff_utils import check_tariff_price_monotonicity, format_price_monotonicity_warning
+
+        text += format_price_monotonicity_warning(await check_tariff_price_monotonicity(session, tariff))
     await message.answer(text=text, reply_markup=markup)
 
 

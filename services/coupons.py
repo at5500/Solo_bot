@@ -107,7 +107,7 @@ async def apply_fixed_coupon(
         await _check_new_user(session, user_id)
 
     await update_balance(session, int(user_id), float(amount))
-    await create_coupon_usage(session, int(coupon.id), int(user_id), tg_id)
+    await create_coupon_usage(session, int(coupon.id), int(user_id))
     await update_coupon_usage_count(session, int(coupon.id))
     await add_payment(
         session=session,

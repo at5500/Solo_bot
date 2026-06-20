@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import API_TOKEN, REDIS_URL
+from core.settings.modes_config import resolve_protect_content
 from database import async_session_maker
 from filters.private import IsPrivateFilter
 from utils.button_icons import apply_button_icons_patch, set_button_icon_config
@@ -19,20 +20,24 @@ from utils.modules_loader import load_modules_from_folder, modules_hub
 
 apply_button_icons_patch()
 
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
 
 RedisStorage = import_module("aiogram.fsm.storage.redis").RedisStorage
-redis_from_url = import_module("redis.asyncio").from_url
-redis = redis_from_url(
+_redis_asyncio = import_module("redis.asyncio")
+_BlockingConnectionPool = import_module("redis.asyncio.connection").BlockingConnectionPool
+
+_redis_pool = _BlockingConnectionPool.from_url(
     REDIS_URL,
     encoding="utf-8",
     decode_responses=True,
-    max_connections=64,
+    max_connections=128,
+    timeout=20,
     health_check_interval=30,
     socket_connect_timeout=5,
     socket_timeout=5,
     retry_on_timeout=True,
 )
+redis = _redis_asyncio.Redis(connection_pool=_redis_pool)
 storage = RedisStorage(redis=redis)
 
 dp = Dispatcher(bot=bot, storage=storage)

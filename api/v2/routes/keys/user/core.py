@@ -4,6 +4,8 @@
 из ``__init__.py`` запускает регистрацию декораторов.
 """
 
+import time
+
 from .._common import *  # noqa: F401,F403 — подтягиваем все имена для endpoints
 from .._common import (
     _key_actions_config,
@@ -67,6 +69,115 @@ async def user_keys_actions_config(
 ):
     _ = identity
     return _key_actions_config()
+
+
+@user_router.get("/{client_id}/connection", response_model=AccountKeyConnectionResponse)
+async def user_key_connection(
+    client_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Лёгкая инфо о текущей подписке: онлайн/offline, сервер, протокол, дни до окончания."""
+    billing_user_id = await _resolve_billing_user_id(request, identity, session)
+    db_key = (
+        await session.execute(select(Key).where(Key.user_id == billing_user_id, Key.client_id == client_id).limit(1))
+    ).scalar_one_or_none()
+    if db_key is None:
+        raise HTTPException(status_code=404, detail="Подписка не найдена")
+    server_name = str(getattr(db_key, "server_id", "") or "")
+    cluster_name = ""
+    panel_type = ""
+    if server_name:
+        srv = (
+            await session.execute(
+                select(Server).where(Server.server_name == server_name).limit(1)
+            )
+        ).scalar_one_or_none()
+        if srv is not None:
+            cluster_name = str(getattr(srv, "cluster_name", "") or "")
+            panel_type = str(getattr(srv, "panel_type", "") or "").lower()
+    expiry_ms = int(getattr(db_key, "expiry_time", 0) or 0)
+    is_frozen = bool(getattr(db_key, "is_frozen", False))
+    now_ms = int(time.time() * 1000)
+    online = not is_frozen and expiry_ms > now_ms
+    expires_in_days = max(0, int((expiry_ms - now_ms) / (1000 * 60 * 60 * 24))) if expiry_ms > 0 else 0
+
+    is_online: bool | None = None
+    online_at: str | None = None
+    connected_devices: int | None = None
+    if panel_type == "remnawave" and not is_frozen:
+        try:
+            from panels.remnawave_runtime import get_remnawave_profile
+
+            profile = await get_remnawave_profile(session, server_name, client_id, fallback_any=True)
+            if profile:
+                is_online = bool(profile.get("is_online"))
+                raw_online_at = profile.get("online_at")
+                online_at = str(raw_online_at) if raw_online_at else None
+                hwid = profile.get("hwid_count")
+                connected_devices = int(hwid) if isinstance(hwid, int) else None
+        except Exception:
+            pass
+    if panel_type == "remnawave":
+        protocol = "VLESS"
+    elif panel_type == "marzban":
+        protocol = "VLESS"
+    elif panel_type == "3xui":
+        protocol = "VLESS"
+    else:
+        protocol = panel_type.upper() or "VLESS"
+    return AccountKeyConnectionResponse(
+        client_id=str(getattr(db_key, "client_id", "") or ""),
+        online=online,
+        is_frozen=is_frozen,
+        expiry_time=expiry_ms,
+        expires_in_days=expires_in_days,
+        server_name=server_name,
+        cluster_name=cluster_name,
+        panel_type=panel_type,
+        protocol=protocol,
+        is_online=is_online,
+        online_at=online_at,
+        connected_devices=connected_devices,
+    )
+
+
+@user_router.get("/{client_id}/traffic-history")
+async def user_key_traffic_history(
+    client_id: str,
+    request: Request,
+    days: int = Query(default=30, ge=1, le=365),
+    granularity: str = Query(default="day"),
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """История использования трафика для графика в кабинете.
+
+    granularity=day — по дням (по умолчанию); granularity=hour — по часам за сутки.
+    """
+    from api.ratelimit import enforce_rate_limit
+
+    await enforce_rate_limit(request, session, bucket="traffic_history", max_per_window=60, window_sec=60)
+    billing_user_id = await _resolve_billing_user_id(request, identity, session)
+    owns = (
+        await session.execute(
+            select(Key.client_id).where(Key.user_id == billing_user_id, Key.client_id == client_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if owns is None:
+        raise HTTPException(status_code=404, detail="Подписка не найдена")
+
+    if granularity == "hour":
+        from services.traffic_history import get_traffic_history_hourly
+
+        points = await get_traffic_history_hourly(session, client_id, hours=24)
+        return {"client_id": client_id, "days": 1, "granularity": "hour", "points": points}
+
+    from services.traffic_history import get_traffic_history
+
+    points = await get_traffic_history(session, client_id, days)
+    return {"client_id": client_id, "days": days, "granularity": "day", "points": points}
 
 
 @user_router.get("/{client_id}/details", response_model=AccountKeyDetailsResponse)
@@ -215,6 +326,11 @@ async def user_key_update_alias(
             await session.execute(select(Tariff.price_rub).where(Tariff.id == int(tariff_id_value)).limit(1))
         ).scalar_one_or_none()
         is_trial_value = price == 0
+    await session.flush()
+    from database.keys import invalidate_key_details, invalidate_keys_list
+
+    await invalidate_keys_list(session, billing_user_id)
+    await invalidate_key_details(str(getattr(db_key, "email", "") or ""))
     return AccountKeyResponse(
         email=str(getattr(db_key, "email", "") or ""),
         alias=getattr(db_key, "alias", None),

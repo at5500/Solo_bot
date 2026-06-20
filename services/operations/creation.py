@@ -375,7 +375,6 @@ async def create_client_on_server(
                     total_gb=traffic_limit_bytes,
                     expiry_time=expiry_timestamp,
                     enable=True,
-                    flow="xtls-rprx-vision",
                     inbound_id=int(inbound_id),
                     sub_id=sub_id,
                 ),

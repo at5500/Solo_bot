@@ -58,6 +58,11 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
     except Exception:
         partner_feature_enabled = False
         default_percent = 0.0
+    from api.v2.routes.partners import partners_table_exists
+
+    partner_table_ok = await partners_table_exists(session)
+    if not partner_table_ok:
+        partner_feature_enabled = False
     payload: dict[str, object] = {
         "partner_enabled": partner_feature_enabled,
         "partner_code": "",
@@ -65,6 +70,7 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
         "partner_percent": default_percent,
         "partner_percent_custom": False,
         "partner_referred_total": 0,
+        "partner_referred_paid": 0,
         "partner_payout_method": None,
         "partner_payout_destination": None,
         "partner_last_payout": None,
@@ -115,6 +121,7 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
     payout_destination_raw = str(partner_row[6] or "").strip() or None
     payout_destination = _mask_payout_destination(payout_method, payout_destination_raw)
     referred_total = 0
+    referred_paid = 0
     last_payout: dict[str, object] | None = None
     if tg_id is not None:
         try:
@@ -158,13 +165,35 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
                 }
         except Exception:
             last_payout = None
+        try:
+            referred_paid = int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT COUNT(DISTINCT pr.joined_tg_id) "
+                            "FROM partners pr "
+                            "WHERE pr.partner_tg_id = :tg_id "
+                            "AND EXISTS ("
+                            "  SELECT 1 FROM payments pay "
+                            "  WHERE pay.tg_id = pr.joined_tg_id "
+                            "  AND lower(pay.status) = 'success'"
+                            ")"
+                        ),
+                        {"tg_id": int(tg_id)},
+                    )
+                ).scalar()
+                or 0
+            )
+        except Exception:
+            referred_paid = 0
     payload.update({
-        "partner_enabled": bool(partner_feature_enabled or code or referred_total > 0 or balance > 0),
+        "partner_enabled": bool(partner_table_ok and (partner_feature_enabled or code or referred_total > 0 or balance > 0)),
         "partner_code": code,
         "partner_balance": balance,
         "partner_percent": percent_value,
         "partner_percent_custom": percent_custom,
         "partner_referred_total": referred_total,
+        "partner_referred_paid": referred_paid,
         "partner_payout_method": payout_method,
         "partner_payout_destination": payout_destination,
         "partner_last_payout": last_payout,

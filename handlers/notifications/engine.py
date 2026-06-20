@@ -27,10 +27,12 @@ from core.bootstrap import MODES_CONFIG, NOTIFICATIONS_CONFIG
 from handlers.notifications.bulk import create_bulk_updates, execute_bulk_updates
 from handlers.notifications.context import NotificationContext
 from handlers.notifications.preload import preload_with_fallback
+from handlers.notifications.processors.cold_leads import process_cold_leads
 from handlers.notifications.processors.expired import process_expired_keys
 from handlers.notifications.processors.expiring import process_expiring_keys
 from handlers.notifications.processors.hot_leads import process_hot_leads
 from handlers.notifications.processors.inactive_trial import process_inactive_trial
+from handlers.notifications.processors.returning import process_returning
 from handlers.notifications.processors.zero_traffic import process_zero_traffic
 from hooks.hooks import run_hooks
 from logger import logger
@@ -92,6 +94,8 @@ async def _run_cycle(bot: Bot, sessionmaker: async_sessionmaker):
         delete_delay = int(NOTIFICATIONS_CONFIG.get("DELETE_KEY_DELAY_MINUTES", NOTIFY_DELETE_DELAY))
         inactive_traffic = bool(NOTIFICATIONS_CONFIG.get("INACTIVE_TRAFFIC_ENABLED", NOTIFY_INACTIVE_TRAFFIC))
         hot_leads_enabled = bool(NOTIFICATIONS_CONFIG.get("HOT_LEADS_ENABLED", NOTIFY_HOT_LEADS))
+        cold_leads_enabled = bool(NOTIFICATIONS_CONFIG.get("COLD_LEADS_ENABLED", False))
+        returning_enabled = bool(NOTIFICATIONS_CONFIG.get("RETURNING_ENABLED", False))
 
         if not trial_disabled:
             try:
@@ -153,6 +157,18 @@ async def _run_cycle(bot: Bot, sessionmaker: async_sessionmaker):
                 await process_hot_leads(bot, session)
             except Exception as e:
                 logger.error(f"Ошибка hot_leads: {e}")
+
+        if cold_leads_enabled:
+            try:
+                await process_cold_leads(bot, session)
+            except Exception as e:
+                logger.error(f"Ошибка cold_leads: {e}")
+
+        if returning_enabled:
+            try:
+                await process_returning(bot, session)
+            except Exception as e:
+                logger.error(f"Ошибка returning: {e}")
 
         if bulk_updates:
             bulk_start = datetime.now()

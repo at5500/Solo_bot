@@ -7,6 +7,7 @@ import pytz
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit import (
@@ -26,12 +27,14 @@ from database import (
     count_active_paid_keys,
     count_active_trial_keys,
     count_hot_leads,
+    count_identities_with_email,
     count_total_keys,
     count_total_referrals,
     count_total_users,
     count_users_registered_between,
     count_users_registered_since,
     count_users_updated_today,
+    count_users_with_tg_id,
     get_tariff_distribution,
     get_tariff_names_groups_subgroups_durations,
     sum_payments_between,
@@ -144,6 +147,8 @@ async def handle_stats(callback_query: CallbackQuery, session: AsyncSession):
         last_month_end_utc = last_month_end.astimezone(pytz.UTC).replace(tzinfo=None)
 
         total_users = await count_total_users(session)
+        users_with_tg = await count_users_with_tg_id(session)
+        identities_with_email = await count_identities_with_email(session)
         users_updated_today = await count_users_updated_today(session, today_start_utc)
         registrations_today = await count_users_registered_since(session, today_start_utc)
         registrations_yesterday = await count_users_registered_between(session, yesterday_start_utc, yesterday_end_utc)
@@ -269,6 +274,11 @@ async def handle_stats(callback_query: CallbackQuery, session: AsyncSession):
             f"├ 🗓️ За месяц: <b>{registrations_month}</b>\n"
             f"├ 📅 За прошлый месяц: <b>{registrations_last_month}</b>\n"
             f"└ 🌐 Всего: <b>{total_users}</b>\n"
+            f"</blockquote>\n"
+            f"🔗 <b>Связанные данные:</b>\n"
+            f"<blockquote>"
+            f"├ 📨 Учёток с e-mail: <b>{identities_with_email}</b>\n"
+            f"└ 💬 Привязанных Telegram: <b>{users_with_tg}</b>\n"
             f"</blockquote>\n"
             f"💡 <b>Активность:</b>\n"
             f"└ 👥 Сегодня были активны: <b>{users_updated_today}</b>\n\n"
@@ -542,33 +552,65 @@ async def handle_export_keys_csv(callback_query: CallbackQuery, session: AsyncSe
         await callback_query.message.edit_text(text=f"❗ Ошибка: {e}", reply_markup=kb)
 
 
+def _moscow_day_window(report_date: date, moscow_tz) -> tuple[datetime, datetime]:
+    start = moscow_tz.localize(datetime.combine(report_date, datetime.min.time()))
+    end = start + timedelta(days=1)
+    return start, end
+
+
+def _format_trend(current: float, previous: float, suffix: str = "") -> str:
+    diff = round(current - previous, 2)
+    if diff == 0:
+        return " <i>→ без изменений</i>"
+    arrow = "📈" if diff > 0 else "📉"
+    sign = "+" if diff > 0 else "−"
+    return f" <i>{arrow} {sign}{abs(diff):g}{suffix} к пред. дню</i>"
+
+
 async def send_daily_stats_report(session: AsyncSession):
     try:
         moscow_tz = pytz.timezone("Europe/Moscow")
         now_moscow = datetime.now(moscow_tz)
-        update_time = now_moscow.strftime("%d.%m.%y %H:%M")
+        update_time = now_moscow.strftime("%d.%m.%Y %H:%M")
 
         report_date = now_moscow.date() - timedelta(days=1)
+        prev_date = report_date - timedelta(days=1)
 
-        start = moscow_tz.localize(datetime.combine(report_date, datetime.min.time()))
-        end = moscow_tz.localize(datetime.combine(report_date + timedelta(days=1), datetime.min.time()))
+        day_start, day_end = _moscow_day_window(report_date, moscow_tz)
+        prev_start, prev_end = _moscow_day_window(prev_date, moscow_tz)
 
-        start_utc = start.astimezone(pytz.UTC).replace(tzinfo=None)
-        end_utc = end.astimezone(pytz.UTC).replace(tzinfo=None)
+        day_start_utc = day_start.astimezone(pytz.UTC).replace(tzinfo=None)
+        day_end_utc = day_end.astimezone(pytz.UTC).replace(tzinfo=None)
+        prev_start_utc = prev_start.astimezone(pytz.UTC).replace(tzinfo=None)
+        prev_end_utc = prev_end.astimezone(pytz.UTC).replace(tzinfo=None)
 
-        registrations_today = await count_users_registered_between(session, start_utc, end_utc)
-        payments_today = await sum_payments_between(session, start.replace(tzinfo=None), end.replace(tzinfo=None))
-        active_keys = await count_active_keys(session)
+        new_users = await count_users_registered_between(session, day_start_utc, day_end_utc)
+        new_users_prev = await count_users_registered_between(session, prev_start_utc, prev_end_utc)
+
+        revenue = await sum_payments_between(session, day_start.replace(tzinfo=None), day_end.replace(tzinfo=None))
+        revenue_prev = await sum_payments_between(session, prev_start.replace(tzinfo=None), prev_end.replace(tzinfo=None))
 
         text = (
-            f"🗓️ <b>Сводка за {report_date.strftime('%d.%m.%Y')} с 00:00 до 23:59 МСК</b>\n\n"
-            f"👤 Новых пользователей: <b>{registrations_today}</b>\n"
-            f"💰 Оплачено: <b>{payments_today} ₽</b>\n"
-            f"🔐 Активных подписок: <b>{active_keys}</b>\n\n"
-            f"⏱️ <i>Отчёт сгенерирован: {update_time} МСК</i>"
+            f"🌙 <b>Ежедневная сводка</b>\n"
+            f"📅 <i>{report_date.strftime('%d.%m.%Y')} · 00:00–23:59 МСК</i>\n\n"
+            f"👤 Новых пользователей: <b>{new_users}</b>{_format_trend(new_users, new_users_prev)}\n"
+            f"💰 Доход за день: <b>{revenue} ₽</b>{_format_trend(revenue, revenue_prev, ' ₽')}\n\n"
+            f"🔮 <b>Прогноз по темпу дня</b>\n"
+            f"<blockquote>"
+            f"├ 📆 За неделю: <b>~{round(new_users * 7)}</b> польз. · <b>~{round(revenue * 7)} ₽</b>\n"
+            f"└ 🗓️ За месяц: <b>~{round(new_users * 30)}</b> польз. · <b>~{round(revenue * 30)} ₽</b>\n"
+            f"</blockquote>\n"
+            f"⏱️ <i>Сформировано: {update_time} МСК</i>"
         )
 
+        from database.models import Admin
+
+        moderator_ids = set(
+            (await session.execute(select(Admin.tg_id).where(Admin.role == "moderator"))).scalars().all()
+        )
         for admin_id in ADMIN_ID:
+            if admin_id in moderator_ids:
+                continue
             await bot.send_message(admin_id, text)
 
     except Exception as e:

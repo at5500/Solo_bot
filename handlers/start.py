@@ -5,7 +5,7 @@ from typing import Any
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -207,6 +207,9 @@ async def process_start_logic(
     if tl == "instructions":
         await send_instructions(message)
         return
+    if tl.startswith("tab_"):
+        if await handle_cabinet_tab_link(message, tl[4:]):
+            return
 
     trial_key = await get_or_load_user_snapshot(session, user_snapshot, user_data["tg_id"])
     trial = 0
@@ -223,6 +226,30 @@ async def process_start_logic(
             await show_start_menu(message, admin, session, trial=trial, key_count=key_count)
     else:
         await show_start_menu(message, admin, session, trial=trial, key_count=key_count)
+
+
+_CABINET_TABS = {"profile", "keys", "instructions", "referrals", "partners", "gifts", "notifications"}
+
+
+async def handle_cabinet_tab_link(message, tab):
+    if tab not in _CABINET_TABS:
+        return False
+    from core.settings.web_config import get_site_url, is_web_enabled
+
+    if not is_web_enabled():
+        return False
+    site_url = get_site_url()
+    if not site_url:
+        return False
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🌐 Личный кабинет",
+            web_app=WebAppInfo(url=f"{site_url}/dashboard?tab={tab}&webapp=1"),
+        )
+    )
+    await message.answer(WELCOME_TEXT, reply_markup=builder.as_markup())
+    return True
 
 
 async def handle_coupon_link(part, message, state, session, admin, user_data):
@@ -322,13 +349,14 @@ async def show_start_menu(
     if show_profile:
         kb.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
-    if BUTTONS_CONFIG.get("CHANNEL_BUTTON_ENABLE", CHANNEL_EXISTS):
-        kb.row(
-            InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL),
-            InlineKeyboardButton(text=CHANNEL, url=CHANNEL_URL),
-        )
-    else:
-        kb.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
+    channel_enabled = bool(BUTTONS_CONFIG.get("CHANNEL_BUTTON_ENABLE", CHANNEL_EXISTS))
+    bottom_row = []
+    if SUPPORT_CHAT_URL:
+        bottom_row.append(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
+    if channel_enabled and CHANNEL_URL:
+        bottom_row.append(InlineKeyboardButton(text=CHANNEL, url=CHANNEL_URL))
+    if bottom_row:
+        kb.row(*bottom_row)
 
     if admin:
         kb.row(InlineKeyboardButton(text=ADMIN_BTN, callback_data=AdminPanelCallback(action="admin").pack()))

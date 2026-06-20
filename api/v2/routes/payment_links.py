@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +16,24 @@ from database import (
     get_payment_from_db_by_payment_id,
     identities as idb,
 )
+from database.payments import update_payment_status
 from database.temporary_data import create_temporary_data
 from logger import logger
+
+
+_PAYMENT_LINK_TTL_MIN = 60
+
+
+def _payment_link_expired(created_at) -> bool:
+    if created_at is None:
+        return False
+    try:
+        tz = getattr(created_at, "tzinfo", None)
+        now = datetime.now(tz) if tz is not None else datetime.now()
+        age = (now - created_at).total_seconds()
+        return age > _PAYMENT_LINK_TTL_MIN * 60
+    except Exception:
+        return False
 from services.payments.payment_events import payment_events_channel
 from services.payments.payment_links import PaymentLinkRequest, create_payment_link
 
@@ -140,7 +158,7 @@ async def _store_payment_intent(
         await create_temporary_data(session, billing_user_ref, "waiting_for_addons_payment", payload)
 
 
-@router.post("/", response_model=PaymentLinkCreateResponse)
+@router.post("", response_model=PaymentLinkCreateResponse)
 async def create_link(
     body: PaymentLinkCreateRequest,
     http_request: Request,
@@ -269,6 +287,20 @@ async def get_link_status(
         raise HTTPException(status_code=404, detail="Payment not found")
     status = str(payment.get("status") or "").lower() or None
     logger.info(f"[Status] payment_id={payment_id} status={status}, billing_user_ref={billing_user_ref}")
+    if status not in {"success", "failed", "cancelled"} and not _payment_link_expired(payment.get("created_at")):
+        from services.payments.reconcile import reconcile_pending_payment
+
+        try:
+            outcome = await reconcile_pending_payment(payment)
+            if outcome == "success":
+                status = "success"
+            elif outcome == "canceled":
+                internal_id = payment.get("id")
+                if internal_id is not None:
+                    await update_payment_status(session, int(internal_id), "cancelled")
+                status = "cancelled"
+        except Exception as e:
+            logger.warning(f"[PaymentLinks] Сверка платежа {payment_id} с провайдером не удалась: {e}")
     return PaymentLinkStatusResponse(
         success=True,
         payment_id=payment_id,

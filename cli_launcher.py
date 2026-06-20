@@ -23,13 +23,18 @@ except ImportError:
     requests = None
 
 try:
+    from rich import box
     from rich.console import Console, Group
     from rich.live import Live
     from rich.panel import Panel
-    from rich.progress import Progress, SpinnerColumn, TextColumn
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
     from rich.prompt import Confirm, Prompt
+    from rich.rule import Rule
     from rich.table import Table
+    from rich.theme import Theme
+    _HAS_RICH = True
 except ImportError:
+    _HAS_RICH = False
 
     def _strip_markup(value):
         if not isinstance(value, str):
@@ -85,9 +90,27 @@ except ImportError:
     class SpinnerColumn:
         pass
 
+    class BarColumn:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
     class TextColumn:
         def __init__(self, *args, **kwargs) -> None:
             pass
+
+    class box:
+        ROUNDED = SIMPLE = MINIMAL = HEAVY = SQUARE = HORIZONTALS = None
+
+    class Theme:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class Rule:
+        def __init__(self, title="", **kwargs) -> None:
+            self.title = title
+
+        def __str__(self) -> str:
+            return _strip_markup(self.title)
 
     class Progress:
         def __init__(self, *args, **kwargs) -> None:
@@ -173,12 +196,52 @@ def ensure_utf8_locale():
 
 
 try:
-    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-console = Console()
+if _HAS_RICH:
+    SOLO_THEME = Theme(
+        {
+            "accent": "#22d3ee",
+            "accent.dim": "#0e7490",
+            "title": "bold #e6edf3",
+            "muted": "#8b949e",
+            "ok": "#34d399",
+            "ok.bold": "bold #34d399",
+            "warn": "#f59e0b",
+            "warn.bold": "bold #f59e0b",
+            "err": "#f87171",
+            "err.bold": "bold #f87171",
+            "step": "bold #22d3ee",
+        }
+    )
+    console = Console(theme=SOLO_THEME, highlight=False)
+else:
+    console = Console()
+
+_STEP_GLYPH = "›"
+
+
+def step_rule(index: int, total: int, title: str) -> None:
+    """Аккуратный разделитель шага установки: ─── [2/5] · Nginx ───────."""
+    console.print()
+    console.print(Rule(f"[step]{index}/{total}[/step] [muted]{_STEP_GLYPH}[/muted] [title]{title}[/title]", style="accent.dim", align="left"))
+
+
+def step_ok(text: str) -> None:
+    console.print(f"  [ok.bold]✓[/ok.bold] [muted]{text}[/muted]")
+
+
+def step_warn(text: str) -> None:
+    console.print(f"  [warn.bold]![/warn.bold] [warn]{text}[/warn]")
+
+
+def step_fail(text: str) -> None:
+    console.print(f"  [err.bold]✗[/err.bold] [err]{text}[/err]")
+
+
 ensure_utf8_locale()
 
 BACK_DIR = os.path.expanduser("~/.solobot_backups")
@@ -186,9 +249,38 @@ TEMP_DIR = os.path.expanduser("~/.solobot_tmp")
 PROJECT_DIR = os.path.abspath(os.path.dirname(__file__))
 IS_ROOT_DIR = PROJECT_DIR == "/root"
 GITHUB_REPO = "https://github.com/Vladless/Solo_bot"
+CONFIG_BUILDER_URL = "https://pocomacho.ru/solonetbot/dashboard"
+WIKI_URL = "https://wikibot.solobot.ru"
 GHCR_IMAGE = os.environ.get("GHCR_IMAGE", "vladless/solo-brick").strip() or "vladless/solo-brick"
 DEFAULT_SERVICE_NAME = "bot.service"
 VENV_PYTHON = os.path.join(PROJECT_DIR, "venv", "bin", "python")
+SOLOBOT_CMD_PATH = "/usr/local/bin/solobot"
+
+
+def _ensure_solobot_command() -> None:
+    if sys.platform != "linux":
+        return
+    cli_name = os.path.basename(os.path.abspath(__file__))
+    wrapper = f"#!/bin/bash\ncd {PROJECT_DIR} && python3 {cli_name} \"$@\"\n"
+    try:
+        if os.path.isfile(SOLOBOT_CMD_PATH):
+            with open(SOLOBOT_CMD_PATH, encoding="utf-8") as fh:
+                if fh.read() == wrapper:
+                    return
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["sudo", "tee", SOLOBOT_CMD_PATH],
+            input=wrapper,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+        subprocess.run(["sudo", "chmod", "+x", SOLOBOT_CMD_PATH], check=True)
+        step_ok(f"Команда «solobot» установлена ({SOLOBOT_CMD_PATH})")
+    except Exception:
+        pass
 
 
 class HttpResponse:
@@ -265,18 +357,42 @@ def warn_english_only():
     console.print("[yellow]Пожалуйста, переключите раскладку на ENG и введите снова.[/yellow]")
 
 
-def safe_confirm(message: str, **kwargs) -> bool:
-    """Безопасный Confirm.ask с защитой от русской раскладки."""
+_CONFIRM_YES = {"y", "yes", "1", "true", "д", "да", "у"}
+_CONFIRM_NO = {"n", "no", "0", "false", "н", "нет"}
+
+
+def safe_confirm(message: str, default: bool = False, **kwargs) -> bool:
+    """Подтверждение y/n, устойчивое к раскладке.
+
+    Срезает не-ASCII «мусор» от переключения раскладки и принимает y/n в любой
+    раскладке (y/да/д/у → да, n/нет/н → нет). Пустой ввод → значение по умолчанию.
+    """
+    suffix = " (Y/n)" if default else " (y/n)"
     while True:
         try:
-            result = Confirm.ask(message, **kwargs)
-            return result
+            raw = Prompt.ask(f"{message}{suffix}", **kwargs)
         except UnicodeDecodeError:
             warn_english_only()
+            continue
+        text = str(raw if raw is not None else "").strip()
+        if not text:
+            return default
+        ascii_only = "".join(ch for ch in text if ord(ch) < 128).strip().lower()
+        candidate = ascii_only or text.lower()
+        if candidate in _CONFIRM_YES or candidate[:1] in ("y",):
+            return True
+        if candidate in _CONFIRM_NO or candidate[:1] in ("n",):
+            return False
+        console.print("[yellow]Введите y (да) или n (нет).[/yellow]")
 
 
 def safe_prompt(message: str, **kwargs) -> str:
-    """Безопасный Prompt.ask с защитой от русской раскладки."""
+    """Безопасный Prompt.ask с защитой от русской раскладки.
+
+    Не-ASCII символы тихо фильтруются. Предупреждение появляется только
+    если после фильтрации в строке не осталось значимого ASCII (т.е. ввод
+    был полностью на не-английской раскладке).
+    """
     while True:
         try:
             value = Prompt.ask(message, **kwargs)
@@ -287,8 +403,11 @@ def safe_prompt(message: str, **kwargs) -> str:
             console.print(f"[red]{e}[/red]")
             continue
         if isinstance(value, str) and not is_ascii_only(value):
-            warn_english_only()
-            continue
+            cleaned = "".join(ch for ch in value if ord(ch) < 128)
+            if not cleaned.strip():
+                warn_english_only()
+                continue
+            return cleaned
         return value
 
 
@@ -327,19 +446,22 @@ def run_with_status(
     check: bool = False,
     env: dict | None = None,
 ) -> subprocess.CompletedProcess:
-    with console.status(f"[bold cyan]{status_text}[/bold cyan]", spinner="dots"):
+    with console.status(f"[accent]{status_text}[/accent]", spinner="dots"):
         result = subprocess.run(
             cmd, cwd=cwd, env=env, capture_output=True, text=True, check=False
         )
     if result.returncode != 0:
+        step_fail(status_text)
         if result.stdout:
             console.print(result.stdout)
         if result.stderr:
-            console.print(f"[red]{result.stderr.rstrip()}[/red]")
+            console.print(f"[err]{result.stderr.rstrip()}[/err]")
         if check:
             raise subprocess.CalledProcessError(
                 result.returncode, cmd, result.stdout, result.stderr
             )
+    else:
+        step_ok(status_text)
     return result
 
 
@@ -412,6 +534,8 @@ def install_core_packages_if_needed():
         missing_packages.append("git")
     if shutil.which("rsync") is None:
         missing_packages.append("rsync")
+    if shutil.which("curl") is None:
+        missing_packages.append("curl")
 
     python312_path = shutil.which("python3.12")
     if python312_path is None:
@@ -533,11 +657,155 @@ def is_runtime_ready() -> bool:
     return os.path.exists(VENV_PYTHON) and is_service_exists(SERVICE_NAME)
 
 
+def _read_config_str(key: str) -> str:
+    try:
+        text = open(os.path.join(PROJECT_DIR, "config.py"), encoding="utf-8").read()
+    except Exception:
+        return ""
+    m = re.search(rf'^{key}\s*=\s*[\'"]([^\'"]*)[\'"]', text, re.M)
+    return m.group(1) if m else ""
+
+
+def _write_config_value(key: str, value: str) -> bool:
+    path = os.path.join(PROJECT_DIR, "config.py")
+    try:
+        text = open(path, encoding="utf-8").read()
+    except Exception as e:
+        console.print(f"[yellow]Не удалось открыть config.py: {e}[/yellow]")
+        return False
+    line = f'{key} = "{value}"'
+    text, n = re.subn(rf'(?m)^{key}\s*=.*$', line, text)
+    if n == 0:
+        text = text.rstrip() + f"\n{line}\n"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Не удалось записать config.py: {e}[/yellow]")
+        return False
+
+
+def _prompt_domain() -> str:
+    cur = _read_config_str("WEBHOOK_HOST")
+    console.print(
+        "[dim]Домен, на котором работает бот (A-запись домена должна указывать на IP этого сервера). "
+        "Обязателен: по нему Telegram доставляет сообщения и клиенты получают ссылки подписок.[/dim]"
+    )
+    raw = (safe_prompt("[cyan]Домен бота[/cyan] (например vpn.example.com)", default=cur) or "").strip()
+    raw = raw.replace("https://", "").replace("http://", "").strip("/ ")
+    if not raw:
+        return ""
+    host = f"https://{raw}"
+    if _write_config_value("WEBHOOK_HOST", host):
+        console.print(f"[green]Домен сохранён в config.py: {host}[/green]")
+    return host
+
+
+def _read_config_db_creds() -> dict:
+    creds = {"user": "myuser", "password": "", "name": "solobot"}
+    try:
+        text = open(os.path.join(PROJECT_DIR, "config.py"), encoding="utf-8").read()
+    except Exception:
+        return creds
+    for key, field in (("DB_USER", "user"), ("DB_PASSWORD", "password"), ("DB_NAME", "name")):
+        m = re.search(rf'^{key}\s*=\s*[\'"]([^\'"]*)[\'"]', text, re.M)
+        if m:
+            creds[field] = m.group(1)
+    return creds
+
+
+def _write_config_db_creds(creds: dict) -> bool:
+    path = os.path.join(PROJECT_DIR, "config.py")
+    try:
+        text = open(path, encoding="utf-8").read()
+    except Exception as e:
+        console.print(f"[yellow]Не удалось открыть config.py: {e}[/yellow]")
+        return False
+    for key, field in (("DB_NAME", "name"), ("DB_USER", "user"), ("DB_PASSWORD", "password")):
+        line = f'{key} = "{creds[field]}"'
+        text, n = re.subn(rf'(?m)^{key}\s*=.*$', line, text)
+        if n == 0:
+            text = text.rstrip() + f"\n{line}\n"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Не удалось записать config.py: {e}[/yellow]")
+        return False
+
+
+def _prompt_db_creds() -> dict:
+    cur = _read_config_db_creds()
+    if not cur["password"]:
+        cur["password"] = secrets.token_urlsafe(18)
+        console.print("[dim]Пароль БД сгенерирован автоматически — оставьте его (Enter) или задайте свой.[/dim]")
+    console.print("[dim]Доступ к базе данных. Нажмите Enter, чтобы оставить предложенное значение.[/dim]")
+    name = (safe_prompt("[cyan]Имя базы данных[/cyan]", default=cur["name"]) or cur["name"]).strip()
+    user = (safe_prompt("[cyan]Пользователь БД[/cyan]", default=cur["user"]) or cur["user"]).strip()
+    password = (safe_prompt("[cyan]Пароль БД[/cyan]", default=cur["password"]) or cur["password"]).strip()
+    creds = {"name": name, "user": user, "password": password}
+    if _write_config_db_creds(creds):
+        console.print("[green]Доступ к БД сохранён в config.py.[/green]")
+    return creds
+
+
+def _ensure_data_services(creds: dict) -> bool:
+    compose_file = os.path.join(PROJECT_DIR, "docker-compose.local.yml")
+    if not os.path.exists(compose_file):
+        console.print("[yellow]Файл docker-compose.local.yml не найден — данные не поднять автоматически.[/yellow]")
+        return False
+    if not _ensure_docker():
+        return False
+    for port, svc in ((5432, "PostgreSQL"), (6379, "Redis")):
+        owner = _port_owner(port)
+        if owner and "docker" not in owner.lower():
+            console.print(
+                f"[yellow]Порт {port} уже занят процессом «{owner}» (не Docker) — это помешает поднять {svc}.[/yellow]"
+            )
+            console.print(
+                f"[dim]Обычно это системный {svc}. Остановите его (например: sudo systemctl stop postgresql) "
+                f"или освободите порт {port}, затем повторите.[/dim]"
+            )
+            if not safe_confirm("[cyan]Попробовать поднять контейнеры всё равно?[/cyan]", default=False):
+                return False
+    env = {
+        **os.environ,
+        "POSTGRES_USER": creds["user"],
+        "POSTGRES_PASSWORD": creds["password"],
+        "POSTGRES_DB": creds["name"],
+    }
+    base = ["docker", "compose", "-f", compose_file, "up", "-d"]
+    with console.status("[bold yellow]Запуск PostgreSQL и Redis…[/bold yellow]"):
+        res = subprocess.run(base + ["--wait"], capture_output=True, text=True, env=env)
+        if res.returncode != 0:
+            res = subprocess.run(base, capture_output=True, text=True, env=env)
+    if res.returncode != 0:
+        console.print(f"[red]{(res.stderr or '').strip()[:500]}[/red]")
+        return False
+    for _ in range(30):
+        chk = subprocess.run(
+            ["docker", "exec", "solobot-postgres", "pg_isready", "-U", creds["user"], "-d", creds["name"]],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if chk.returncode == 0:
+            return True
+        sleep(2)
+    console.print("[yellow]PostgreSQL запущен, но не ответил готовностью за отведённое время.[/yellow]")
+    return False
+
+
 def install_bot():
     console.print(
         Panel(
-            "[white]CLI подготовит окружение, установит зависимости, создаст systemd-службу "
-            "и попробует инициализировать базу данных. Если проекта ещё нет рядом, CLI сначала скачает его автоматически.[/white]",
+            "[white]CLI подготовит окружение, поднимет базу данных и Redis, установит зависимости, "
+            "создаст systemd-службу и инициализирует базу. Если проекта ещё нет рядом, CLI сначала скачает его автоматически.[/white]\n\n"
+            "[yellow]Понадобятся два файла с сайта:[/yellow] [bold]config.py[/bold] и [bold]texts.py[/bold] "
+            "(токен, доступ к БД, тексты). Если их ещё нет — CLI остановится и подскажет, куда их положить.\n\n"
+            "[bold red]Важно:[/bold red] боту обязательно нужен [bold]домен с HTTPS[/bold]. Без него Telegram не доставляет "
+            "сообщения и не работают ссылки подписок. Домен указывается на сайте при генерации config.py.",
             border_style="green",
             title="[bold green]Автоматическая установка SoloBot[/bold green]",
             padding=(1, 2),
@@ -547,24 +815,152 @@ def install_bot():
     if not safe_confirm("[bold green]Запустить автоматическую установку?[/bold green]", default=True):
         return
 
+    total = 8
     try:
-        branch = "main"
-        if not has_project_code():
-            use_beta = safe_confirm("[yellow]Скачать beta/dev ветку вместо стабильной?[/yellow]", default=False)
-            branch = "dev" if use_beta else "main"
-        if not bootstrap_project_files(branch=branch):
+        step_rule(1, total, "Файлы проекта")
+        console.print("[dim]Проверяю исходники бота рядом с лаунчером. Если их нет — скачаю стабильную версию с GitHub.[/dim]")
+        if not bootstrap_project_files(branch="main"):
+            step_fail("Не удалось подготовить файлы проекта. Установка прервана.")
             return
         refresh_service_name()
+        step_ok("Файлы проекта на месте.")
+
+        step_rule(2, total, "Конфигурация")
+        console.print(
+            "[dim]config.py и texts.py вы получаете на сайте (там задаются токен бота, доступ к базе данных, тексты). "
+            "В исходниках их нет, поэтому без этих двух файлов установка не продолжится.[/dim]"
+        )
+        config_path = os.path.join(PROJECT_DIR, "config.py")
+        texts_path = os.path.join(PROJECT_DIR, "handlers", "texts.py")
+
+        def _missing_cfg():
+            miss = []
+            if not os.path.exists(config_path):
+                miss.append("config.py")
+            if not os.path.exists(texts_path):
+                miss.append("handlers/texts.py")
+            return miss
+
+        while _missing_cfg():
+            step_warn("Пока нет файлов: " + ", ".join(_missing_cfg()))
+            console.print(
+                Panel(
+                    "[white]Положите рядом с ботом два файла, которые вы скачиваете на сайте:[/white]\n\n"
+                    f"  • [cyan]config.py[/cyan] кладётся сюда:\n    [bold]{config_path}[/bold]\n"
+                    f"  • [cyan]texts.py[/cyan] кладётся сюда:\n    [bold]{texts_path}[/bold]\n\n"
+                    f"[white]Где взять файлы:[/white] [bold]{CONFIG_BUILDER_URL}[/bold]\n"
+                    "[yellow]Это шаблоны с пустыми значениями — заполните config.py "
+                    f"(токен бота и др.) по инструкции на вики:[/yellow] [bold]{WIKI_URL}[/bold]\n\n"
+                    "[white]Как загрузить (команды с вашего компьютера):[/white]\n"
+                    f"  • [bold]scp config.py root@ВАШ_IP:{config_path}[/bold]\n"
+                    f"  • [bold]scp texts.py root@ВАШ_IP:{texts_path}[/bold]\n"
+                    "  • либо перетащите файлы в FileZilla/SFTP по этим путям.\n\n"
+                    "[dim]В этих файлах ваши токены и пароли — никому не пересылайте их.[/dim]",
+                    border_style="yellow",
+                    title="[bold yellow]Нужны config.py и texts.py[/bold yellow]",
+                    padding=(1, 2),
+                )
+            )
+            if not safe_confirm("[green]Загрузили файлы? Проверить снова?[/green]", default=True):
+                step_warn("Установка приостановлена. Запустите снова, когда загрузите файлы: sudo solobot")
+                return
+        step_ok("config.py и texts.py на месте.")
+
+        console.print(
+            f"[yellow]Напоминание:[/yellow] config.py — это шаблон с пустыми значениями. "
+            f"Заполните его по инструкции на вики ([bold]{WIKI_URL}[/bold]) — обязателен токен бота, иначе бот не запустится."
+        )
+        domain = _prompt_domain()
+        if not domain:
+            console.print(
+                Panel(
+                    "[white]Боту обязательно нужен домен с HTTPS:[/white] по нему Telegram доставляет сообщения, "
+                    "и по этому же адресу клиенты получают ссылки подписок.\n\n"
+                    "[white]Что нужно:[/white]\n"
+                    "  1. Купите домен и направьте его A-записью на IP этого сервера.\n"
+                    "  2. Запустите установку снова и введите домен (или впишите в config.py "
+                    "WEBHOOK_HOST = \"https://ваш-домен\").\n\n"
+                    "[dim]Без домена бот не будет отвечать в Telegram.[/dim]",
+                    border_style="red",
+                    title="[bold red]Домен не указан[/bold red]",
+                    padding=(1, 2),
+                )
+            )
+            if not safe_confirm("[yellow]Продолжить установку без домена?[/yellow]", default=False):
+                step_warn("Установка остановлена. Подготовьте домен и запустите снова: sudo solobot")
+                return
+
+        step_rule(3, total, "Системные пакеты")
+        console.print("[dim]git, rsync, Python 3.12 и модуль venv — это база, без которой бот не запустится.[/dim]")
         install_core_packages_if_needed()
+        step_ok("Системные пакеты готовы.")
+
+        step_rule(4, total, "Python-окружение")
+        console.print("[dim]Создаю виртуальное окружение venv/ и ставлю зависимости из requirements.txt.[/dim]")
         install_dependencies()
-        db_ready = initialize_database()
-        if not ensure_systemd_service():
+        if not os.path.exists(VENV_PYTHON):
+            step_fail("Виртуальное окружение не создано. Установка прервана.")
             return
+        step_ok("Зависимости установлены.")
+
+        step_rule(5, total, "Данные (PostgreSQL и Redis)")
+        console.print(
+            "[dim]Зададим доступ к базе данных (Enter — значения по умолчанию). Эти значения пропишутся "
+            "в config.py и в контейнер PostgreSQL, чтобы бот и база точно совпали. Затем подниму PostgreSQL и Redis.[/dim]"
+        )
+        db_creds = _prompt_db_creds()
+        if _ensure_data_services(db_creds):
+            step_ok("PostgreSQL и Redis запущены.")
+        else:
+            step_warn(
+                "Не удалось поднять данные автоматически. Подними вручную: "
+                "docker compose -f docker-compose.local.yml up -d"
+            )
+
+        step_rule(6, total, "База данных")
+        console.print(
+            "[dim]Создаю таблицы по доступам из config.py. "
+            "Если данные базы в config.py неверные — шаг можно завершить позже, перезапустив бота из меню.[/dim]"
+        )
+        db_ready = initialize_database()
+        if db_ready:
+            step_ok("База данных инициализирована.")
+        else:
+            step_warn("База не готова: бот не смог подключиться по доступам из config.py.")
+            console.print(
+                "[dim]Если база уже создавалась раньше с другими логином/паролем, контейнер хранит старые доступы. "
+                "Пересоздать БД (СОТРЁТ данные): docker compose -f docker-compose.local.yml down -v, затем переустановите.[/dim]"
+            )
+
+        step_rule(7, total, "Служба автозапуска")
+        console.print("[dim]Создаю systemd-службу, чтобы бот стартовал сам и поднимался после перезагрузки сервера.[/dim]")
+        if not ensure_systemd_service():
+            step_fail("Не удалось настроить службу. Установка прервана.")
+            return
+        step_ok(f"Служба {SERVICE_NAME} настроена.")
+
+        step_rule(8, total, "Права и запуск")
+        console.print("[dim]Назначаю владельца и права на файлы проекта, закрываю секреты (config.py, тексты) и запускаю бота.[/dim]")
         fix_permissions()
         enable_and_start_service(start_now=db_ready)
-        console.print("[green]✅ Установка SoloBot завершена.[/green]")
+        step_ok("Права назначены, служба включена.")
+
+        console.print()
+        if db_ready:
+            console.print("[bold green]✅ Установка SoloBot завершена. Бот запущен.[/bold green]")
+            console.print(
+                "[dim]Проверка: в меню пункт 6 (статус) и 5 (логи). Откройте бота в Telegram и нажмите /start. "
+                "Если бот не отвечает — проверьте токен в config.py, затем перезапустите (пункт 3).[/dim]"
+            )
+        else:
+            console.print(
+                "[bold yellow]✅ Установка почти готова.[/bold yellow] "
+                "[yellow]Осталась база: проверьте доступ к БД в config.py и перезапустите бота (пункт 3 в меню).[/yellow]"
+            )
     except subprocess.CalledProcessError as e:
-        console.print(f"[red]❌ Ошибка во время установки: {e}[/red]")
+        step_fail(f"Ошибка во время установки: {e}")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Установка прервана пользователем.[/yellow]")
 
 
 def prompt_install_if_needed():
@@ -626,19 +1022,24 @@ def print_logo():
         "╚══════╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝  ╚═════╝    ╚═╝   ",
     ]
 
-    with Live(refresh_per_second=10) as live:
-        display = []
-        for line in logo_lines:
-            display.append(f"[bold cyan]{line}[/bold cyan]")
-            panel = Panel(Group(*display), border_style="cyan", padding=(0, 2), expand=False)
-            live.update(panel)
-            sleep(0.07)
+    panel = Panel(
+        Group(*[f"[accent]{line}[/accent]" for line in logo_lines]),
+        border_style="accent.dim",
+        box=box.ROUNDED,
+        padding=(0, 3),
+        expand=False,
+        subtitle="[muted]Solobot CLI[/muted]",
+        subtitle_align="right",
+    )
+    console.print(panel)
 
-    local_version = get_local_version() or "unknown"
-    last_update = get_last_update_date() or "unknown"
-    console.print(f"[bold green]Директория бота:[/bold green] [yellow]{PROJECT_DIR}[/yellow]")
-    console.print(f"[bold green]Установленная версия:[/bold green] [yellow]{local_version}[/yellow]")
-    console.print(f"[bold green]Последнее обновление:[/bold green] [yellow]{last_update}[/yellow]\n")
+    local_version = get_local_version() or "—"
+    last_update = get_last_update_date() or "—"
+    console.print(
+        f"[muted]версия[/muted] [title]{local_version}[/title]   "
+        f"[muted]обновлён[/muted] [title]{last_update}[/title]   "
+        f"[muted]{PROJECT_DIR}[/muted]\n"
+    )
 
 
 def list_backups():
@@ -705,6 +1106,7 @@ def _build_update_rsync_excludes(update_buttons: bool, update_img: bool, update_
     if not update_redis_cache:
         excludes.append("--exclude=core/redis_cache.py")
     excludes.append("--exclude=modules")
+    excludes.append("--exclude=static/web_uploads")
     return excludes
 
 
@@ -853,21 +1255,31 @@ def fix_permissions():
         user = os.environ.get("SUDO_USER") or subprocess.check_output(["whoami"], text=True).strip()
         console.log(f"[cyan]Используем пользователь: {user}[/cyan]")
 
+        skip_dirs = {"venv", ".venv", ".git", "node_modules"}
         for root, dirs, files in os.walk(PROJECT_DIR):
-            for dir in dirs:
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for dir in list(dirs):
                 if dir == "__pycache__":
                     pycache_path = os.path.join(root, dir)
-                    subprocess.run(["sudo", "rm", "-rf", pycache_path], check=True)
+                    subprocess.run(["sudo", "rm", "-rf", pycache_path], check=False)
+                    dirs.remove(dir)
             for file in files:
                 if file.endswith(".pyc"):
                     pyc_path = os.path.join(root, file)
-                    subprocess.run(["sudo", "rm", "-f", pyc_path], check=True)
+                    subprocess.run(["sudo", "rm", "-f", pyc_path], check=False)
 
         console.log("[blue]Изменение владельца на весь проект...[/blue]")
         subprocess.run(["sudo", "chown", "-R", f"{user}:{user}", PROJECT_DIR], check=True)
 
         console.log("[blue]Изменение прав доступа (u=rwX,go=rX)...[/blue]")
         subprocess.run(["sudo", "chmod", "-R", "u=rwX,go=rX", PROJECT_DIR], check=True)
+
+        for secret in ("config.py", os.path.join("handlers", "texts.py"), ".env"):
+            secret_path = os.path.join(PROJECT_DIR, secret)
+            if os.path.exists(secret_path):
+                console.log(f"[blue]Закрываю доступ к секретам: {secret} (600)...[/blue]")
+                subprocess.run(["sudo", "chown", f"{user}:{user}", secret_path], check=False)
+                subprocess.run(["sudo", "chmod", "600", secret_path], check=False)
 
         launcher_path = os.path.join(PROJECT_DIR, "cli_launcher.py")
         if os.path.exists(launcher_path):
@@ -894,9 +1306,15 @@ def clean_project_dir_safe(update_buttons=False, update_img=False, update_redis_
         os.path.join(PROJECT_DIR, "handlers", "texts.py"),
         os.path.join(PROJECT_DIR, ".git"),
         os.path.join(PROJECT_DIR, "modules"),
+        os.path.join(PROJECT_DIR, "static"),
+        os.path.join(PROJECT_DIR, "static", "web_uploads"),
     ])
 
     for root, dirs, files in os.walk(os.path.join(PROJECT_DIR, "modules")):
+        for name in dirs + files:
+            preserved_paths.add(os.path.join(root, name))
+
+    for root, dirs, files in os.walk(os.path.join(PROJECT_DIR, "static", "web_uploads")):
         for name in dirs + files:
             preserved_paths.add(os.path.join(root, name))
 
@@ -931,10 +1349,15 @@ def clean_project_dir_safe(update_buttons=False, update_img=False, update_redis_
                 os.path.join(PROJECT_DIR, "handlers"),
                 os.path.join(PROJECT_DIR, "img"),
                 os.path.join(PROJECT_DIR, "modules"),
+                os.path.join(PROJECT_DIR, "static"),
+                os.path.join(PROJECT_DIR, "static", "web_uploads"),
             ]:
                 continue
 
             if os.path.abspath(dir_path).startswith(os.path.join(PROJECT_DIR, "modules") + os.sep):
+                continue
+
+            if os.path.abspath(dir_path).startswith(os.path.join(PROJECT_DIR, "static", "web_uploads") + os.sep):
                 continue
 
             try:
@@ -1084,6 +1507,65 @@ def get_remote_version(branch="main"):
     return None
 
 
+def _adopt_beta_config_files() -> list[str]:
+    renamed = []
+    parent = os.path.dirname(PROJECT_DIR)
+    targets = [
+        (
+            [
+                os.path.join(PROJECT_DIR, "config_beta.py"),
+                os.path.join(parent, "config_beta.py"),
+            ],
+            os.path.join(PROJECT_DIR, "config.py"),
+        ),
+        (
+            [
+                os.path.join(PROJECT_DIR, "handlers", "texts_beta.py"),
+                os.path.join(PROJECT_DIR, "texts_beta.py"),
+                os.path.join(parent, "texts_beta.py"),
+            ],
+            os.path.join(PROJECT_DIR, "handlers", "texts.py"),
+        ),
+    ]
+    for sources, dst in targets:
+        for src in sources:
+            if not os.path.exists(src):
+                continue
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                try:
+                    os.replace(src, dst)
+                except OSError:
+                    shutil.move(src, dst)
+                renamed.append(f"{os.path.basename(src)} → {os.path.relpath(dst, PROJECT_DIR)}")
+            except Exception as e:
+                console.print(f"[yellow]Не удалось переименовать {os.path.basename(src)}: {e}[/yellow]")
+            break
+    return renamed
+
+
+def _prompt_config_update() -> None:
+    console.print(
+        Panel(
+            "[white]Если для этой версии вы скачали свежие config и texts на сайте — "
+            "загрузите их на сервер сейчас, и CLI подставит их сам.[/white]\n\n"
+            f"[white]Где взять:[/white] [bold]{CONFIG_BUILDER_URL}[/bold]\n\n"
+            "[white]Файлы беты называются [bold]config_beta.py[/bold] и [bold]texts_beta.py[/bold] — "
+            "CLI автоматически переименует их в обычные config.py и texts.py.[/white]\n"
+            f"[dim]Класть сюда: {PROJECT_DIR}/config_beta.py и {PROJECT_DIR}/handlers/texts_beta.py[/dim]",
+            border_style="cyan",
+            title="[bold cyan]Обновляли config и texts?[/bold cyan]",
+            padding=(1, 2),
+        )
+    )
+    renamed = _adopt_beta_config_files()
+    if renamed:
+        for item in renamed:
+            step_ok(f"Подставлен новый файл: {item}")
+    else:
+        step_warn("Новых config_beta.py / texts_beta.py не найдено — оставляю текущие config.py и texts.py.")
+
+
 def update_from_beta():
     local_version = get_local_version()
     remote_version = get_remote_version(branch="dev")
@@ -1131,6 +1613,8 @@ def update_from_beta():
         return
     install_git_if_needed()
     install_rsync_if_needed()
+
+    _prompt_config_update()
 
     try:
         os.chdir(PROJECT_DIR)
@@ -1869,20 +2353,164 @@ def _setup_nginx(domain, web_port=3000):
         return False
 
 
-def _setup_ssl(domain):
-    """Получает SSL сертификат через certbot."""
-    if not _dns_precheck(domain):
+def _detect_proxies() -> dict:
+    """Какие реверс-прокси есть на сервере и кто из них запущен."""
+    def _active(svc: str) -> bool:
+        try:
+            r = subprocess.run(["systemctl", "is-active", svc], capture_output=True, text=True)
+            return r.stdout.strip() == "active"
+        except Exception:
+            return False
+    return {
+        "nginx_installed": bool(shutil.which("nginx")) or os.path.isdir("/etc/nginx"),
+        "caddy_installed": bool(shutil.which("caddy")) or os.path.isfile("/etc/caddy/Caddyfile"),
+        "nginx_active": _active("nginx"),
+        "caddy_active": _active("caddy"),
+    }
+
+
+def _web_caddy_snippet(domain: str, web_port: int) -> str:
+    """Site-блок Caddy для веб-приложения. Caddy сам выпускает SSL (Let's Encrypt)."""
+    return f"""{domain} {{
+    encode gzip
+    @solo_next path /_next/static/*
+    header @solo_next Cache-Control "public, immutable, max-age=31536000"
+    header /sw.js Cache-Control "no-cache"
+    reverse_proxy 127.0.0.1:{web_port}
+}}"""
+
+
+def _caddy_domain_conflict(domain: str) -> str | None:
+    """Файл Caddy, в котором домен уже объявлен как site-блок."""
+    paths = []
+    if os.path.isfile("/etc/caddy/Caddyfile"):
+        paths.append("/etc/caddy/Caddyfile")
+    conf_d = "/etc/caddy/conf.d"
+    if os.path.isdir(conf_d):
+        paths.extend(os.path.join(conf_d, e) for e in os.listdir(conf_d))
+    for path in paths:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except Exception:
+            continue
+        for line in text.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#") or "{" not in s or "reverse_proxy" in s:
+                continue
+            head = s.split("{")[0]
+            addrs = [a.strip().replace("https://", "").replace("http://", "") for a in head.replace(",", " ").split()]
+            if domain in addrs:
+                return path
+    return None
+
+
+def _ensure_caddy() -> bool:
+    """Проверяет/устанавливает Caddy из официального репозитория."""
+    if shutil.which("caddy"):
+        return True
+    if not _check_http_ports_free():
         return False
+    try:
+        run_with_status(
+            ["sudo", "apt-get", "install", "-y", "debian-keyring", "debian-archive-keyring", "apt-transport-https", "curl", "gnupg"],
+            status_text="Зависимости Caddy", check=True,
+        )
+        subprocess.run(
+            "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg",
+            shell=True, check=True,
+        )
+        subprocess.run(
+            "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null",
+            shell=True, check=True,
+        )
+        run_with_status(["sudo", "apt-get", "update"], status_text="apt update", check=True)
+        run_with_status(["sudo", "apt-get", "install", "-y", "caddy"], status_text="Установка Caddy", check=True)
+        subprocess.run(["sudo", "systemctl", "enable", "caddy"], check=False)
+        subprocess.run(["sudo", "systemctl", "start", "caddy"], check=False)
+        return True
+    except subprocess.CalledProcessError:
+        console.print("[yellow]Не удалось установить Caddy автоматически.[/yellow]")
+        return False
+
+
+def _setup_caddy(domain, web_port=3000) -> bool:
+    """Добавляет site-блок Caddy (авто-SSL), не трогая остальной Caddyfile."""
+    caddyfile = "/etc/caddy/Caddyfile"
+    snippet = _web_caddy_snippet(domain, int(web_port))
+    try:
+        subprocess.run(["sudo", "mkdir", "-p", "/etc/caddy"], check=True)
+        if not os.path.isfile(caddyfile):
+            subprocess.run(["sudo", "touch", caddyfile], check=True)
+        with open("/tmp/_solo_caddy.conf", "w") as f:
+            f.write(f"\n# --- Solo web-app ({domain}) ---\n{snippet}\n")
+        subprocess.run(["sudo", "bash", "-c", f"cat /tmp/_solo_caddy.conf >> {caddyfile}"], check=True)
+        subprocess.run(
+            ["sudo", "caddy", "validate", "--adapter", "caddyfile", "--config", caddyfile],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(["sudo", "systemctl", "reload", "caddy"], check=True)
+        return True
+    except subprocess.CalledProcessError:
+        console.print("[yellow]Не удалось настроить Caddy (проверьте: sudo caddy validate --config /etc/caddy/Caddyfile).[/yellow]")
+        return False
+
+
+def _print_manual_caddy_hint(domain: str, web_port: int) -> None:
+    snippet = _web_caddy_snippet(domain, int(web_port))
+    console.print(
+        Panel(
+            "[white]CLI не трогал ваш Caddy. Добавьте site-блок ниже в [cyan]/etc/caddy/Caddyfile[/cyan]\n"
+            "(или в свой conf.d) и перезагрузите Caddy:\n"
+            "[dim]sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy[/dim]\n"
+            "[dim]Caddy выпустит SSL автоматически — certbot не нужен.[/dim]",
+            border_style="yellow",
+            title="[bold yellow]Ручная настройка Caddy[/bold yellow]",
+            padding=(1, 2),
+        )
+    )
+    console.print(f"\n[dim]---8<--- Caddyfile ---8<---[/dim]\n{snippet}\n[dim]---8<--- end ---8<---[/dim]\n")
+
+
+def _ensure_certbot_nginx() -> bool:
     if not shutil.which("certbot"):
         try:
             run_with_status(
                 ["sudo", "apt-get", "install", "-y", "certbot", "python3-certbot-nginx"],
-                status_text="Установка certbot",
+                status_text="Установка certbot и плагина nginx",
                 check=True,
             )
+            return True
         except subprocess.CalledProcessError:
             console.print("[yellow]Не удалось установить certbot.[/yellow]")
             return False
+
+    plugins = subprocess.run(["sudo", "certbot", "plugins"], capture_output=True, text=True)
+    if "nginx" in (plugins.stdout + plugins.stderr):
+        return True
+
+    console.print("[yellow]certbot есть, но плагин для nginx не установлен. Ставлю плагин...[/yellow]")
+    try:
+        run_with_status(
+            ["sudo", "apt-get", "install", "-y", "python3-certbot-nginx"],
+            status_text="Установка плагина certbot-nginx",
+            check=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        console.print(
+            "[yellow]Не удалось установить плагин. Установите вручную: "
+            "sudo apt-get install -y python3-certbot-nginx[/yellow]"
+        )
+        return False
+
+
+def _setup_ssl(domain):
+    """Получает SSL сертификат через certbot."""
+    if not _dns_precheck(domain):
+        return False
+    if not _ensure_certbot_nginx():
+        return False
     try:
         subprocess.run(
             [
@@ -1942,7 +2570,7 @@ def install_website():
     if not safe_confirm("[bold green]Начать установку сайта?[/bold green]", default=True):
         return
 
-    console.print("\n[bold][0/5] Авторизация[/bold]")
+    step_rule(0, 5, "Авторизация")
     console.print("[dim]Введите логин и пароль от вашего кабинета на сайте Solo.[/dim]")
     console.print("[dim]Данные используются только для проверки лицензии и нигде не сохраняются.[/dim]\n")
 
@@ -1976,11 +2604,11 @@ def install_website():
             )
             return
 
-    console.print("\n[bold][1/5] Docker[/bold]")
+    step_rule(1, 5, "Docker")
     if not _ensure_docker():
         return
 
-    console.print("\n[bold][2/5] Настройки[/bold]\n")
+    step_rule(2, 5, "Настройки")
 
     console.print(
         "[dim]Домен, по которому будет открываться сайт.\nDNS (A-запись) должна уже указывать на IP этого сервера.[/dim]"
@@ -2150,7 +2778,7 @@ def install_website():
     if not safe_confirm("\n[yellow]Всё верно?[/yellow]", default=True):
         return
 
-    console.print("\n[bold][3/5] Запуск сайта[/bold]")
+    step_rule(3, 5, "Запуск сайта")
     os.makedirs(WEB_DIR, exist_ok=True)
 
     from urllib.parse import urlparse
@@ -2248,45 +2876,83 @@ services:
             )
         )
 
-    console.print("\n[bold][4/5] Nginx[/bold]")
-    nginx_configured = False
-    conflict_path = _nginx_domain_conflict(domain)
-    if conflict_path:
+    step_rule(4, 5, "Reverse-proxy")
+    px = _detect_proxies()
+    if px["nginx_active"] and px["caddy_active"]:
         console.print(
-            f"[yellow]⚠ На домене [bold]{domain}[/bold] уже есть nginx-конфиг:[/yellow] {conflict_path}\n"
-            "[yellow]Автонастройка создала бы второй server-блок — это может конфликтовать с ботом.[/yellow]"
+            "[yellow]⚠ Одновременно запущены nginx и Caddy — они конфликтуют за порты 80/443.\n"
+            "  80/443 может слушать только один. Выберите владельца и при необходимости остановите второй.[/yellow]"
         )
-        do_auto = safe_confirm(
-            "[cyan]Всё равно создать отдельный server-блок?[/cyan] (Нет — покажу snippet для ручной вставки)",
-            default=False,
-        )
-    else:
-        do_auto = safe_confirm("[cyan]Настроить nginx автоматически?[/cyan]", default=True)
+    elif px["nginx_installed"] and px["caddy_installed"]:
+        console.print("[dim]На сервере есть и nginx, и Caddy.[/dim]")
 
-    if do_auto:
-        if _ensure_nginx() and _setup_nginx(domain, int(web_port)):
-            console.print(f"[green]✅ nginx настроен для {domain}[/green]")
-            nginx_configured = True
-        else:
-            console.print("[yellow]Авто-настройка не удалась, покажу snippet.[/yellow]")
-            _print_manual_nginx_hint(domain, int(web_port))
-    else:
-        _print_manual_nginx_hint(domain, int(web_port))
+    opts = [
+        ("nginx", "nginx" + (" (установлен)" if px["nginx_installed"] else " — установить")),
+        ("caddy", "Caddy, авто-SSL" + (" (установлен)" if px["caddy_installed"] else " — установить")),
+        ("manual", "Вручную (показать конфиг)"),
+    ]
+    default_idx = 2 if (px["caddy_active"] and not px["nginx_active"]) else 1
+    console.print("[cyan]Чем настроить домен сайта:[/cyan]")
+    for i, (_, label) in enumerate(opts, 1):
+        console.print(f"  {i}. {label}")
+    sel = safe_prompt("Выбор", choices=[str(i) for i in range(1, len(opts) + 1)], default=str(default_idx), show_choices=False)
+    proxy = opts[int(sel) - 1][0]
 
-    console.print("\n[bold][5/5] SSL[/bold]")
+    proxy_kind = None
     ssl_deferred = False
-    if setup_ssl and not nginx_configured:
-        console.print("[yellow]SSL пропущен: автоконфигурация certbot --nginx требует автонастройки nginx.[/yellow]")
-        console.print("[dim]После ручной правки nginx запустите: sudo certbot --nginx -d " + domain + "[/dim]")
-        ssl_deferred = True
-        setup_ssl = False
-    if setup_ssl:
-        if _setup_ssl(domain):
-            console.print("[green]✅ SSL сертификат установлен[/green]")
+
+    if proxy == "nginx":
+        conflict_path = _nginx_domain_conflict(domain)
+        if conflict_path:
+            console.print(
+                f"[yellow]⚠ На домене [bold]{domain}[/bold] уже есть nginx-конфиг:[/yellow] {conflict_path}\n"
+                "[yellow]Автонастройка создала бы второй server-блок.[/yellow]"
+            )
+            do_auto = safe_confirm("[cyan]Всё равно создать отдельный server-блок?[/cyan]", default=False)
         else:
+            do_auto = True
+        if do_auto and _ensure_nginx() and _setup_nginx(domain, int(web_port)):
+            console.print(f"[green]✅ nginx настроен для {domain}[/green]")
+            proxy_kind = "nginx"
+        else:
+            _print_manual_nginx_hint(domain, int(web_port))
+    elif proxy == "caddy":
+        conflict_path = _caddy_domain_conflict(domain)
+        if conflict_path:
+            console.print(f"[yellow]⚠ Домен [bold]{domain}[/bold] уже есть в Caddy: {conflict_path}. Покажу конфиг для ручной правки.[/yellow]")
+            _print_manual_caddy_hint(domain, int(web_port))
+        elif _ensure_caddy() and _setup_caddy(domain, int(web_port)):
+            console.print(f"[green]✅ Caddy настроен для {domain} (SSL автоматический)[/green]")
+            proxy_kind = "caddy"
+        else:
+            _print_manual_caddy_hint(domain, int(web_port))
+    else:
+        if px["caddy_installed"] and not px["nginx_installed"]:
+            _print_manual_caddy_hint(domain, int(web_port))
+        else:
+            _print_manual_nginx_hint(domain, int(web_port))
+
+    step_rule(5, 5, "SSL")
+    if proxy_kind == "caddy":
+        console.print("[green]✅ SSL выпустит Caddy автоматически (Let's Encrypt) при первом запросе — certbot не нужен.[/green]")
+        console.print(f"[dim]Условие: DNS [bold]{domain}[/bold] указывает на сервер и порты 80/443 открыты.[/dim]")
+        site_url = f"https://{domain}"
+    elif proxy_kind == "nginx":
+        if setup_ssl:
+            if _setup_ssl(domain):
+                console.print("[green]✅ SSL сертификат установлен[/green]")
+                site_url = f"https://{domain}"
+            else:
+                ssl_deferred = True
+        else:
+            console.print("[dim]SSL пропущен[/dim]")
+    else:
+        if setup_ssl:
+            console.print("[yellow]SSL отложен: сначала настройте прокси (конфиг показан выше).[/yellow]")
+            console.print(f"[dim]nginx: sudo certbot --nginx -d {domain} · Caddy выпускает SSL сам[/dim]")
             ssl_deferred = True
-    elif not ssl_deferred:
-        console.print("[dim]SSL пропущен[/dim]")
+        else:
+            console.print("[dim]SSL пропущен[/dim]")
 
     smtp_hint = ""
     if not smtp_host:
@@ -2456,8 +3122,8 @@ def manage_website():
         f"[bold]Образ:[/bold] [cyan]{_web_image(tag)}[/cyan]  [bold]Статус:[/bold] {status}"
     )
 
-    table = Table(title="Управление сайтом", title_style="bold cyan", header_style="bold blue")
-    table.add_column("№", justify="center", style="cyan", no_wrap=True)
+    table = Table(title="Управление сайтом", title_style="title", header_style="muted", box=box.SIMPLE, padding=(0, 2), expand=False)
+    table.add_column("№", justify="right", style="accent", no_wrap=True)
     table.add_column("Действие", style="white")
     table.add_row("1", "Показать статус")
     table.add_row("2", "Показать логи")
@@ -2568,8 +3234,8 @@ def show_update_menu():
         console.print("[yellow]Перенесите бота в отдельную папку и повторите попытку[/yellow]")
         return
 
-    table = Table(title="Выберите способ обновления", title_style="bold green")
-    table.add_column("№", justify="center", style="cyan", no_wrap=True)
+    table = Table(title="Выберите способ обновления", title_style="title", header_style="muted", box=box.SIMPLE, padding=(0, 2), expand=False)
+    table.add_column("№", justify="right", style="accent", no_wrap=True)
     table.add_column("Источник", style="white")
     table.add_row("1", "Обновить до BETA")
     table.add_row("2", "Обновить до релиза (релизы и патчи)")
@@ -2688,10 +3354,17 @@ def show_menu():
     )
 
     def fmt(text: str, enabled: bool) -> str:
-        return text if enabled else f"[dim]{text}  — нужен пункт 9[/dim]"
+        return text if enabled else f"[muted]{text}  · нужен пункт 9[/muted]"
 
-    table = Table(title="Solobot CLI v0.5.8", title_style="bold magenta", header_style="bold blue")
-    table.add_column("№", justify="center", style="cyan", no_wrap=True)
+    table = Table(
+        title="Solobot CLI v0.5.9",
+        title_style="title",
+        header_style="muted",
+        box=box.SIMPLE,
+        padding=(0, 2),
+        expand=False,
+    )
+    table.add_column("№", justify="right", style="accent", no_wrap=True)
     table.add_column("Операция", style="white")
     table.add_row("1", fmt("Запустить бота (systemd)", bot_runtime_ready))
     table.add_row("2", fmt("Запустить напрямую: venv/bin/python main.py", bot_installed and os.path.exists(VENV_PYTHON)))
@@ -2711,6 +3384,7 @@ def main():
     os.chdir(PROJECT_DIR)
     auto_update_cli()
     print_logo()
+    _ensure_solobot_command()
     prompt_install_if_needed()
     try:
         while True:

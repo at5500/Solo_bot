@@ -35,6 +35,7 @@ def backup_thread_loop(stop_event, _bot, _sessionmaker) -> None:
     from aiogram.enums import ParseMode
 
     from config import API_TOKEN, BACKUP_TIME
+    from core.settings.modes_config import resolve_protect_content
     from utils.backup import backup_database
 
     if BACKUP_TIME <= 0:
@@ -42,7 +43,7 @@ def backup_thread_loop(stop_event, _bot, _sessionmaker) -> None:
         return
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    backup_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    backup_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
     try:
         while not stop_event.is_set():
             error = loop.run_until_complete(backup_database(bot_instance=backup_bot))
@@ -97,3 +98,9 @@ async def server_checks_loop(_bot, sessionmaker) -> None:
         await asyncio.Event().wait()
         return
     await check_servers(sessionmaker=sessionmaker)
+
+
+async def remnawave_monitor_loop(bot, sessionmaker) -> None:
+    from services.remnawave_monitor import remnawave_monitor_loop as run_loop
+
+    await run_loop(bot, sessionmaker)

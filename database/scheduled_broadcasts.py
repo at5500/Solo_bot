@@ -34,6 +34,7 @@ async def create_scheduled_broadcast(
     workers: int,
     messages_per_second: int,
     status: str = SCHEDULED_BROADCAST_STATUS_SCHEDULED,
+    channel: str = "both",
 ) -> ScheduledBroadcast:
     created_by_uid = None
     mirror_tg = created_by_tg_id
@@ -46,6 +47,7 @@ async def create_scheduled_broadcast(
         created_by_user_id=created_by_uid,
         created_by_tg_id=mirror_tg,
         send_to=send_to,
+        channel=channel,
         cluster_name=cluster_name,
         text=text,
         photo=photo,

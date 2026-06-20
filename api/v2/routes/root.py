@@ -117,7 +117,7 @@ async def site_revision(session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/api/site-config", include_in_schema=True)
-async def site_config():
+async def site_config(session: AsyncSession = Depends(get_session)):
     """Настройки витрины и кабинета для веб-клиента (флаги из runtime-конфигов бота)."""
     bot_username = USERNAME_BOT.replace("@", "").strip()
     pay_flags = {name: bool(PAYMENTS_CONFIG.get(name)) for name in PROVIDERS_BASE}
@@ -135,6 +135,10 @@ async def site_config():
 
     webapp_short = str(TELEGRAM_WEBAPP_SHORT_NAME or "").strip() or None
     webapp_return_base = _telegram_web_app_return_base()
+
+    from api.v2.routes.partners import partners_table_exists
+
+    partner_enabled = bool(_partner_feature_enabled()) and await partners_table_exists(session)
     return {
         "bot_username": bot_username or None,
         "telegram_web_app_short_name": webapp_short,
@@ -168,7 +172,7 @@ async def site_config():
             "mini_app_open_in_browser": bool(
                 MODES_CONFIG.get("REMNAWAVE_WEBAPP_OPEN_IN_BROWSER", REMNAWAVE_WEBAPP_OPEN_IN_BROWSER)
             ),
-            "partner_enabled": bool(_partner_feature_enabled()),
+            "partner_enabled": partner_enabled,
         },
         "payments": {
             "any_enabled": any_pay,
@@ -198,7 +202,7 @@ async def site_config():
 
 _UPDATE_CHECK_CACHE: dict[str, object] = {"fetched_at": 0.0, "data": None}
 _UPDATE_CHECK_LOCK = asyncio.Lock()
-_UPDATE_CHECK_TTL_SEC = 3600
+_UPDATE_CHECK_TTL_SEC = 600
 _SEMVER_RE = re.compile(
     r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
 )
@@ -230,8 +234,8 @@ def _parse_semver(tag: str) -> tuple[int, int, int, int, tuple[tuple[int, int | 
 
 
 async def _fetch_ghcr_tags(image: str) -> list[str]:
-    """Возвращает все теги образа в GHCR."""
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+    """Возвращает все теги образа в GHCR. Поддерживает paginate через Link header."""
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         token_url = f"https://ghcr.io/token?scope=repository:{image}:pull"
         async with session.get(token_url) as token_resp:
             if token_resp.status != 200:
@@ -241,12 +245,33 @@ async def _fetch_ghcr_tags(image: str) -> list[str]:
             if not token:
                 return []
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        tags_url = f"https://ghcr.io/v2/{image}/tags/list"
-        async with session.get(tags_url, headers=headers) as tags_resp:
-            if tags_resp.status != 200:
-                return []
-            payload = await tags_resp.json()
-    return payload.get("tags") or []
+        all_tags: list[str] = []
+        next_url: str | None = f"https://ghcr.io/v2/{image}/tags/list?n=1000"
+        guard = 0
+        while next_url and guard < 20:
+            guard += 1
+            async with session.get(next_url, headers=headers) as tags_resp:
+                if tags_resp.status != 200:
+                    break
+                payload = await tags_resp.json()
+                page_tags = payload.get("tags") or []
+                if isinstance(page_tags, list):
+                    all_tags.extend(str(t) for t in page_tags)
+                link_header = tags_resp.headers.get("Link") or ""
+            next_url = None
+            for part in link_header.split(","):
+                part = part.strip()
+                if not part or 'rel="next"' not in part:
+                    continue
+                inner = part.split(";", 1)[0].strip()
+                if inner.startswith("<") and inner.endswith(">"):
+                    inner = inner[1:-1]
+                if inner.startswith("/"):
+                    next_url = f"https://ghcr.io{inner}"
+                else:
+                    next_url = inner
+                break
+        return all_tags
 
 
 def _is_dev_version(v: str) -> bool:

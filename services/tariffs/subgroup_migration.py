@@ -203,7 +203,6 @@ async def ensure_on_3xui(
                         total_gb=traffic,
                         expiry_time=new_expiry_time,
                         enable=True,
-                        flow="xtls-rprx-vision",
                         inbound_id=int(inbound),
                         sub_id=sub,
                     )

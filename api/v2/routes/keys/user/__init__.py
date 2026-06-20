@@ -5,6 +5,5 @@ from . import (  # noqa: F401 — trigger registration
     hwid,
     location,
     renew,
-    renew_change,
     tv,
 )

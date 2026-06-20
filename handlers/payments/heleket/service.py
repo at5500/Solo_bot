@@ -27,6 +27,7 @@ from database import async_session_maker, register_pending_payment
 from database.models import User
 from handlers.buttons import BACK, HELEKET, PAY_2
 from handlers.payments.keyboards import (
+    balance_fallback_kb,
     build_amounts_keyboard,
     parse_amount_from_callback,
     pay_keyboard,
@@ -228,7 +229,7 @@ async def handle_custom_amount_input(message: types.Message, state: FSMContext, 
             await edit_or_send_message(
                 target_message=message,
                 text=f"❌ Минимальная сумма для оплаты криптовалютой — {currency_symbol}{min_amount}.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                reply_markup=balance_fallback_kb(),
             )
             return
     except Exception:
@@ -297,7 +298,7 @@ async def process_amount_selection(callback_query: types.CallbackQuery, state: F
         await edit_or_send_message(
             target_message=callback_query.message,
             text="❌ Минимальная сумма для оплаты криптовалютой — 10₽ (≈0.1$).",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            reply_markup=balance_fallback_kb(),
         )
         return
 

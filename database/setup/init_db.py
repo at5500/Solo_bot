@@ -1,22 +1,28 @@
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from config import ADMIN_ID
+from config import ADMIN_ID, DATABASE_URL
 from database import db
-from database.migrations.schema_upgrade import (
-    apply_all_migrations,
-    ensure_tg_mirror_columns_and_backfill,
-)
+from database.migrations.schema_upgrade import apply_all_migrations
 from database.models import Admin, Base, User
 
 
+async def run_schema_setup(*, create_all: bool = True) -> None:
+    """Schema migrations via a dedicated engine (no runtime command_timeout)."""
+    engine = create_async_engine(DATABASE_URL)
+    try:
+        async with engine.begin() as conn:
+            if create_all:
+                await conn.run_sync(Base.metadata.create_all)
+            await apply_all_migrations(conn)
+    finally:
+        await engine.dispose()
+
+
 async def init_db():
-    async with db.engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await apply_all_migrations(conn)
-    async with db.engine.begin() as conn:
-        await ensure_tg_mirror_columns_and_backfill(conn)
+    await run_schema_setup(create_all=True)
 
     async with db.async_session_maker() as session:
         result = await session.execute(select(User).where(User.tg_id == 0))

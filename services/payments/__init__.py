@@ -4,12 +4,13 @@ from typing import TYPE_CHECKING
 
 from config import (
     CASHBACK as DEFAULT_CASHBACK,
+    CHECK_REFERRAL_REWARD_ISSUED,
     REFERRAL_BONUS_PERCENTAGES,
 )
 from core.bootstrap import MONEY_CONFIG
 from database import add_payment
 from database.access.resolution import resolve_user_optional
-from database.referrals import get_referral_by_referred_id
+from database.referrals import get_referral_by_referred_id, mark_referral_reward_issued
 from database.users import update_balance
 from logger import logger
 
@@ -27,17 +28,27 @@ async def process_referrals(session: AsyncSession, user_id: int, amount: float) 
     if u is None:
         return {}
 
+    first_level_referral = await get_referral_by_referred_id(session, u.id)
+
+    if (
+        CHECK_REFERRAL_REWARD_ISSUED
+        and first_level_referral is not None
+        and bool(first_level_referral.get("reward_issued"))
+    ):
+        return {}
+
     max_levels = len(REFERRAL_BONUS_PERCENTAGES)
     current_id = u.id
     bonus_by_chain: dict[int, tuple[float, int]] = {}
 
     for level in range(1, max_levels + 1):
-        referral = await get_referral_by_referred_id(session, current_id)
+        referral = first_level_referral if level == 1 else await get_referral_by_referred_id(session, current_id)
         if not referral:
             break
         referrer_id = int(referral["referrer_user_id"])
         percent = REFERRAL_BONUS_PERCENTAGES.get(level)
         if not percent:
+            current_id = referrer_id
             continue
         bonus = amount * percent if isinstance(percent, float) else percent
         bonus_by_chain[referrer_id] = (bonus, level)
@@ -49,6 +60,9 @@ async def process_referrals(session: AsyncSession, user_id: int, amount: float) 
         await add_payment(session, tg_id=referrer_id, amount=bonus, payment_system="referral")
         logger.info(f"Начислен бонус {bonus}₽ пользователю {referrer_id} за уровень {lvl}")
         result_map[referrer_id] = bonus
+
+    if CHECK_REFERRAL_REWARD_ISSUED and result_map and first_level_referral is not None:
+        await mark_referral_reward_issued(session, u.id)
 
     return result_map
 

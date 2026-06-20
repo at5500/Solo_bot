@@ -10,11 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Tariff
 from database.tariffs import (
+    find_subgroup_by_hash,
     get_tariffs,
+    move_subgroup as db_move_subgroup,
     move_tariff_down as db_move_tariff_down,
     move_tariff_up as db_move_tariff_up,
 )
 from filters.admin import IsAdminFilter
+from handlers.keys.utils import order_tariff_items
 
 from . import router
 from .keyboard import (
@@ -66,33 +69,23 @@ async def show_tariffs_arrangement(callback: CallbackQuery, callback_data: Admin
     for t in tariffs:
         grouped_tariffs[t.get("subgroup_title")].append(t)
 
-    sorted_subgroups = sorted(
-        [k for k in grouped_tariffs if k],
-        key=lambda x: (subgroup_weights.get(x, 999999), x),
-    )
-
     moscow_tz = pytz.timezone("Europe/Moscow")
     now = datetime.now(moscow_tz)
     current_time = now.strftime("%d.%m.%y %H:%M:%S МСК")
 
-    text = f"🔢 <b>Итоговая сортировка тарифов в группе: {group_code}</b>\n\n"
-
-    if grouped_tariffs.get(None):
-        text += "<b>📋 Основные тарифы:</b>\n"
-        for t in grouped_tariffs[None]:
-            sort_order = t.get("sort_order", 1)
-            text += f"• {t.get('name')} <code>[позиция: {sort_order}]</code>\n"
-        text += "\n"
-
-    if sorted_subgroups:
-        text += "<b>📁 Подгруппы:</b>\n"
-        for subgroup in sorted_subgroups:
-            subgroup_weight = subgroup_weights.get(subgroup, 999999)
-            text += f"• <b>{subgroup}</b> <code>[вес группы: {subgroup_weight}]</code>\n"
-            for t in grouped_tariffs[subgroup]:
-                sort_order = t.get("sort_order", 1)
-                text += f"  └ {t.get('name')} <code>[позиция: {sort_order}]</code>\n"
-            text += "\n"
+    text = (
+        f"🔢 <b>Итоговая сортировка тарифов в группе: {group_code}</b>\n\n"
+        "Порядок как видит пользователь (сквозной по позиции):\n\n"
+    )
+    for kind, payload in order_tariff_items(grouped_tariffs):
+        if kind == "tariff":
+            text += f"• {payload.get('name')} <code>[поз: {payload.get('sort_order') or 1}]</code>\n"
+        else:
+            sub_tariffs = grouped_tariffs[payload]
+            min_pos = min((t.get("sort_order") or 1) for t in sub_tariffs)
+            text += f"📁 <b>{payload}</b> <code>[поз: {min_pos}]</code>\n"
+            for t in sub_tariffs:
+                text += f"  └ {t.get('name')} <code>[поз: {t.get('sort_order') or 1}]</code>\n"
 
     text += f"\n{current_time}"
 
@@ -178,3 +171,27 @@ async def quick_move_tariff_down(callback: CallbackQuery, callback_data: AdminTa
     await callback.answer("✅ Тариф перемещен ниже (+1)")
     new_callback_data = AdminTariffCallback(action=f"arrange_group|{group_code}")
     await show_tariffs_arrangement(callback, new_callback_data, session)
+
+
+async def _move_subgroup(callback: CallbackQuery, session: AsyncSession, direction: str) -> None:
+    _, subgroup_hash, group_code = callback.data.split("|", 2)
+    subgroup_title = await find_subgroup_by_hash(session, subgroup_hash, group_code)
+    if not subgroup_title:
+        await callback.answer("❌ Подгруппа не найдена", show_alert=True)
+        return
+    ok = await db_move_subgroup(session, group_code, subgroup_title, direction)
+    if not ok:
+        await callback.answer("⛔ Дальше двигать некуда")
+        return
+    await callback.answer("✅ Подгруппа перемещена выше" if direction == "up" else "✅ Подгруппа перемещена ниже")
+    await show_tariffs_arrangement(callback, AdminTariffCallback(action=f"arrange_group|{group_code}"), session)
+
+
+@router.callback_query(F.data.startswith("submove_up|"), IsAdminFilter())
+async def quick_move_subgroup_up(callback: CallbackQuery, session: AsyncSession):
+    await _move_subgroup(callback, session, "up")
+
+
+@router.callback_query(F.data.startswith("submove_down|"), IsAdminFilter())
+async def quick_move_subgroup_down(callback: CallbackQuery, session: AsyncSession):
+    await _move_subgroup(callback, session, "down")

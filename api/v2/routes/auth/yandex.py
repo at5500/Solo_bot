@@ -40,9 +40,10 @@ try:
 except ImportError:
     _OAUTH_SUCCESS_URI = "/dashboard"
 try:
-    from config import API_TOKEN as _YANDEX_STATE_SECRET
+    from config import API_TOKEN as _API_TOKEN_RAW
 except ImportError:
-    _YANDEX_STATE_SECRET = "solo-yandex-state-fallback"
+    _API_TOKEN_RAW = "solo-yandex-state-fallback"
+_YANDEX_STATE_SECRET = hashlib.sha256(b"oauth-state:yandex:v1:" + str(_API_TOKEN_RAW or "").encode()).hexdigest()
 
 
 YANDEX_AUTH_ENDPOINT = "https://oauth.yandex.ru/authorize"

@@ -19,17 +19,36 @@ def _not_banned(user_id_col):
     )
 
 
-async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str | None = None) -> tuple[list[int], int]:
+def is_telegram_chat_id(tg_id: int | None) -> bool:
+    return tg_id is not None and tg_id > 0
+
+
+def _telegram_recipient_filters(telegram_only: bool):
+    filters = [User.tg_id.isnot(None)]
+    if telegram_only:
+        filters.append(User.tg_id > 0)
+    return filters
+
+
+async def get_recipients(
+    session: AsyncSession,
+    send_to: str,
+    cluster_name: str | None = None,
+    *,
+    telegram_only: bool = False,
+) -> tuple[list[int], int]:
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     query = None
+
+    tg_filters = _telegram_recipient_filters(telegram_only)
 
     if send_to == "subscribed":
         query = (
             select(distinct(User.tg_id))
             .join(Key, Key.user_id == User.id)
             .where(Key.expiry_time > now_ms)
-            .where(User.tg_id.isnot(None))
+            .where(*tg_filters)
             .where(_not_banned(User.id))
         )
 
@@ -46,10 +65,13 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
                 .having(func.max(Key.expiry_time) <= now_ms)
             )
         ).subquery()
+        unsub_tg_filters = [unsub_base.c.tg_id.isnot(None)]
+        if telegram_only:
+            unsub_tg_filters.append(unsub_base.c.tg_id > 0)
         query = (
             select(distinct(unsub_base.c.tg_id))
             .select_from(unsub_base)
-            .where(unsub_base.c.tg_id.isnot(None))
+            .where(*unsub_tg_filters)
             .where(
                 ~exists().where(BlockedUser.user_id == unsub_base.c.uid),
                 ~exists().where(
@@ -64,7 +86,7 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
         query = (
             select(distinct(User.tg_id))
             .where(~User.id.in_(key_user_ids) & User.trial.in_([0, -1]))
-            .where(User.tg_id.isnot(None))
+            .where(*tg_filters)
             .where(_not_banned(User.id))
         )
 
@@ -74,7 +96,15 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
             .join(Key, Key.user_id == User.id)
             .join(Server, Key.server_id == Server.cluster_name)
             .where(Server.cluster_name == cluster_name)
-            .where(User.tg_id.isnot(None))
+            .where(*tg_filters)
+            .where(_not_banned(User.id))
+        )
+
+    elif send_to == "source":
+        query = (
+            select(distinct(User.tg_id))
+            .where(User.source_code == cluster_name)
+            .where(*tg_filters)
             .where(_not_banned(User.id))
         )
 
@@ -88,7 +118,7 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
             .where(
                 not_(exists(select(1).select_from(Key).where(and_(Key.user_id == User.id, Key.expiry_time > now_ms))))
             )
-            .where(User.tg_id.isnot(None))
+            .where(*tg_filters)
             .where(_not_banned(User.id))
         )
 
@@ -98,12 +128,12 @@ async def get_recipients(session: AsyncSession, send_to: str, cluster_name: str 
             select(distinct(User.tg_id))
             .join(Key, Key.user_id == User.id)
             .where(Key.tariff_id.in_(trial_tariff_subquery))
-            .where(User.tg_id.isnot(None))
+            .where(*tg_filters)
             .where(_not_banned(User.id))
         )
 
     else:
-        query = select(distinct(User.tg_id)).where(User.tg_id.isnot(None)).where(_not_banned(User.id))
+        query = select(distinct(User.tg_id)).where(*tg_filters).where(_not_banned(User.id))
 
     result = await session.execute(query)
     tg_ids = [row[0] for row in result.all()]

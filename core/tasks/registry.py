@@ -2,11 +2,29 @@ from core.tasks.cron_tasks import (
     AUDIT_DRAIN_TRIGGER,
     DAILY_STATS_REPORT_TRIGGER,
     DB_POOL_STATUS_TRIGGER,
+    ABANDONED_CHECKOUT_TRIGGER,
     EXPIRED_GIFTS_CLEANUP_TRIGGER,
+    ANOMALY_CHECK_TRIGGER,
+    KEY_TRAFFIC_SNAPSHOT_TRIGGER,
+    KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER,
     STALE_PAYMENTS_SWEEP_TRIGGER,
+    SUBSCRIPTION_METRICS_SNAPSHOT_TRIGGER,
+    WEB_ANALYTICS_CLEANUP_TRIGGER,
+    abandoned_checkout_reminder_job,
+    abandoned_checkout_reminder_process_runner,
+    anomaly_check_job,
+    anomaly_check_process_runner,
     cleanup_expired_gifts_job,
     cleanup_expired_gifts_process_runner,
+    cleanup_web_analytics_job,
+    cleanup_web_analytics_process_runner,
     log_db_pool_status,
+    snapshot_key_traffic_job,
+    snapshot_key_traffic_process_runner,
+    snapshot_key_traffic_hourly_job,
+    snapshot_key_traffic_hourly_process_runner,
+    snapshot_subscription_metrics_job,
+    snapshot_subscription_metrics_process_runner,
     scheduled_audit_drain,
     scheduled_audit_drain_process_runner,
     scheduled_stats_report,
@@ -19,6 +37,7 @@ from core.tasks.loop_tasks import (
     backup_thread_loop,
     blocked_drain_loop,
     notifications_loop,
+    remnawave_monitor_loop,
     scheduled_broadcasts_loop_task,
     server_checks_loop,
 )
@@ -61,6 +80,8 @@ def register_periodic_tasks() -> None:
         process_budget -= 1
     else:
         periodic_task_manager.register_loop_task("server_checks", server_checks_loop)
+
+    periodic_task_manager.register_loop_task("remnawave_monitor", remnawave_monitor_loop)
 
     periodic_task_manager.set_scheduler_process_workers(process_budget)
 
@@ -110,6 +131,90 @@ def register_periodic_tasks() -> None:
             "cleanup_expired_gifts",
             cleanup_expired_gifts_job,
             EXPIRED_GIFTS_CLEANUP_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "cleanup_web_analytics",
+            cleanup_web_analytics_process_runner,
+            WEB_ANALYTICS_CLEANUP_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "cleanup_web_analytics",
+            cleanup_web_analytics_job,
+            WEB_ANALYTICS_CLEANUP_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "abandoned_checkout_reminder",
+            abandoned_checkout_reminder_process_runner,
+            ABANDONED_CHECKOUT_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "abandoned_checkout_reminder",
+            abandoned_checkout_reminder_job,
+            ABANDONED_CHECKOUT_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "snapshot_key_traffic",
+            snapshot_key_traffic_process_runner,
+            KEY_TRAFFIC_SNAPSHOT_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "snapshot_key_traffic",
+            snapshot_key_traffic_job,
+            KEY_TRAFFIC_SNAPSHOT_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "snapshot_key_traffic_hourly",
+            snapshot_key_traffic_hourly_process_runner,
+            KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "snapshot_key_traffic_hourly",
+            snapshot_key_traffic_hourly_job,
+            KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "snapshot_subscription_metrics",
+            snapshot_subscription_metrics_process_runner,
+            SUBSCRIPTION_METRICS_SNAPSHOT_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "snapshot_subscription_metrics",
+            snapshot_subscription_metrics_job,
+            SUBSCRIPTION_METRICS_SNAPSHOT_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "anomaly_check",
+            anomaly_check_process_runner,
+            ANOMALY_CHECK_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "anomaly_check",
+            anomaly_check_job,
+            ANOMALY_CHECK_TRIGGER,
         )
 
     periodic_task_manager.register_cron_task(

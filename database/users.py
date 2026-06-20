@@ -323,12 +323,26 @@ async def delete_user_data(session: AsyncSession, legacy_user_ref: int):
     )
     await session.execute(delete(GiftUsage).where(GiftUsage.user_id == uid))
     await session.execute(delete(Gift).where(Gift.sender_user_id == uid))
-    await session.execute(update(Gift).where(Gift.recipient_user_id == uid).values(recipient_user_id=None))
+    await session.execute(
+        update(Gift).where(Gift.recipient_user_id == uid).values(recipient_user_id=None, recipient_tg_id=None)
+    )
+    if u.tg_id is not None:
+        await session.execute(
+            update(Gift).where(Gift.recipient_tg_id == u.tg_id).values(recipient_tg_id=None)
+        )
+        await session.execute(
+            update(Gift).where(Gift.sender_tg_id == u.tg_id).values(sender_tg_id=None)
+        )
+        await session.execute(
+            update(Payment).where(Payment.tg_id == u.tg_id).values(tg_id=None)
+        )
     await session.execute(delete(Payment).where(Payment.user_id == uid))
     await session.execute(
         delete(Referral).where(or_(Referral.referrer_user_id == uid, Referral.referred_user_id == uid))
     )
     await session.execute(delete(CouponUsage).where(CouponUsage.user_id == uid))
+    if u.tg_id is not None:
+        await session.execute(update(Key).where(Key.tg_id == u.tg_id).values(tg_id=None))
     await delete_key(session, uid)
     await session.execute(
         delete(TemporaryData).where(

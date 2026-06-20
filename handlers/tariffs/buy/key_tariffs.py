@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import USE_NEW_PAYMENT_FLOW
+from core.bootstrap import MODES_CONFIG
 from core.settings.tariffs_config import normalize_tariff_config
 from database import get_balance, get_tariff_by_id
 from database.notifications import check_hot_lead_discount
@@ -20,6 +21,7 @@ from handlers.texts import (
     CREATING_CONNECTION_MSG,
     DEFAULT_LIMIT_LABEL,
     INSUFFICIENT_FUNDS_MSG,
+    TARIFF_COOLDOWN_MESSAGE,
     UNLIMITED_DEVICES_LABEL,
     UNLIMITED_TRAFFIC_LABEL,
 )
@@ -27,6 +29,7 @@ from handlers.utils import edit_or_send_message, get_plural_form, safe_answer_ca
 from hooks.processors import process_check_discount_validity
 from logger import logger
 from services.payments.currency_rates import format_for_user
+from services.tariffs.cooldown import format_cooldown_left, get_tariff_cooldown_remaining
 from services.tariffs.tariff_display import GB
 
 
@@ -498,54 +501,65 @@ async def render_user_config_screen(
 
     builder = InlineKeyboardBuilder()
 
-    device_buttons: list[InlineKeyboardButton] = []
-    traffic_buttons: list[InlineKeyboardButton] = []
+    def _dev_label(v: int) -> str:
+        if v == 0:
+            return UNLIMITED_DEVICES_LABEL.capitalize()
+        return f"{v} устр."
 
-    if has_device_choice:
-        selected_devices_int = int(selected_devices or 0)
-        for value in device_int_options:
-            mark = " ✅" if value == selected_devices_int else ""
-            if value == 0:
-                caption = f"{UNLIMITED_DEVICES_LABEL.capitalize()}{mark}"
-            else:
-                caption = f"{value} {get_plural_form(value, 'устройство', 'устройства', 'устройств')}{mark}"
-            device_buttons.append(
-                InlineKeyboardButton(
-                    text=caption,
-                    callback_data=f"cfg_user_devices|{tariff_id}|{value}",
-                )
+    def _traf_label(v: int) -> str:
+        if v == 0:
+            return UNLIMITED_TRAFFIC_LABEL.capitalize()
+        return f"{v} ГБ"
+
+    def _stepper_row(options: list[int], selected, prefix: str, label_fn) -> list[InlineKeyboardButton]:
+        cur = int(selected) if selected is not None else (options[0] if options else 0)
+        try:
+            idx = options.index(cur)
+        except ValueError:
+            idx = 0
+        prev_val = options[idx - 1] if idx > 0 else options[idx]
+        next_val = options[idx + 1] if idx < len(options) - 1 else options[idx]
+        left = "◀️" if idx > 0 else "▫️"
+        right = "▶️" if idx < len(options) - 1 else "▫️"
+        return [
+            InlineKeyboardButton(text=left, callback_data=f"{prefix}|{tariff_id}|{prev_val}"),
+            InlineKeyboardButton(text=label_fn(options[idx]), callback_data=f"{prefix}|{tariff_id}|{options[idx]}"),
+            InlineKeyboardButton(text=right, callback_data=f"{prefix}|{tariff_id}|{next_val}"),
+        ]
+
+    def _option_buttons(options: list[int], selected, prefix: str, label_fn) -> list[InlineKeyboardButton]:
+        sel = int(selected) if selected is not None else None
+        return [
+            InlineKeyboardButton(
+                text=label_fn(v) + (" ✅" if sel is not None and v == sel else ""),
+                callback_data=f"{prefix}|{tariff_id}|{v}",
             )
+            for v in options
+        ]
 
-    if has_traffic_choice:
-        selected_traffic_int = int(selected_traffic_gb or 0)
-        for value in traffic_int_options:
-            mark = " ✅" if value == selected_traffic_int else ""
-            if value == 0:
-                caption = f"{UNLIMITED_TRAFFIC_LABEL.capitalize()}{mark}"
-            else:
-                caption = f"{value} ГБ{mark}"
-            traffic_buttons.append(
-                InlineKeyboardButton(
-                    text=caption,
-                    callback_data=f"cfg_user_traffic|{tariff_id}|{value}",
-                )
-            )
-
-    if device_buttons and traffic_buttons:
-        max_len = max(len(device_buttons), len(traffic_buttons))
-        for i in range(max_len):
-            row = []
-            if i < len(device_buttons):
-                row.append(device_buttons[i])
-            if i < len(traffic_buttons):
-                row.append(traffic_buttons[i])
-            builder.row(*row)
-    elif device_buttons:
-        for i in range(0, len(device_buttons), 2):
-            builder.row(*device_buttons[i : i + 2])
-    elif traffic_buttons:
-        for i in range(0, len(traffic_buttons), 2):
-            builder.row(*traffic_buttons[i : i + 2])
+    use_pagination = bool((MODES_CONFIG or {}).get("TARIFF_OPTIONS_PAGINATION", True))
+    if use_pagination:
+        if has_device_choice:
+            builder.row(*_stepper_row(device_int_options, selected_devices, "cfg_user_devices", _dev_label))
+        if has_traffic_choice:
+            builder.row(*_stepper_row(traffic_int_options, selected_traffic_gb, "cfg_user_traffic", _traf_label))
+    else:
+        device_buttons = _option_buttons(device_int_options, selected_devices, "cfg_user_devices", _dev_label) if has_device_choice else []
+        traffic_buttons = _option_buttons(traffic_int_options, selected_traffic_gb, "cfg_user_traffic", _traf_label) if has_traffic_choice else []
+        if device_buttons and traffic_buttons:
+            for i in range(max(len(device_buttons), len(traffic_buttons))):
+                row = []
+                if i < len(device_buttons):
+                    row.append(device_buttons[i])
+                if i < len(traffic_buttons):
+                    row.append(traffic_buttons[i])
+                builder.row(*row)
+        elif device_buttons:
+            for i in range(0, len(device_buttons), 2):
+                builder.row(*device_buttons[i : i + 2])
+        elif traffic_buttons:
+            for i in range(0, len(traffic_buttons), 2):
+                builder.row(*traffic_buttons[i : i + 2])
 
     is_renew_mode = data.get("renew_mode") == "renew"
     confirm_prefix = "cfg_renew_confirm" if is_renew_mode else "cfg_user_confirm"
@@ -801,6 +815,24 @@ async def select_tariff_plan(callback_query: CallbackQuery, session: Any, state:
         )
         await safe_answer_callback(callback_query)
         logger.warning(f"[TARIFF_CFG] select_tariff_plan tariff_not_found: tariff_id={tariff_id}")
+        return
+
+    cooldown_left = await get_tariff_cooldown_remaining(
+        session, tg_id, tariff.get("id"), tariff.get("cooldown_days", 0)
+    )
+    if cooldown_left > 0:
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
+        await edit_or_send_message(
+            target_message=callback_query.message,
+            text=TARIFF_COOLDOWN_MESSAGE.format(
+                days=int(tariff.get("cooldown_days") or 0),
+                left=format_cooldown_left(cooldown_left),
+            ),
+            reply_markup=builder.as_markup(),
+        )
+        await safe_answer_callback(callback_query)
+        logger.info(f"[TARIFF_CFG] select_tariff_plan cooldown_block: tg_id={tg_id} tariff_id={tariff_id} left={cooldown_left}s")
         return
 
     discount_info = await check_hot_lead_discount(session, tg_id)

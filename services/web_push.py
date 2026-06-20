@@ -28,11 +28,12 @@ async def send_push_notification(
     body: str,
     url: str = "/dashboard",
     tag: str = "solo-notification",
-) -> bool:
-    """Отправить push-уведомление одному подписчику."""
+) -> str:
+    """Отправить push одному подписчику. Возвращает 'ok' | 'dead' | 'error'.
+    'dead' — эндпоинт удалён сервисом (404/410), подписку нужно удалить."""
     if not push_enabled():
         logger.debug("[WebPush] push отключён (нет VAPID ключей или pywebpush)")
-        return False
+        return "error"
 
     payload = json.dumps({
         "title": title,
@@ -49,13 +50,17 @@ async def send_push_notification(
             vapid_claims={"sub": f"mailto:{VAPID_CLAIMS_EMAIL}"},
         )
         logger.debug("[WebPush] уведомление отправлено: {}", title)
-        return True
+        return "ok"
     except WebPushException as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (404, 410):
+            logger.info("[WebPush] подписка недействительна ({}), помечена на удаление", status)
+            return "dead"
         logger.error("[WebPush] ошибка отправки: {}", e)
-        return False
+        return "error"
     except Exception as e:
         logger.error("[WebPush] неожиданная ошибка: {}", e)
-        return False
+        return "error"
 
 
 async def send_push_to_many(
@@ -64,10 +69,17 @@ async def send_push_to_many(
     body: str,
     url: str = "/dashboard",
     tag: str = "solo-notification",
-) -> int:
-    """Отправить push нескольким подписчикам. Возвращает количество успешных."""
+) -> tuple[int, list[str]]:
+    """Отправить push нескольким подписчикам.
+    Возвращает (кол-во успешных, список endpoint'ов недействительных подписок)."""
     sent = 0
+    dead: list[str] = []
     for sub in subscriptions:
-        if await send_push_notification(sub, title, body, url, tag):
+        result = await send_push_notification(sub, title, body, url, tag)
+        if result == "ok":
             sent += 1
-    return sent
+        elif result == "dead":
+            endpoint = sub.get("endpoint") if isinstance(sub, dict) else None
+            if endpoint:
+                dead.append(str(endpoint))
+    return sent, dead

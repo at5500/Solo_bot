@@ -16,7 +16,9 @@ from database.models import Tariff
 from database.tariffs import (
     create_subgroup_hash,
     find_subgroup_by_hash,
+    get_subgroup_description,
     get_tariffs,
+    set_subgroup_description,
 )
 from filters.admin import IsAdminFilter
 from handlers.buttons import BACK
@@ -198,6 +200,12 @@ async def view_subgroup_tariffs(callback: CallbackQuery, session: AsyncSession):
     )
     builder.row(
         InlineKeyboardButton(
+            text="📄 Текст на экране выбора",
+            callback_data=f"subgroup_desc|{subgroup_hash}|{group_code}",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="✏️ Редактировать подгруппу",
             callback_data=f"edit_subgroup_tariffs|{subgroup_hash}|{group_code}",
         )
@@ -219,6 +227,53 @@ async def view_subgroup_tariffs(callback: CallbackQuery, session: AsyncSession):
     await callback.message.edit_text(
         f"<b>📂 Подгруппа: {subgroup_title}</b>",
         reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("subgroup_desc|"), IsAdminFilter())
+async def start_edit_subgroup_description(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    _, subgroup_hash, group_code = callback.data.split("|", 2)
+    subgroup_title = await find_subgroup_by_hash(session, subgroup_hash, group_code)
+    if not subgroup_title:
+        await callback.message.edit_text("❌ Подгруппа не найдена.")
+        return
+
+    current = await get_subgroup_description(session, group_code, subgroup_title)
+    current_text = (current or "— не задан —").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    await state.update_data(subgroup_title=subgroup_title, group_code=group_code, subgroup_hash=subgroup_hash)
+    await state.set_state(SubgroupEditState.entering_description)
+    await callback.message.edit_text(
+        f"📄 Текст подгруппы <b>{subgroup_title}</b>, который показывается над «Выберите тариф:».\n\n"
+        f"Текущий:\n<blockquote>{current_text}</blockquote>\n\n"
+        "Отправьте новый текст (можно несколько строк) или «-», чтобы убрать.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"view_subgroup|{subgroup_hash}|{group_code}")]
+            ]
+        ),
+    )
+
+
+@router.message(SubgroupEditState.entering_description, IsAdminFilter())
+async def save_subgroup_description(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    group_code = data.get("group_code")
+    subgroup_title = data.get("subgroup_title")
+    subgroup_hash = data.get("subgroup_hash")
+
+    value = (message.text or "").strip()
+    description = None if value in ("", "-", "0") else value[:1000]
+    await set_subgroup_description(session, group_code, subgroup_title, description)
+    await state.clear()
+
+    await message.answer(
+        "✅ Текст подгруппы обновлён." if description else "✅ Текст подгруппы убран.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=BACK, callback_data=f"view_subgroup|{subgroup_hash}|{group_code}")]
+            ]
+        ),
     )
 
 

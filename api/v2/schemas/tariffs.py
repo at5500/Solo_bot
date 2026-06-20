@@ -23,3 +23,4 @@ class TariffPublic(BaseModel):
     configurable: bool = False
     device_options: list[int] | None = None
     traffic_options_gb: list[int] | None = None
+    cooldown_days: int = 0

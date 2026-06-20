@@ -19,6 +19,7 @@ import pytz
 from database import async_session_maker
 from database.bans import save_blocked_user_ids
 from handlers.utils import format_hours, format_minutes, get_russian_month
+from handlers.admin.sender.sender_utils import is_telegram_chat_id
 from logger import logger
 from services.tariffs.tariff_display import get_key_tariff_display
 from utils.custom_emojis import _process_text
@@ -60,7 +61,7 @@ def _find_photo_file(photo_path: str) -> str | None:
 
 
 class NotificationRateLimiter:
-    def __init__(self, max_rate: int = 35, window: float = 1.0) -> None:
+    def __init__(self, max_rate: int = 25, window: float = 1.0) -> None:
         self.max_rate = max_rate
         self.window = window
         self.send_times: deque = deque()
@@ -172,19 +173,26 @@ async def _send_text(
         return False
 
 
+_NOTIFY_MAX_ATTEMPTS = 5
+_NOTIFY_MAX_RETRY_AFTER = 120.0
+
+
 class FastNotificationSender:
-    def __init__(self, bot: Bot, messages_per_second: int = 35) -> None:
+    def __init__(self, bot: Bot, messages_per_second: int = 25, max_attempts: int = _NOTIFY_MAX_ATTEMPTS) -> None:
         self.bot = bot
         self.rate_limiter = NotificationRateLimiter(max_rate=messages_per_second)
+        self.max_attempts = max_attempts
         self.blocked_users: set[int] = set()
         self.queue: asyncio.Queue = asyncio.Queue()
-        self.delayed_queue: asyncio.Queue = asyncio.Queue()
         self.results: list[bool] = []
         self.total_sent = 0
+        self.pending_retries = 0
         self.is_running = False
 
-    async def _send_one(self, msg: dict) -> bool:
+    async def _send_one(self, msg: dict) -> str:
         tg_id = msg["tg_id"]
+        if not is_telegram_chat_id(tg_id):
+            return "fail"
         try:
             await self.rate_limiter.acquire()
 
@@ -230,57 +238,71 @@ class FastNotificationSender:
                     chat_id=tg_id, text=processed_text, reply_markup=msg.get("keyboard"),
                     **emoji_kwargs, **text_kwargs,
                 )
-            return True
+            return "ok"
 
         except TelegramRetryAfter as e:
-            msg["_retry_after"] = e.retry_after
+            wait_seconds = min(float(e.retry_after), _NOTIFY_MAX_RETRY_AFTER)
             msg["_attempts"] = msg.get("_attempts", 0) + 1
-            await self.delayed_queue.put(msg)
-            return False
+            msg["_retry_at"] = time.time() + wait_seconds
+            return "retry"
         except TelegramForbiddenError:
-            self.blocked_users.add(tg_id)
-            return False
-        except TelegramBadRequest as e:
-            if "chat not found" in str(e).lower():
+            if is_telegram_chat_id(tg_id):
                 self.blocked_users.add(tg_id)
-            return False
+            return "fail"
+        except TelegramBadRequest as e:
+            if "chat not found" in str(e).lower() and is_telegram_chat_id(tg_id):
+                self.blocked_users.add(tg_id)
+            return "fail"
         except Exception:
-            return False
+            return "fail"
 
-    async def _process_delayed(self):
-        while self.is_running:
+    async def _schedule_retry(self, msg: dict) -> None:
+        try:
+            wait = msg.get("_retry_at", 0.0) - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self.queue.put(msg)
+        except asyncio.CancelledError:
+            self.results.append(False)
+            raise
+        except Exception:
+            self.results.append(False)
+        finally:
+            self.pending_retries -= 1
+
+    async def _worker(self):
+        while True:
             try:
-                if not self.delayed_queue.empty():
-                    msg = await asyncio.wait_for(self.delayed_queue.get(), timeout=0.1)
-                    if msg.get("_retry_after"):
-                        await asyncio.sleep(msg["_retry_after"])
-                        msg["_retry_after"] = None
-                    if msg.get("_attempts", 0) < 3:
-                        await self.queue.put(msg)
+                msg = await asyncio.wait_for(self.queue.get(), timeout=0.5)
+            except (TimeoutError, asyncio.TimeoutError):
+                if not self.is_running:
+                    return
+                continue
+
+            try:
+                result = await self._send_one(msg)
+                if result == "ok":
+                    self.total_sent += 1
+                    self.results.append(True)
+                elif result == "retry":
+                    if msg.get("_attempts", 0) < self.max_attempts:
+                        try:
+                            asyncio.create_task(self._schedule_retry(msg))
+                            self.pending_retries += 1
+                        except Exception as e:
+                            logger.error(
+                                f"Не удалось запланировать повтор для {msg.get('tg_id')}: {e}"
+                            )
+                            self.results.append(False)
                     else:
                         self.results.append(False)
                 else:
-                    await asyncio.sleep(0.1)
-            except TimeoutError:
-                continue
-            except Exception:
-                await asyncio.sleep(0.1)
-
-    async def _worker(self):
-        while self.is_running:
-            try:
-                msg = await asyncio.wait_for(self.queue.get(), timeout=0.1)
-                success = await self._send_one(msg)
-                if success:
-                    self.total_sent += 1
-                    self.results.append(True)
-                elif msg.get("_attempts", 0) == 0:
                     self.results.append(False)
+            except Exception as e:
+                logger.error(f"Ошибка в воркере уведомлений: {e}")
+                self.results.append(False)
+            finally:
                 self.queue.task_done()
-            except TimeoutError:
-                continue
-            except Exception:
-                await asyncio.sleep(0.1)
 
     async def _save_blocked_users(self):
         if not self.blocked_users:
@@ -301,24 +323,25 @@ class FastNotificationSender:
         self.results = []
         self.total_sent = 0
         self.blocked_users = set()
+        self.pending_retries = 0
         start = time.time()
 
         for msg in messages:
-            await self.queue.put(msg)
+            if is_telegram_chat_id(msg.get("tg_id")):
+                await self.queue.put(msg)
 
         worker_tasks = [asyncio.create_task(self._worker()) for _ in range(workers)]
-        delayed_task = asyncio.create_task(self._process_delayed())
 
-        await self.queue.join()
-        await asyncio.sleep(0.5)
-        while not self.delayed_queue.empty():
+        while True:
+            await self.queue.join()
+            if self.pending_retries <= 0:
+                break
             await asyncio.sleep(0.5)
 
         self.is_running = False
         for task in worker_tasks:
             task.cancel()
-        delayed_task.cancel()
-        await asyncio.gather(*worker_tasks, delayed_task, return_exceptions=True)
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
         await self._save_blocked_users()
 
         duration = time.time() - start
@@ -331,7 +354,7 @@ class FastNotificationSender:
 async def send_messages_with_limit(
     bot: Bot,
     messages: list[dict],
-    messages_per_second: int = 35,
+    messages_per_second: int = 25,
 ) -> list[bool]:
     sender = FastNotificationSender(bot, messages_per_second)
     return await sender.send_all(messages)

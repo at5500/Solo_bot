@@ -145,6 +145,8 @@ async def _add_constraint_if_missing(conn: AsyncConnection, table: str, name: st
 
 
 async def _drop_fkeys_to_users(conn: AsyncConnection) -> None:
+    if not await _table_exists(conn, "users"):
+        return
     r = await conn.execute(
         text(
             """
@@ -680,59 +682,95 @@ async def _migration_v6_add_foreign_keys(conn: AsyncConnection) -> None:
         )
 
 
-async def _migration_v7_backfill_tg_mirrors(conn: AsyncConnection) -> None:
-    logger.info("[schema_upgrade] v7: Backfill tg_id mirrors")
-
+async def _run_tg_mirror_backfill(conn: AsyncConnection, *, nulls_only: bool) -> None:
+    null_filter = " AND k.tg_id IS NULL" if nulls_only else ""
     backfills = [
-        "UPDATE keys k SET tg_id = u.tg_id FROM users u WHERE k.user_id = u.id",
-        "UPDATE payments p SET tg_id = u.tg_id FROM users u WHERE p.user_id = u.id",
-        "UPDATE referrals r SET referred_tg_id = ur.tg_id, referrer_tg_id = ux.tg_id FROM users ur, users ux WHERE r.referred_user_id = ur.id AND r.referrer_user_id = ux.id",
-        "UPDATE notifications n SET tg_id = u.tg_id FROM users u WHERE n.user_id = u.id",
-        "UPDATE gift_usages gu SET tg_id = u.tg_id FROM users u WHERE gu.user_id = u.id",
-        "UPDATE manual_bans m SET tg_id = u.tg_id FROM users u WHERE m.user_id = u.id",
-        "UPDATE temporary_data t SET tg_id = u.tg_id FROM users u WHERE t.user_id = u.id",
-        "UPDATE blocked_users b SET tg_id = u.tg_id FROM users u WHERE b.user_id = u.id",
-        "UPDATE scheduled_broadcasts s SET created_by_tg_id = u.tg_id FROM users u WHERE s.created_by_user_id = u.id",
-        "UPDATE coupon_usages c SET tg_id = u.tg_id FROM users u WHERE c.user_id = u.id",
+        (
+            "keys",
+            f"UPDATE keys k SET tg_id = u.tg_id FROM users u WHERE k.user_id = u.id{null_filter}",
+        ),
+        (
+            "payments",
+            f"UPDATE payments p SET tg_id = u.tg_id FROM users u "
+            f"WHERE p.user_id = u.id{' AND p.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "referrals",
+            "UPDATE referrals r SET referred_tg_id = ur.tg_id, referrer_tg_id = ux.tg_id "
+            "FROM users ur, users ux "
+            "WHERE r.referred_user_id = ur.id AND r.referrer_user_id = ux.id"
+            + (" AND (r.referred_tg_id IS NULL OR r.referrer_tg_id IS NULL)" if nulls_only else ""),
+        ),
+        (
+            "notifications",
+            f"UPDATE notifications n SET tg_id = u.tg_id FROM users u "
+            f"WHERE n.user_id = u.id{' AND n.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "gift_usages",
+            f"UPDATE gift_usages gu SET tg_id = u.tg_id FROM users u "
+            f"WHERE gu.user_id = u.id{' AND gu.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "manual_bans",
+            f"UPDATE manual_bans m SET tg_id = u.tg_id FROM users u "
+            f"WHERE m.user_id = u.id{' AND m.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "temporary_data",
+            f"UPDATE temporary_data t SET tg_id = u.tg_id FROM users u "
+            f"WHERE t.user_id = u.id{' AND t.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "blocked_users",
+            f"UPDATE blocked_users b SET tg_id = u.tg_id FROM users u "
+            f"WHERE b.user_id = u.id{' AND b.tg_id IS NULL' if nulls_only else ''}",
+        ),
+        (
+            "scheduled_broadcasts",
+            "UPDATE scheduled_broadcasts s SET created_by_tg_id = u.tg_id FROM users u "
+            "WHERE s.created_by_user_id = u.id"
+            + (" AND s.created_by_tg_id IS NULL" if nulls_only else ""),
+        ),
+        (
+            "coupon_usages",
+            f"UPDATE coupon_usages c SET tg_id = u.tg_id FROM users u "
+            f"WHERE c.user_id = u.id{' AND c.tg_id IS NULL' if nulls_only else ''}",
+        ),
     ]
 
-    for sql in backfills:
-        try:
-            async with conn.begin_nested():
-                await conn.execute(text(sql))
-        except Exception as e:
-            logger.debug(f"[schema_upgrade] backfill skip: {e}")
+    for table, sql in backfills:
+        if await _table_exists(conn, table):
+            await conn.execute(text(sql))
 
     if await _table_exists(conn, "gifts"):
-        try:
-            async with conn.begin_nested():
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE gifts g
-                        SET sender_tg_id = u.tg_id
-                        FROM users u
-                        WHERE g.sender_user_id = u.id
-                        """
-                    )
-                )
-        except Exception as e:
-            logger.debug(f"[schema_upgrade] backfill gifts sender skip: {e}")
+        sender_null = " AND g.sender_tg_id IS NULL" if nulls_only else ""
+        recipient_null = " AND g.recipient_tg_id IS NULL" if nulls_only else ""
+        await conn.execute(
+            text(
+                f"""
+                UPDATE gifts g
+                SET sender_tg_id = u.tg_id
+                FROM users u
+                WHERE g.sender_user_id = u.id{sender_null}
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                f"""
+                UPDATE gifts g
+                SET recipient_tg_id = u.tg_id
+                FROM users u
+                WHERE g.recipient_user_id = u.id{recipient_null}
+                """
+            )
+        )
 
-        try:
-            async with conn.begin_nested():
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE gifts g
-                        SET recipient_tg_id = u.tg_id
-                        FROM users u
-                        WHERE g.recipient_user_id = u.id
-                        """
-                    )
-                )
-        except Exception as e:
-            logger.debug(f"[schema_upgrade] backfill gifts recipient skip: {e}")
+
+async def _migration_v7_backfill_tg_mirrors(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v7: Backfill tg_id mirrors")
+    await _run_tg_mirror_backfill(conn, nulls_only=False)
 
 
 async def _migration_v8_fix_notification_timezone(conn: AsyncConnection) -> None:
@@ -1266,6 +1304,25 @@ async def _migration_v27_add_admins_permissions(conn: AsyncConnection) -> None:
         )
 
 
+async def _migration_v28_add_identity_notif_prefs(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v28: таблица identity_notif_prefs (toggle каналов уведомлений)")
+    if not await _table_exists(conn, "identities"):
+        return
+    if not await _table_exists(conn, "identity_notif_prefs"):
+        await _exec_ignore(
+            conn,
+            """
+            CREATE TABLE identity_notif_prefs (
+                identity_id VARCHAR(36) NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+                channel VARCHAR(32) NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (identity_id, channel)
+            )
+            """,
+        )
+
+
 async def _migration_v24_add_identity_sessions(conn: AsyncConnection) -> None:
     logger.info("[schema_upgrade] v24: таблица identity_sessions + перенос существующих токенов")
     if not await _table_exists(conn, "identities"):
@@ -1318,6 +1375,294 @@ async def _migration_v24_add_identity_sessions(conn: AsyncConnection) -> None:
         )
 
 
+async def _migration_v29_add_scheduled_broadcasts_channel(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v29: scheduled_broadcasts.channel (bot/site/both)")
+    if not await _table_exists(conn, "scheduled_broadcasts"):
+        return
+    if not await _column_exists(conn, "scheduled_broadcasts", "channel"):
+        await conn.execute(
+            text("ALTER TABLE scheduled_broadcasts ADD COLUMN channel VARCHAR(8) NOT NULL DEFAULT 'both'")
+        )
+
+
+async def _migration_v30_add_users_created_at_index(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v30: индекс users(created_at)")
+    if not await _table_exists(conn, "users"):
+        return
+    if not await _column_exists(conn, "users", "created_at"):
+        return
+    if not await _index_exists(conn, "users", "ix_users_created_at"):
+        await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at)")
+
+
+async def _migration_v31_repair_tg_mirror_nulls(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v31: Repair NULL tg_id mirrors")
+    await _run_tg_mirror_backfill(conn, nulls_only=True)
+
+
+async def _migration_v32_add_polls(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v32: таблицы опросов (polls + poll_messages + poll_votes)")
+    if not await _table_exists(conn, "polls"):
+        await _exec_ignore(
+            conn,
+            """
+            CREATE TABLE polls (
+                id VARCHAR(36) PRIMARY KEY,
+                question TEXT NOT NULL,
+                options JSONB NOT NULL,
+                allows_multiple BOOLEAN NOT NULL DEFAULT FALSE,
+                is_anonymous BOOLEAN NOT NULL DEFAULT FALSE,
+                status VARCHAR(16) NOT NULL DEFAULT 'open',
+                sent_count INTEGER NOT NULL DEFAULT 0,
+                created_by_tg_id BIGINT REFERENCES users(tg_id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP
+            )
+            """,
+        )
+        await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_polls_status ON polls (status)")
+        await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_polls_created_by_tg_id ON polls (created_by_tg_id)")
+    if not await _table_exists(conn, "poll_messages"):
+        await _exec_ignore(
+            conn,
+            """
+            CREATE TABLE poll_messages (
+                telegram_poll_id VARCHAR(64) PRIMARY KEY,
+                poll_id VARCHAR(36) NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+                tg_id BIGINT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+        )
+        await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_poll_messages_poll_id ON poll_messages (poll_id)")
+    if not await _table_exists(conn, "poll_votes"):
+        await _exec_ignore(
+            conn,
+            """
+            CREATE TABLE poll_votes (
+                poll_id VARCHAR(36) NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+                tg_id BIGINT NOT NULL,
+                option_ids JSONB NOT NULL,
+                voted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (poll_id, tg_id)
+            )
+            """,
+        )
+
+
+async def _migration_v33_web_page_views(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v33: таблица web_page_views")
+
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS web_page_views (
+            id VARCHAR(36) PRIMARY KEY,
+            visitor_id VARCHAR(36) NOT NULL,
+            page_slug VARCHAR(64) NOT NULL,
+            referrer VARCHAR(255),
+            utm_source VARCHAR(64),
+            utm_medium VARCHAR(64),
+            utm_campaign VARCHAR(64),
+            device VARCHAR(16),
+            locale VARCHAR(8),
+            authenticated BOOLEAN,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_web_page_views_created ON web_page_views (created_at)",
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_web_page_views_slug_created ON web_page_views (page_slug, created_at)",
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_web_page_views_visitor ON web_page_views (visitor_id)",
+    )
+
+
+async def _migration_v34_web_page_views_source(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v34: web_page_views.source (web/webapp)")
+    if not await _table_exists(conn, "web_page_views"):
+        return
+    if not await _column_exists(conn, "web_page_views", "source"):
+        await _exec_ignore(conn, "ALTER TABLE web_page_views ADD COLUMN source VARCHAR(16)")
+
+
+async def _migration_v36_web_page_views_ab_variant(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v36: web_page_views.ab_variant (A/B)")
+    if not await _table_exists(conn, "web_page_views"):
+        return
+    if not await _column_exists(conn, "web_page_views", "ab_variant"):
+        await _exec_ignore(conn, "ALTER TABLE web_page_views ADD COLUMN ab_variant VARCHAR(16)")
+
+
+async def _migration_v37_rate_limit_counters(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v37: таблица rate_limit_counters (распределённый fallback)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS rate_limit_counters (
+            bucket VARCHAR(255) NOT NULL,
+            window_start BIGINT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (bucket, window_start)
+        )
+        """,
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_rate_limit_counters_window ON rate_limit_counters (window_start)",
+    )
+
+
+async def _migration_v35_key_traffic_history(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v35: таблица key_traffic_history (история использования)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS key_traffic_history (
+            id SERIAL PRIMARY KEY,
+            client_id VARCHAR(128) NOT NULL,
+            tg_id BIGINT,
+            used_gb DOUBLE PRECISION,
+            limit_gb DOUBLE PRECISION,
+            snapshot_date DATE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_key_traffic_history_client_date UNIQUE (client_id, snapshot_date)
+        )
+        """,
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_key_traffic_history_client_date ON key_traffic_history (client_id, snapshot_date)",
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_key_traffic_history_date ON key_traffic_history (snapshot_date)",
+    )
+
+
+async def _migration_v38_subscription_events(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v38: таблица subscription_events (журнал жизненного цикла подписок)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS subscription_events (
+            id BIGSERIAL PRIMARY KEY,
+            event_type VARCHAR(24) NOT NULL,
+            user_id BIGINT,
+            tg_id BIGINT,
+            client_id VARCHAR(128),
+            tariff_id INTEGER,
+            server_id VARCHAR,
+            price_rub DOUBLE PRECISION,
+            duration_days INTEGER,
+            expiry_time BIGINT,
+            was_expired BOOLEAN,
+            source VARCHAR(32),
+            metadata JSONB,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    )
+    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_type_created ON subscription_events (event_type, created_at)")
+    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_created ON subscription_events (created_at)")
+    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_client ON subscription_events (client_id)")
+    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_user ON subscription_events (user_id)")
+
+
+async def _migration_v39_daily_subscription_metrics(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v39: таблица daily_subscription_metrics (дневные снапшоты подписок)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS daily_subscription_metrics (
+            snapshot_date DATE PRIMARY KEY,
+            active INTEGER NOT NULL DEFAULT 0,
+            created INTEGER NOT NULL DEFAULT 0,
+            renewed INTEGER NOT NULL DEFAULT 0,
+            expired INTEGER NOT NULL DEFAULT 0,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            revenue_rub DOUBLE PRECISION NOT NULL DEFAULT 0,
+            by_tariff JSONB,
+            by_server JSONB,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+    )
+
+
+async def _migration_v40_tariff_cooldown_days(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v40: tariffs.cooldown_days (задержка между покупками тарифа, дней)")
+    await _exec_ignore(
+        conn,
+        "ALTER TABLE tariffs ADD COLUMN IF NOT EXISTS cooldown_days INTEGER NOT NULL DEFAULT 0",
+    )
+
+
+async def _migration_v41_tariff_visibility_rules(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v41: tariffs.visibility_rules (условная видимость тарифа по признаку юзера)")
+    await _exec_ignore(
+        conn,
+        "ALTER TABLE tariffs ADD COLUMN IF NOT EXISTS visibility_rules JSONB",
+    )
+
+
+async def _migration_v42_tariff_description(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v42: tariffs.description (описание состава тарифа)")
+    await _exec_ignore(
+        conn,
+        "ALTER TABLE tariffs ADD COLUMN IF NOT EXISTS description VARCHAR",
+    )
+
+
+async def _migration_v43_tariff_subgroup_settings(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v43: tariff_subgroup_settings (текст подгруппы на экране выбора)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS tariff_subgroup_settings (
+            id SERIAL PRIMARY KEY,
+            group_code VARCHAR NOT NULL,
+            subgroup_title VARCHAR NOT NULL,
+            description VARCHAR,
+            updated_at TIMESTAMP DEFAULT now(),
+            CONSTRAINT uq_tariff_subgroup_setting UNIQUE (group_code, subgroup_title)
+        )
+        """,
+    )
+
+
+async def _migration_v44_key_traffic_hourly(conn: AsyncConnection) -> None:
+    logger.info("[schema_upgrade] v44: key_traffic_hourly (почасовая история трафика)")
+    await _exec_ignore(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS key_traffic_hourly (
+            id SERIAL PRIMARY KEY,
+            client_id VARCHAR(128) NOT NULL,
+            tg_id BIGINT,
+            used_gb DOUBLE PRECISION,
+            snapshot_hour TIMESTAMP NOT NULL,
+            CONSTRAINT uq_key_traffic_hourly_client_hour UNIQUE (client_id, snapshot_hour)
+        )
+        """,
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_key_traffic_hourly_client_hour ON key_traffic_hourly(client_id, snapshot_hour)",
+    )
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_key_traffic_hourly_hour ON key_traffic_hourly(snapshot_hour)",
+    )
+
+
 _MIGRATIONS = [
     (1, "Добавление users.id", _migration_v1_add_users_id),
     (2, "Добавление user_id колонок", _migration_v2_add_user_id_columns),
@@ -1346,6 +1691,23 @@ _MIGRATIONS = [
     (25, "индексы на partners(partner_tg_id/joined_tg_id)", _migration_v25_add_partners_indexes),
     (26, "индексы keys(expiry_time/server_id/tariff_id)", _migration_v26_add_keys_indexes),
     (27, "admins.permissions (JSONB per-admin permissions)", _migration_v27_add_admins_permissions),
+    (28, "таблица identity_notif_prefs (toggle каналов)", _migration_v28_add_identity_notif_prefs),
+    (29, "scheduled_broadcasts.channel (bot/site/both)", _migration_v29_add_scheduled_broadcasts_channel),
+    (30, "индекс users(created_at)", _migration_v30_add_users_created_at_index),
+    (31, "Repair NULL tg_id mirrors", _migration_v31_repair_tg_mirror_nulls),
+    (32, "Таблицы опросов (polls/poll_messages/poll_votes)", _migration_v32_add_polls),
+    (33, "Таблица web_page_views (аналитика посещений)", _migration_v33_web_page_views),
+    (34, "web_page_views.source (web/webapp)", _migration_v34_web_page_views_source),
+    (35, "Таблица key_traffic_history (история трафика)", _migration_v35_key_traffic_history),
+    (36, "web_page_views.ab_variant (A/B)", _migration_v36_web_page_views_ab_variant),
+    (37, "Таблица rate_limit_counters (распределённый fallback лимитера)", _migration_v37_rate_limit_counters),
+    (38, "Таблица subscription_events (журнал жизненного цикла подписок)", _migration_v38_subscription_events),
+    (39, "Таблица daily_subscription_metrics (дневные снапшоты)", _migration_v39_daily_subscription_metrics),
+    (40, "tariffs.cooldown_days (задержка между покупками тарифа)", _migration_v40_tariff_cooldown_days),
+    (41, "tariffs.visibility_rules (условная видимость тарифа)", _migration_v41_tariff_visibility_rules),
+    (42, "tariffs.description (описание состава тарифа)", _migration_v42_tariff_description),
+    (43, "tariff_subgroup_settings (текст подгруппы)", _migration_v43_tariff_subgroup_settings),
+    (44, "key_traffic_hourly (почасовая история трафика)", _migration_v44_key_traffic_hourly),
 ]
 
 
@@ -1375,28 +1737,3 @@ async def apply_all_migrations(conn: AsyncConnection) -> None:
 async def apply_account_schema_if_needed(conn: AsyncConnection) -> None:
     await apply_all_migrations(conn)
 
-
-_TG_MIRROR_TABLE_COLUMNS = (
-    ("keys", "tg_id"),
-    ("payments", "tg_id"),
-    ("referrals", "referred_tg_id"),
-    ("referrals", "referrer_tg_id"),
-    ("notifications", "tg_id"),
-    ("gift_usages", "tg_id"),
-    ("gifts", "sender_tg_id"),
-    ("gifts", "recipient_tg_id"),
-    ("manual_bans", "tg_id"),
-    ("temporary_data", "tg_id"),
-    ("blocked_users", "tg_id"),
-    ("scheduled_broadcasts", "created_by_tg_id"),
-    ("coupon_usages", "tg_id"),
-)
-
-
-async def ensure_tg_mirror_columns_and_backfill(conn: AsyncConnection) -> None:
-    if not _is_postgresql():
-        return
-    for table, col in _TG_MIRROR_TABLE_COLUMNS:
-        if await _table_exists(conn, table) and not await _column_exists(conn, table, col):
-            await conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {col} BIGINT'))
-    await _migration_v7_backfill_tg_mirrors(conn)

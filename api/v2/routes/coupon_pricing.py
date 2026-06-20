@@ -1,6 +1,6 @@
-from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from logger import logger
 from services.coupons import resolve_percent_coupon
 from services.errors import ServiceError
 
@@ -11,7 +11,7 @@ async def resolve_percent_coupon_pricing(
     base_price_rub: int,
     coupon_code: str | None,
 ) -> tuple[int, int, int | None, str | None]:
-    """Применяет процентный купон. Бросает HTTPException при ошибке."""
+    """Применяет процентный купон. Неверный/несуществующий купон игнорируется — возвращается базовая цена без скидки, чтобы оплата не блокировалась."""
     try:
         return await resolve_percent_coupon(
             session=session,
@@ -20,12 +20,5 @@ async def resolve_percent_coupon_pricing(
             coupon_code=coupon_code,
         )
     except ServiceError as e:
-        status_map = {
-            "not_found": 404,
-            "limit_exceeded": 409,
-            "validation_error": 400,
-        }
-        raise HTTPException(
-            status_code=status_map.get(e.code, 400),
-            detail=e.message,
-        )
+        logger.info("[Coupon] купон '{}' не применён ({}): {}", coupon_code, e.code, e.message)
+        return int(base_price_rub), 0, None, None

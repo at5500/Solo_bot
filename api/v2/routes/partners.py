@@ -25,9 +25,14 @@ from api.v2.schemas.web_public import (
     PartnerCodeResponse,
     PartnerCodeUpdateRequest,
     PartnerConditionsResponse,
+    PartnerInvitedEntry,
+    PartnerInvitedResponse,
     PartnerPayoutEntryResponse,
     PartnerPayoutHistoryResponse,
+    PartnerPayoutMethodOption,
     PartnerPayoutMethodResponse,
+    PartnerPayoutMethodState,
+    PartnerPayoutMethodUpdate,
     PartnerPayoutMethodUpdateRequest,
     PartnerPayoutRequestCreate,
     PartnerPayoutRequestResponse,
@@ -47,7 +52,26 @@ except Exception:
     PARTNER_BONUS_PERCENTAGES = {1: 0.0}
 
 
-router = APIRouter()
+_PARTNERS_TABLE_EXISTS: bool | None = None
+
+
+async def partners_table_exists(session: AsyncSession) -> bool:
+    global _PARTNERS_TABLE_EXISTS
+    if _PARTNERS_TABLE_EXISTS is None:
+        try:
+            row = await session.execute(text("SELECT to_regclass('public.partners')"))
+            _PARTNERS_TABLE_EXISTS = row.scalar() is not None
+        except Exception:
+            _PARTNERS_TABLE_EXISTS = False
+    return _PARTNERS_TABLE_EXISTS
+
+
+async def ensure_partner_available(session: AsyncSession = Depends(get_session)) -> None:
+    if not await partners_table_exists(session):
+        raise HTTPException(status_code=404, detail="Партнёрская программа недоступна")
+
+
+router = APIRouter(dependencies=[Depends(ensure_partner_available)])
 
 
 def _parse_percent(value: float) -> float | None:
@@ -247,6 +271,41 @@ async def partner_apply(
         joined_user_id=int(joined_user_id),
         joined_tg_id=int(joined_tg_id),
     )
+
+
+@router.get("/invited/me", response_model=PartnerInvitedResponse)
+async def partner_me_invited(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    _, tg_id = await _resolve_partner_user(session, request, identity)
+    invited_sql = text(
+        """
+        SELECT pr.joined_tg_id, pr.created_at, COALESCE(u.balance, 0),
+            (SELECT COUNT(*) FROM keys k WHERE k.tg_id = pr.joined_tg_id),
+            (SELECT COUNT(*) FROM payments pay WHERE pay.tg_id = pr.joined_tg_id AND lower(pay.status) = 'success')
+        FROM partners pr
+        LEFT JOIN users u ON u.tg_id = pr.joined_tg_id
+        WHERE pr.partner_tg_id = :tg_id
+        ORDER BY pr.created_at DESC
+        LIMIT :limit
+        """
+    )
+    result = await session.execute(invited_sql, {"tg_id": tg_id, "limit": limit})
+    rows = result.fetchall()
+    items = [
+        PartnerInvitedEntry(
+            tg_id=int(row[0]),
+            joined_at=row[1].isoformat() if isinstance(row[1], datetime) else None,
+            balance=float(row[2] or 0),
+            keys_count=int(row[3] or 0),
+            payments_count=int(row[4] or 0),
+        )
+        for row in rows
+    ]
+    return PartnerInvitedResponse(total=len(items), items=items)
 
 
 @router.get("/qr", response_model=PartnerQrResponse)
@@ -491,6 +550,21 @@ def _enabled_payout_methods() -> set[str]:
     return enabled
 
 
+def _payout_method_options() -> list[PartnerPayoutMethodOption]:
+    try:
+        from modules.partner_program import buttons as B
+        from modules.partner_program import settings as S
+    except Exception:
+        return []
+    defs = [
+        (B.METHOD_CARD, B.BTN_METHOD_CARD, bool(getattr(S, "ENABLE_PAYOUT_CARD", False)), "16 цифр номера карты"),
+        (B.METHOD_SBP, B.BTN_METHOD_SBP, bool(getattr(S, "ENABLE_PAYOUT_SBP", False)), "Номер телефона и название банка"),
+        (B.METHOD_USDT, B.BTN_METHOD_USDT, bool(getattr(S, "ENABLE_PAYOUT_USDT", False)), "USDT-адрес сети TRC20 (начинается с T)"),
+        (B.METHOD_TON, B.BTN_METHOD_TON, bool(getattr(S, "ENABLE_PAYOUT_TON", False)), "Адрес TON-кошелька"),
+    ]
+    return [PartnerPayoutMethodOption(key=key, label=label, hint=hint) for key, label, enabled, hint in defs if enabled]
+
+
 @router.patch("/me/payout", response_model=PartnerPayoutMethodResponse)
 async def partner_update_payout_method(
     body: PartnerPayoutMethodUpdateRequest,
@@ -533,6 +607,65 @@ async def partner_get_payout_method(
     method = (row[0] if row else None) or ""
     destination = (row[1] if row else None) or ""
     return PartnerPayoutMethodResponse(ok=bool(method), method=method, destination=destination)
+
+
+@router.get("/payout-method/me", response_model=PartnerPayoutMethodState)
+async def partner_payout_method_me(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    row = (
+        await session.execute(
+            text("SELECT payout_method, card_number FROM users WHERE id = :id"),
+            {"id": user_id},
+        )
+    ).first()
+    method = (row[0] if row else None) or None
+    card = (row[1] if row else None) or None
+    configured = bool(card and str(card).strip())
+    from modules.partner_program.handlers.utils import mask_requisites, method_label
+    return PartnerPayoutMethodState(
+        configured=configured,
+        method=method if configured else None,
+        method_label=method_label(method) if configured else None,
+        masked=mask_requisites(method, card) if configured else None,
+        methods=_payout_method_options(),
+    )
+
+
+@router.put("/payout-method/me", response_model=PartnerPayoutMethodState)
+async def partner_set_payout_method(
+    body: PartnerPayoutMethodUpdate,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    user_id, _ = await _resolve_partner_user(session, request, identity)
+    from modules.partner_program.handlers.utils import (
+        _method_enabled,
+        mask_requisites,
+        method_label,
+        validate_requisites,
+    )
+    method = body.method.strip()
+    if not _method_enabled(method):
+        raise HTTPException(status_code=400, detail="Способ вывода недоступен")
+    requisites = body.requisites.strip()
+    if not validate_requisites(method, requisites):
+        raise HTTPException(status_code=400, detail="Некорректные реквизиты для выбранного способа")
+    await session.execute(
+        text("UPDATE users SET payout_method = :m, card_number = :c WHERE id = :id"),
+        {"m": method, "c": requisites, "id": user_id},
+    )
+    return PartnerPayoutMethodState(
+        configured=True,
+        method=method,
+        method_label=method_label(method),
+        masked=mask_requisites(method, requisites),
+        methods=_payout_method_options(),
+    )
 
 
 @router.patch("/me/code", response_model=PartnerCodeResponse)
@@ -640,6 +773,8 @@ async def partner_create_payout_request(
         raise HTTPException(status_code=400, detail="Недостаточно средств для заявки")
     payout_method = (row[1] if row else None) or "card"
     destination = (row[2] if row else None) or None
+    if not (destination and str(destination).strip()):
+        raise HTTPException(status_code=400, detail="Сначала укажите способ вывода и реквизиты")
     inserted = (
         await session.execute(
             text(

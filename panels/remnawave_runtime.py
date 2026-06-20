@@ -48,18 +48,27 @@ async def _fetch_profile_http_only(api_url: str, client_id: str) -> dict[str, An
         used_gb = None
         traffic_limit_bytes = None
         hwid_device_limit = None
+        is_online = None
+        online_at = None
+        last_connected_node = None
         if user_data:
             user_traffic = user_data.get("userTraffic", {})
             used_bytes = user_traffic.get("usedTrafficBytes", 0)
             used_gb = round(used_bytes / 1073741824, 1)
             traffic_limit_bytes = user_data.get("trafficLimitBytes")
             hwid_device_limit = user_data.get("hwidDeviceLimit")
+            online_at = user_data.get("onlineAt") or user_traffic.get("onlineAt")
+            is_online = bool(online_at)
+            last_connected_node = user_data.get("lastConnectedNodeUuid") or user_traffic.get("lastConnectedNodeUuid")
         return {
             "api_url": api_url,
             "hwid_count": hwid_count,
             "used_gb": used_gb,
             "traffic_limit_bytes": traffic_limit_bytes,
             "hwid_device_limit": hwid_device_limit,
+            "is_online": is_online,
+            "online_at": online_at,
+            "last_connected_node": last_connected_node,
         }
     except (TimeoutError, Exception):
         return None

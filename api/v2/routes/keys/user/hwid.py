@@ -71,3 +71,94 @@ async def user_key_reset_hwid(
         total_devices=int(total_devices),
         reset_devices=int(reset_devices),
     )
+
+
+@user_router.get("/{client_id}/devices")
+async def user_key_devices(
+    client_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    billing_user_id = await _resolve_billing_user_id(request, identity, session)
+    db_key = (
+        await session.execute(select(Key).where(Key.user_id == billing_user_id, Key.client_id == client_id).limit(1))
+    ).scalar_one_or_none()
+    if db_key is None:
+        raise HTTPException(status_code=404, detail="Подписка не найдена")
+    server_id = str(getattr(db_key, "server_id", "") or "")
+    if not server_id:
+        return {"devices": [], "total": 0}
+
+    async def _list(api):
+        return await api.get_user_hwid_devices(client_id)
+
+    devices = await with_remnawave_api(
+        session,
+        server_id,
+        _list,
+        fallback_any=True,
+        timeout_sec=12.0,
+    )
+    if not devices:
+        return {"devices": [], "total": 0}
+    normalized = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        normalized.append(
+            {
+                "hwid": str(device.get("hwid") or ""),
+                "device_model": str(device.get("deviceModel") or device.get("device_model") or ""),
+                "platform": str(device.get("platform") or ""),
+                "os_version": str(device.get("osVersion") or device.get("os_version") or ""),
+                "user_agent": str(device.get("userAgent") or device.get("user_agent") or ""),
+                "created_at": str(device.get("createdAt") or device.get("created_at") or ""),
+            }
+        )
+    return {"devices": normalized, "total": len(normalized)}
+
+
+@user_router.post("/{client_id}/devices/delete")
+async def user_key_delete_device(
+    client_id: str,
+    request: Request,
+    hwid: str = Query(...),
+    force_web: bool = Query(False),
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    actions = _key_actions_config()
+    if not force_web and not actions.hwid_reset_enabled:
+        raise HTTPException(status_code=403, detail="Управление устройствами отключено в настройках")
+    if not hwid.strip():
+        raise HTTPException(status_code=400, detail="Не указано устройство")
+    billing_user_id = await _resolve_billing_user_id(request, identity, session)
+    db_key = (
+        await session.execute(select(Key).where(Key.user_id == billing_user_id, Key.client_id == client_id).limit(1))
+    ).scalar_one_or_none()
+    if db_key is None:
+        raise HTTPException(status_code=404, detail="Подписка не найдена")
+    server_id = str(getattr(db_key, "server_id", "") or "")
+    if not server_id:
+        raise HTTPException(status_code=400, detail="У подписки не указан сервер")
+
+    async def _delete(api):
+        return await api.delete_user_hwid_device(client_id, hwid)
+
+    ok = await with_remnawave_api(
+        session,
+        server_id,
+        _delete,
+        fallback_any=True,
+        timeout_sec=12.0,
+    )
+    if not ok:
+        raise HTTPException(status_code=502, detail="Не удалось отвязать устройство")
+    await invalidate_remnawave_profile(
+        session,
+        server_id,
+        str(client_id),
+        fallback_any=True,
+    )
+    return {"ok": True}

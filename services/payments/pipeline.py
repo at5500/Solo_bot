@@ -120,6 +120,14 @@ async def process_success_payment(
 
             await session.commit()
             await invalidate_payment_cache(parsed.payment_id)
+            if tg_id is not None:
+                try:
+                    from database.keys import invalidate_keys_list
+
+                    async with async_session_maker() as cache_session:
+                        await invalidate_keys_list(cache_session, int(tg_id))
+                except Exception as cache_err:
+                    logger.warning(f"[{provider}] Не удалось сбросить кэш ключей после платежа: {cache_err}")
 
         logger.info(
             f"[{provider}] Платёж обработан: payment_id={parsed.payment_id}, "
@@ -131,22 +139,71 @@ async def process_success_payment(
         return PipelineResult(ok=False, error=str(e))
 
 
+_REVERSAL_STATUSES = {"refunded", "chargebacked"}
+
+
+async def _invalidate_keys_cache(provider: str, tg_id: int | None) -> None:
+    if tg_id is None:
+        return
+    try:
+        from database.keys import invalidate_keys_list
+
+        async with async_session_maker() as cache_session:
+            await invalidate_keys_list(cache_session, int(tg_id))
+    except Exception as cache_err:
+        logger.warning(f"[{provider}] Не удалось сбросить кэш ключей после платежа: {cache_err}")
+
+
 async def process_cancelled_payment(
     provider: str,
     parsed: ParsedPayment,
     *,
     new_status: str = "cancelled",
 ) -> PipelineResult:
-    """Переводит платёж в cancelled/failed либо записывает его сразу в этом статусе.
+    """Переводит платёж в cancelled/failed/refunded/chargebacked.
 
-    ``new_status`` — обычно "cancelled" (пользователь отменил) или "failed"
-    (провайдер вернул ошибку/wrong_amount/system_fail).
+    ``new_status`` — "cancelled"/"failed" (платёж не состоялся), либо
+    "refunded"/"chargebacked" (возврат уже зачисленного платежа — тогда
+    автоматически откатываем баланс и уведомляем админов).
     """
     try:
         async with async_session_maker() as session:
             payment = await get_payment_by_payment_id(session, parsed.payment_id)
+            cur = payment.get("status") if payment else None
+            tg_id = parsed.tg_id if parsed.tg_id is not None else (
+                int(payment["tg_id"]) if payment and payment.get("tg_id") is not None else None
+            )
+            reversal = new_status in _REVERSAL_STATUSES
 
-            if payment and payment.get("status") in ("cancelled", "failed", "success"):
+            if cur == new_status:
+                return PipelineResult(ok=True, already_processed=True)
+
+            if cur == "success":
+                if not reversal:
+                    return PipelineResult(ok=True, already_processed=True)
+                amount = float(payment.get("amount") or 0)
+                if payment.get("id") is not None:
+                    await update_payment_status(session=session, internal_id=int(payment["id"]), new_status=new_status)
+                if tg_id is not None and amount > 0:
+                    await update_balance(session, tg_id, -amount)
+                await session.commit()
+                await invalidate_payment_cache(parsed.payment_id)
+                try:
+                    from services.admin_alert import send_admin_alert
+
+                    await send_admin_alert(
+                        f"↩️ Возврат платежа ({new_status})\n"
+                        f"Провайдер: {provider}\n"
+                        f"tg_id: {tg_id} · сумма {amount} ₽ списана с баланса (может уйти в минус — проверьте подписку клиента).\n"
+                        f"payment_id: {parsed.payment_id}"
+                    )
+                except Exception:
+                    pass
+                await _invalidate_keys_cache(provider, tg_id)
+                logger.info(f"[{provider}] Возврат {parsed.payment_id}: статус {new_status}, баланс откачен на {amount}")
+                return PipelineResult(ok=True)
+
+            if cur in ("cancelled", "failed"):
                 return PipelineResult(ok=True, already_processed=True)
 
             if payment and payment.get("id") is not None:
@@ -171,9 +228,10 @@ async def process_cancelled_payment(
 
             await session.commit()
             await invalidate_payment_cache(parsed.payment_id)
+            await _invalidate_keys_cache(provider, tg_id)
 
         logger.info(f"[{provider}] Платёж {parsed.payment_id} помечен как {new_status}")
         return PipelineResult(ok=True)
     except Exception as e:
-        logger.error(f"[{provider}] Ошибка при обработке отмены платежа: {e}")
+        logger.error(f"[{provider}] Ошибка при обработке отмены/возврата платежа: {e}")
         return PipelineResult(ok=False, error=str(e))

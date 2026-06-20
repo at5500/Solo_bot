@@ -12,13 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import DONATIONS_ENABLE, TRIBUTE_LINK
 from core.bootstrap import BUTTONS_CONFIG, PAYMENTS_CONFIG
 from core.settings.money_config import get_currency_mode
-from database import get_last_payments
+from database.access.resolution import resolve_user_optional
 from database.models import User
+from database.payments import get_balance_activity
 from handlers import buttons as btn
 from handlers.payments.currency_flow import build_currency_choice_kb
 from handlers.payments.stars.handlers import process_callback_pay_stars
 from handlers.payments.tribute.handlers import process_callback_pay_tribute
 from handlers.texts import (
+    BALANCE_HISTORY_GIFT_LINE,
     BALANCE_HISTORY_HEADER,
     BALANCE_MANAGEMENT_TEXT,
     FAST_PAY_CHOOSE_CURRENCY,
@@ -228,18 +230,28 @@ async def balance_history_handler(callback_query: CallbackQuery, session: Any):
     builder.row(InlineKeyboardButton(text=btn.PAYMENT, callback_data="pay"))
     builder.row(InlineKeyboardButton(text=btn.MAIN_MENU, callback_data="profile"))
 
-    records = await get_last_payments(session, callback_query.from_user.id, statuses=["success"])
+    u = await resolve_user_optional(session, callback_query.from_user.id)
+    records = await get_balance_activity(
+        session,
+        uid=(u.id if u is not None else None),
+        tg_id=(u.tg_id if u is not None else callback_query.from_user.id),
+        limit=15,
+        success_only=True,
+    )
 
     if records:
         language_code = getattr(callback_query.from_user, "language_code", None)
         history_text = f"{BALANCE_HISTORY_HEADER}\n\n<blockquote>"
         for record in records:
-            amount_rub = record["amount"] or 0
+            amount_rub = record.amount or 0
             formatted_amount = await format_for_user(session, callback_query.from_user.id, amount_rub, language_code)
-            payment_system = record["payment_system"]
-            status = record["status"]
-            date = record["created_at"].strftime("%Y-%m-%d %H:%M:%S")
-            history_text += f"Сумма: {formatted_amount}\nОплата: {payment_system}\nСтатус: {status}\nДата: {date}\n\n"
+            date = record.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if record.kind == "gift":
+                history_text += BALANCE_HISTORY_GIFT_LINE.format(amount=formatted_amount, date=date) + "\n\n"
+            else:
+                history_text += (
+                    f"Сумма: {formatted_amount}\nОплата: {record.system}\nСтатус: {record.status}\nДата: {date}\n\n"
+                )
         history_text += "</blockquote>"
     else:
         history_text = "❌ У вас пока нет операций с балансом."

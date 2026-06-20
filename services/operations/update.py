@@ -126,7 +126,20 @@ async def update_key_on_cluster(
 
             async def _recreate(api):
                 await api.delete_user(client_id)
-                return await api.create_user(user_data)
+                created = await api.create_user(user_data)
+                try:
+                    reset_uuid = str((created or {}).get("uuid") or client_id)
+                    devices = await api.get_user_hwid_devices(reset_uuid) or []
+                    removed = 0
+                    for d in devices:
+                        hwid = d.get("hwid") if isinstance(d, dict) else None
+                        if hwid and await api.delete_user_hwid_device(reset_uuid, hwid):
+                            removed += 1
+                    if removed:
+                        logger.info(f"{PANEL_REMNA} HWID сброшены при перевыпуске: {removed} устройств, uuid={reset_uuid}")
+                except Exception as hwid_err:
+                    logger.warning(f"{PANEL_REMNA} не удалось сбросить HWID при перевыпуске: {hwid_err}")
+                return created
 
             remna_result = await with_remnawave_api(
                 session,
@@ -181,7 +194,6 @@ async def update_key_on_cluster(
                 total_gb=total_gb_bytes,
                 expiry_time=expiry_time,
                 enable=True,
-                flow="xtls-rprx-vision",
                 inbound_id=int(inbound_id),
                 sub_id=sub_id,
             )

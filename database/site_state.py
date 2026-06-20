@@ -25,11 +25,21 @@ async def mark_site_initialized(session: AsyncSession) -> None:
     """Идемпотентно выставляет флаг инициализации сайта."""
     result = await session.execute(select(Setting).where(Setting.key == _KEY))
     setting = result.scalar_one_or_none()
+    first_init = False
     if setting is None:
         session.add(Setting(key=_KEY, value=True, description="Сайт прошёл первую настройку админом"))
+        first_init = True
     elif setting.value is not True:
         setting.value = True
+        first_init = True
     await cache_delete(_CACHE_KEY)
+    if first_init:
+        try:
+            from database.web_default_seed import seed_default_site
+
+            await seed_default_site(session)
+        except Exception:
+            pass
 
 
 async def reset_site_initialized(session: AsyncSession) -> None:

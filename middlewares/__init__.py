@@ -10,6 +10,7 @@ from .actor import ActorMiddleware
 from .admin import AdminMiddleware
 from .answer import CallbackAnswerMiddleware, EarlyCallbackAnswerMiddleware
 from .concurrency import ConcurrencyLimiterMiddleware
+from .delete_commands import DeleteCommandMiddleware
 from .direct_start_blocker import DirectStartBlockerMiddleware
 from .loggings import LoggingMiddleware
 from .maintenance import MaintenanceModeMiddleware
@@ -49,6 +50,7 @@ def register_middleware(
         "user": "USER_MIDDLEWARE_ENABLED",
         "actor": "ACTOR_MIDDLEWARE_ENABLED",
         "answer": "ANSWER_MIDDLEWARE_ENABLED",
+        "delete_commands": "DELETE_COMMANDS_MIDDLEWARE_ENABLED",
     }
 
     def middleware_enabled(name: str) -> bool:
@@ -100,6 +102,9 @@ def register_middleware(
     for middleware in middlewares:
         for h in handlers:
             h.outer_middleware(middleware)
+
+    if middleware_enabled("delete_commands"):
+        dispatcher.message.outer_middleware(wrap(DeleteCommandMiddleware(), "delete_commands"))
 
     if PROBE_LOGGING:
         for h in handlers:

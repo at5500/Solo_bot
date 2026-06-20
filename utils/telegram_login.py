@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import time
 
+from logger import logger
+
 
 def verify_telegram_login(
     payload: dict,
@@ -56,27 +58,32 @@ def verify_webapp_init_data(
     parsed = parse_qs(init_data, keep_blank_values=True)
     received_hash = parsed.get("hash", [""])[0]
     if not received_hash:
+        logger.warning("[tg-webapp] initData без hash")
         return None
 
     auth_date_str = parsed.get("auth_date", [""])[0]
     try:
         auth_date = int(auth_date_str)
-        if auth_date < time.time() - max_age_seconds:
-            return None
     except (TypeError, ValueError):
+        logger.warning("[tg-webapp] initData без корректного auth_date")
+        return None
+    if auth_date < time.time() - max_age_seconds:
+        logger.warning(
+            "[tg-webapp] initData устарел: возраст {} c (лимит {} c)",
+            int(time.time() - auth_date),
+            max_age_seconds,
+        )
         return None
 
-    check_pairs = []
-    for key in sorted(parsed.keys()):
-        if key == "hash":
-            continue
-        check_pairs.append(f"{key}={parsed[key][0]}")
-    data_check_string = "\n".join(check_pairs)
-
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    computed = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
-    if not hmac.compare_digest(computed, received_hash):
+    def _hmac_ok(exclude: set[str]) -> bool:
+        pairs = [f"{k}={parsed[k][0]}" for k in sorted(parsed.keys()) if k not in exclude]
+        computed = hmac.new(secret_key, "\n".join(pairs).encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(computed, received_hash)
+
+    if not (_hmac_ok({"hash"}) or _hmac_ok({"hash", "signature"})):
+        logger.warning("[tg-webapp] initData: неверный HMAC (подпись не совпала)")
         return None
 
     user_raw = parsed.get("user", [""])[0]

@@ -108,13 +108,20 @@ async def process_callback_view_profile(
 
     builder = InlineKeyboardBuilder()
 
-    from core.settings.web_config import get_site_url, is_web_enabled
+    from core.settings.web_config import get_site_url, is_email_binding_enabled, is_web_enabled
 
     if is_web_enabled():
         site_url = get_site_url()
         if site_url:
-            webapp_url = f"{site_url}/dashboard"
+            webapp_url = f"{site_url}/dashboard?webapp=1"
             builder.row(InlineKeyboardButton(text="🌐 Личный кабинет", web_app=WebAppInfo(url=webapp_url)))
+
+    if is_email_binding_enabled():
+        from database.identities import get_identity_by_tg_id
+
+        identity = await get_identity_by_tg_id(session, chat_id)
+        if not (identity and identity.email):
+            builder.row(InlineKeyboardButton(text="📧 Привязать почту", callback_data="bind_email"))
 
     trial_time_disabled = bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE))
 

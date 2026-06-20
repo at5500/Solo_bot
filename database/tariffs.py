@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.cache_config import TARIFFS_FOR_CLUSTER_CACHE_TTL_SEC, TARIFF_BY_ID_CACHE_TTL_SEC
 from core.redis_cache import cache_delete, cache_delete_pattern, cache_get, cache_key, cache_set
-from database.models import Server, Tariff
+from database.models import Server, Tariff, TariffSubgroupSetting
 from logger import logger
 
 
@@ -283,6 +283,55 @@ async def move_tariff_down(session: AsyncSession, tariff_id: int) -> bool:
     return True
 
 
+async def move_subgroup(session: AsyncSession, group_code: str, subgroup_title: str, direction: str) -> bool:
+    """Двигает подгруппу целиком в сквозном порядке: меняет её местами с соседним
+    элементом (тарифом или подгруппой) и перенумеровывает sort_order всей группы 1..N.
+    direction: 'up' | 'down'."""
+    rows = list(
+        (
+            await session.execute(
+                select(Tariff).where(Tariff.group_code == group_code).order_by(Tariff.sort_order, Tariff.id)
+            )
+        ).scalars().all()
+    )
+    if not rows:
+        return False
+
+    grouped: dict = defaultdict(list)
+    for t in rows:
+        grouped[t.subgroup_title].append(t)
+
+    items: list[tuple[int, str, object]] = []
+    for t in grouped.get(None, []):
+        items.append((int(t.sort_order or 0), "tariff", t))
+    for sub in sorted(s for s in grouped if s):
+        rep = min(int(t.sort_order or 0) for t in grouped[sub])
+        items.append((rep, "subgroup", sub))
+    items.sort(key=lambda x: x[0])
+    order_list = [(kind, payload) for _, kind, payload in items]
+
+    idx = next((i for i, (k, p) in enumerate(order_list) if k == "subgroup" and p == subgroup_title), None)
+    if idx is None:
+        return False
+    swap = idx - 1 if direction == "up" else idx + 1
+    if swap < 0 or swap >= len(order_list):
+        return False
+    order_list[idx], order_list[swap] = order_list[swap], order_list[idx]
+
+    n = 1
+    for kind, payload in order_list:
+        if kind == "tariff":
+            payload.sort_order = n
+            n += 1
+        else:
+            for t in grouped[payload]:
+                t.sort_order = n
+                n += 1
+
+    await _invalidate_tariff_cache()
+    return True
+
+
 async def initialize_tariff_sort_orders(session: AsyncSession, group_code: str) -> bool:
     result = await session.execute(select(Tariff).where(Tariff.group_code == group_code).order_by(Tariff.id))
     tariffs = result.scalars().all()
@@ -310,3 +359,39 @@ async def initialize_all_tariff_weights(session: AsyncSession) -> bool:
 
     await _invalidate_tariff_cache()
     return True
+
+
+async def get_subgroup_description(session: AsyncSession, group_code: str, subgroup_title: str) -> str | None:
+    row = (
+        await session.execute(
+            select(TariffSubgroupSetting.description).where(
+                TariffSubgroupSetting.group_code == group_code,
+                TariffSubgroupSetting.subgroup_title == subgroup_title,
+            )
+        )
+    ).scalar_one_or_none()
+    return row or None
+
+
+async def set_subgroup_description(
+    session: AsyncSession, group_code: str, subgroup_title: str, description: str | None
+) -> None:
+    existing = (
+        await session.execute(
+            select(TariffSubgroupSetting).where(
+                TariffSubgroupSetting.group_code == group_code,
+                TariffSubgroupSetting.subgroup_title == subgroup_title,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.description = description
+        existing.updated_at = datetime.utcnow()
+    else:
+        session.add(
+            TariffSubgroupSetting(
+                group_code=group_code,
+                subgroup_title=subgroup_title,
+                description=description,
+            )
+        )

@@ -34,7 +34,13 @@ class UserMiddleware(BaseMiddleware):
                     if db_user:
                         data["user"] = db_user
         except Exception as e:
-            logger.error(f"Ошибка при обработке пользователя: {e}")
+            logger.error(f"Ошибка при обработке пользователя: {e}", exc_info=True)
+            _session = data.get("session")
+            if _session is not None:
+                try:
+                    await _session.rollback()
+                except Exception:
+                    pass
         return await handler(event, data)
 
     async def _process_user(self, user: User, session: AsyncSession) -> dict | None:

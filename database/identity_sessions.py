@@ -49,10 +49,37 @@ async def create_identity_session(
     ip: str | None = None,
     device_label: str | None = None,
 ) -> IdentitySession:
-    """Создаёт новую сессию. TTL — из API_TOKEN_TTL_DAYS."""
+    """Создаёт/переиспользует сессию: один и тот же device (identity + user_agent) не плодит дубли."""
     now = datetime.utcnow()
     expires_at = now + timedelta(days=API_TOKEN_TTL_DAYS) if API_TOKEN_TTL_DAYS else None
     label = device_label or _device_label_from_user_agent(user_agent)
+
+    if user_agent:
+        existing = await session.scalar(
+            select(IdentitySession)
+            .where(
+                IdentitySession.identity_id == identity.id,
+                IdentitySession.user_agent == user_agent,
+            )
+            .order_by(IdentitySession.last_seen_at.desc())
+            .limit(1)
+        )
+        if existing is not None:
+            await session.execute(
+                delete(IdentitySession).where(
+                    IdentitySession.identity_id == identity.id,
+                    IdentitySession.user_agent == user_agent,
+                    IdentitySession.id != existing.id,
+                )
+            )
+            existing.token_hash = token_hash
+            existing.device_label = label
+            existing.ip = ip
+            existing.last_seen_at = now
+            existing.expires_at = expires_at
+            await session.flush()
+            return existing
+
     obj = IdentitySession(
         identity_id=identity.id,
         token_hash=token_hash,

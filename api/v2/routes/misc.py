@@ -69,7 +69,7 @@ router.include_router(
         telegram_path_to_user_id=True,
         enabled_methods=["get_all", "get_one", "delete"],
     ),
-    prefix="/notifications",
+    prefix="/admin/notifications",
     tags=["Notifications"],
     dependencies=[Depends(verify_identity_admin)],
 )

@@ -33,6 +33,13 @@ def _apply_runtime_config(name: str, raw_value: Any) -> None:
         return
     target.clear()
     target.update(raw_value)
+    if name == "MODES_CONFIG":
+        try:
+            from core.settings.modes_config import apply_protect_content_to_bot
+
+            apply_protect_content_to_bot()
+        except Exception:
+            pass
 
 
 async def publish_runtime_snapshot() -> None:

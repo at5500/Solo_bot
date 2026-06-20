@@ -1,5 +1,8 @@
+from base64 import b64encode
+from io import BytesIO
 from math import ceil
 
+import qrcode
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +21,7 @@ from api.v2.schemas.web_public import (
     GiftCreatePreviewResponse,
     GiftCreateRequest,
     GiftCreateResponse,
+    GiftQrResponse,
     GiftRedeemRequest,
     GiftRedeemResponse,
     GiftUsageEntry,
@@ -226,6 +230,36 @@ async def get_my_gifts(
         )
 
     return MyGiftsResponse(ok=True, gifts=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/my/{gift_id}/qr", response_model=GiftQrResponse, tags=["Gifts"])
+async def get_my_gift_qr(
+    gift_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    _check_gifts_enabled()
+    actor = get_request_actor(request)
+    billing_user_id = actor.billing_user_id if actor and actor.billing_user_id is not None else None
+    if billing_user_id is None:
+        billing_user_id = await idb.ensure_billing_user_for_identity(session, identity)
+    gift = (
+        await session.execute(
+            select(Gift).where(Gift.gift_id == gift_id, Gift.sender_user_id == billing_user_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if gift is None:
+        raise HTTPException(status_code=404, detail="Подарок не найден")
+    link = get_site_gift_link(gift.gift_id)
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(link)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    image_data = b64encode(buffer.getvalue()).decode("ascii")
+    return GiftQrResponse(ok=True, link=link, image_data_url=f"data:image/png;base64,{image_data}")
 
 
 @router.delete("/my/{gift_id}", response_model=dict, tags=["Gifts"])

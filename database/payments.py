@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta
 
 from pytz import timezone
-from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy import Float, and_, cast, func, insert, literal, or_, select, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.cache_config import PAYMENT_PENDING_CACHE_TTL_SEC
 from core.redis_cache import cache_delete, cache_get, cache_key, cache_set
 from database.access.resolution import resolve_user_optional
-from database.models import Payment
+from database.models import Gift, Payment
 from logger import logger
 
 
@@ -93,6 +93,61 @@ async def add_payment(
         f"Добавлен платёж id={internal_id}: user_id={u.id}, amount={amount}, system={payment_system}, status={status}"
     )
     return internal_id
+
+
+def _balance_activity_union(uid: int | None, tg_id: int | None, success_only: bool):
+    payment_refs = []
+    if uid is not None:
+        payment_refs.append(Payment.user_id == uid)
+    if tg_id is not None:
+        payment_refs.append(Payment.tg_id == tg_id)
+    p = select(
+        Payment.created_at.label("created_at"),
+        cast(Payment.amount, Float).label("amount"),
+        literal("payment").label("kind"),
+        Payment.payment_system.label("system"),
+        Payment.status.label("status"),
+        Payment.payment_id.label("ref"),
+    ).where(or_(*payment_refs) if payment_refs else literal(False))
+    if success_only:
+        p = p.where(Payment.status == "success")
+
+    gift_refs = []
+    if uid is not None:
+        gift_refs.append(Gift.sender_user_id == uid)
+    if tg_id is not None:
+        gift_refs.append(Gift.sender_tg_id == tg_id)
+    g = select(
+        Gift.created_at.label("created_at"),
+        cast(-func.coalesce(Gift.selected_price_rub, 0), Float).label("amount"),
+        literal("gift").label("kind"),
+        literal("gift").label("system"),
+        literal("success").label("status"),
+        Gift.gift_id.label("ref"),
+    ).where(or_(*gift_refs) if gift_refs else literal(False))
+
+    return union_all(p, g).subquery()
+
+
+async def count_balance_activity(
+    session: AsyncSession, *, uid: int | None, tg_id: int | None, success_only: bool = False
+) -> int:
+    u = _balance_activity_union(uid, tg_id, success_only)
+    return int((await session.scalar(select(func.count()).select_from(u))) or 0)
+
+
+async def get_balance_activity(
+    session: AsyncSession,
+    *,
+    uid: int | None,
+    tg_id: int | None,
+    limit: int,
+    offset: int = 0,
+    success_only: bool = False,
+) -> list:
+    u = _balance_activity_union(uid, tg_id, success_only)
+    stmt = select(u).order_by(u.c.created_at.desc()).offset(offset).limit(limit)
+    return (await session.execute(stmt)).all()
 
 
 async def get_last_payments(

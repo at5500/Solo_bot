@@ -40,9 +40,10 @@ try:
 except ImportError:
     _OAUTH_SUCCESS_URI = "/dashboard"
 try:
-    from config import API_TOKEN as _GOOGLE_STATE_SECRET
+    from config import API_TOKEN as _API_TOKEN_RAW
 except ImportError:
-    _GOOGLE_STATE_SECRET = "solo-google-state-fallback"
+    _API_TOKEN_RAW = "solo-google-state-fallback"
+_GOOGLE_STATE_SECRET = hashlib.sha256(b"oauth-state:google:v1:" + str(_API_TOKEN_RAW or "").encode()).hexdigest()
 
 
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
