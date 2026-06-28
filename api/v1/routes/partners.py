@@ -17,6 +17,7 @@ except Exception:
     PARTNER_BONUS_PERCENTAGES = {1: 0.0}
 
 from api.v2.routes.partners import ensure_partner_available
+from utils.referral_codes import is_reserved_partner_code
 
 
 router = APIRouter(dependencies=[Depends(ensure_partner_available)])
@@ -848,6 +849,12 @@ async def update_partner_code(
         return ORJSONResponse(
             content={"success": False, "message": "Неверный код. Разрешены a-z, 0-9, _ (3-32 символа)"},
             status_code=400,
+        )
+
+    if is_reserved_partner_code(raw):
+        return ORJSONResponse(
+            content={"success": False, "message": "Этот код зарезервирован системой. Выберите другой."},
+            status_code=422,
         )
 
     exists = await session.execute(

@@ -40,6 +40,37 @@ def encode_partner_code(user_id: int) -> str:
     return f"p1_{payload}"
 
 
+# Blocklist for custom partner codes (audit F-017). The tokens below
+# look like an official channel — letting users squat ``admin`` /
+# ``support`` / ``api`` makes phishing trivial.
+_RESERVED_PARTNER_CODES: frozenset[str] = frozenset({
+    "admin",
+    "administrator",
+    "api",
+    "bot",
+    "help",
+    "moderator",
+    "null",
+    "official",
+    "owner",
+    "root",
+    "staff",
+    "support",
+    "system",
+    "team",
+    "undefined",
+})
+
+
+def is_reserved_partner_code(code: str | None) -> bool:
+    """Returns ``True`` when ``code`` matches a reserved token from the
+    blocklist (case-insensitive). Guards the
+    ``PATCH /partners/.../code`` endpoints before any DB write — the
+    user gets a clean 422 instead of an unhelpful 409 «занято» (or a
+    successful squat when the slot is still free)."""
+    return (code or "").strip().lower() in _RESERVED_PARTNER_CODES
+
+
 def decode_referral_code(value: str | None) -> int | None:
     token = str(value or "").strip()
     if not token:

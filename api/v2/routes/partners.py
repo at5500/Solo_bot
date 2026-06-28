@@ -44,7 +44,7 @@ from api.v2.schemas.web_public import (
     PartnerTopResponse,
 )
 from database import identities as idb
-from utils.referral_codes import decode_partner_code, encode_partner_code
+from utils.referral_codes import decode_partner_code, encode_partner_code, is_reserved_partner_code
 
 
 try:
@@ -743,6 +743,11 @@ async def partner_update_my_code(
         raise HTTPException(
             status_code=400,
             detail="Неверный код. Разрешены a-z, 0-9, _ (3-32 символа)",
+        )
+    if is_reserved_partner_code(raw):
+        raise HTTPException(
+            status_code=422,
+            detail="Этот код зарезервирован системой. Выберите другой.",
         )
     user_id, _ = await _resolve_partner_user(session, request, identity)
     exists = await session.execute(
@@ -1478,6 +1483,11 @@ async def update_partner_code(
     if not re.fullmatch(r"[a-z0-9_]{3,32}", raw):
         return ORJSONResponse(
             content={"success": False, "message": "Неверный код. Разрешены a-z, 0-9, _ (3-32 символа)"}, status_code=400
+        )
+    if is_reserved_partner_code(raw):
+        return ORJSONResponse(
+            content={"success": False, "message": "Этот код зарезервирован системой. Выберите другой."},
+            status_code=422,
         )
     exists = await session.execute(
         text("SELECT 1 FROM users WHERE partner_code = :code AND tg_id != :tg_id"), {"code": raw, "tg_id": tg_id}
