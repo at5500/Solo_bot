@@ -1,4 +1,5 @@
 import csv
+import html
 import re
 
 from base64 import b64encode
@@ -565,6 +566,71 @@ def _payout_method_options() -> list[PartnerPayoutMethodOption]:
     return [PartnerPayoutMethodOption(key=key, label=label, hint=hint) for key, label, enabled, hint in defs if enabled]
 
 
+_DEST_MAX_LEN = 128
+
+# TRC20 USDT address: starts with T, 34 chars total, base58 alphabet
+# (digits + Latin letters, excluding 0, O, I, l).
+_TRC20_RE = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
+# TON user-friendly address: prefix EQ/UQ/kQ/0Q + 46 base64url chars.
+_TON_FRIENDLY_RE = re.compile(r"^[EUk0]Q[A-Za-z0-9_\-]{46}$")
+# TON raw address: workchain:hex (e.g. ``0:abcd...``).
+_TON_RAW_RE = re.compile(r"^-?[0-9]+:[0-9a-fA-F]{64}$")
+# SBP destination: digits + letters (RU/EN) + space + minor punctuation
+# typically used in bank names and phone numbers. Whitelist blocks any
+# HTML-significant char (``<>&'"``) at the source.
+_SBP_RE = re.compile(r"^[0-9A-Za-zА-Яа-яЁё +\-.,()№]+$")
+
+
+def _validate_payout_destination(method: str, raw: str) -> str:
+    """Validates and normalises a payout destination by method.
+
+    Per-method whitelisting blocks HTML-significant characters at the
+    boundary, so the persisted value is always safe to surface in the
+    HTML-mode admin notification later. Defence in depth, not the only
+    line — the notification still escapes on output.
+
+    Args:
+        method: Payout method code (one of ``_PAYOUT_METHOD_FLAGS`` keys).
+        raw: User-supplied destination string.
+
+    Returns:
+        Cleaned destination string.
+
+    Raises:
+        HTTPException: ``400`` when the value doesn't match the method's
+            expected format.
+    """
+    value = (raw or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="Укажите реквизиты выплаты")
+    if len(value) > _DEST_MAX_LEN:
+        raise HTTPException(status_code=400, detail="Слишком длинные реквизиты")
+    if method == "card":
+        digits = re.sub(r"[\s\-]", "", value)
+        if not re.fullmatch(r"\d{13,19}", digits):
+            raise HTTPException(status_code=400, detail="Номер карты должен содержать 13–19 цифр")
+        return digits
+    if method == "sbp":
+        if len(value) < 5 or not _SBP_RE.fullmatch(value):
+            raise HTTPException(
+                status_code=400,
+                detail="Укажите номер телефона и название банка без спецсимволов",
+            )
+        return value
+    if method == "usdt":
+        if not _TRC20_RE.fullmatch(value):
+            raise HTTPException(
+                status_code=400,
+                detail="USDT-адрес сети TRC20 должен начинаться с T и состоять из 34 символов",
+            )
+        return value
+    if method == "ton":
+        if not (_TON_FRIENDLY_RE.fullmatch(value) or _TON_RAW_RE.fullmatch(value)):
+            raise HTTPException(status_code=400, detail="Неверный формат TON-адреса")
+        return value
+    raise HTTPException(status_code=400, detail="Неизвестный способ выплаты")
+
+
 @router.patch("/me/payout", response_model=PartnerPayoutMethodResponse)
 async def partner_update_payout_method(
     body: PartnerPayoutMethodUpdateRequest,
@@ -574,14 +640,12 @@ async def partner_update_payout_method(
 ):
     """Set the current user's preferred payout method and destination details."""
     method = (body.method or "").strip().lower()
-    destination = (body.destination or "").strip()
     if method not in _PAYOUT_METHOD_FLAGS:
         raise HTTPException(status_code=400, detail="Неизвестный способ выплаты")
     enabled = _enabled_payout_methods()
     if method not in enabled:
         raise HTTPException(status_code=400, detail="Этот способ выплаты сейчас недоступен")
-    if not destination:
-        raise HTTPException(status_code=400, detail="Укажите реквизиты выплаты")
+    destination = _validate_payout_destination(method, body.destination or "")
     user_id, _ = await _resolve_partner_user(session, request, identity)
     await session.execute(
         text("UPDATE users SET payout_method = :method, card_number = :destination WHERE id = :id"),
@@ -718,17 +782,23 @@ async def _notify_admins_new_payout(tg_id: int, amount: float, method: str, dest
     the API must do the same, otherwise they sit in `payout_requests` unseen.
     Best-effort: a delivery failure must never break the payout itself.
     """
+    # Escape every user-influenced field before HTML-mode delivery. The
+    # PATCH /me/payout endpoint already whitelists ``destination`` by
+    # method, but legacy rows persisted before that fix can still carry
+    # arbitrary payloads — defence in depth.
+    safe_destination = html.escape(destination or "—")
+    safe_method = html.escape(method or "")
     try:
         from modules.partner_program.texts import admin_withdraw_notification
 
-        message = admin_withdraw_notification(int(tg_id), float(amount), method, destination or "—")
+        message = admin_withdraw_notification(int(tg_id), float(amount), safe_method, safe_destination)
     except Exception:
         message = (
             "📤 <b>Новая заявка на вывод</b>\n\n"
-            f"👤 Пользователь: <code>{tg_id}</code>\n"
+            f"👤 Пользователь: <code>{int(tg_id)}</code>\n"
             f"💰 Сумма: <b>{round(float(amount), 2)} ₽</b>\n"
-            f"🏦 Способ: <b>{method}</b>\n"
-            f"🧾 Реквизиты: <code>{destination or '—'}</code>"
+            f"🏦 Способ: <b>{safe_method}</b>\n"
+            f"🧾 Реквизиты: <code>{safe_destination}</code>"
         )
     admin_ids = ADMIN_ID if isinstance(ADMIN_ID, list) else [ADMIN_ID]
     bot = _get_notify_bot()
