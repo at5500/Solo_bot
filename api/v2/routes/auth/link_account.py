@@ -40,9 +40,32 @@ from utils.identity_link import (
     LINK_KIND_TG,
     LINK_KIND_WEB,
     consume_link_token,
+    drop_link_token,
+    peek_link_token,
     store_link_token,
 )
 from utils.photo_cache import invalidate_photo_cache
+
+
+def _mask_email(email: str | None) -> str:
+    """Renders ``i***e@example.com`` for a recognizable but redacted view
+    of the originating identity's email in the Mini App consent dialog.
+
+    Args:
+        email: Raw email or ``None``.
+
+    Returns:
+        Masked string. Empty string when the input doesn't look like an
+        email — the frontend then hides the field entirely.
+    """
+    if not email or "@" not in email:
+        return ""
+    local, _, domain = email.partition("@")
+    if len(local) <= 1:
+        return f"*@{domain}"
+    if len(local) <= 3:
+        return f"{local[0]}***@{domain}"
+    return f"{local[0]}***{local[-1]}@{domain}"
 
 
 router = APIRouter()
@@ -90,9 +113,34 @@ class LinkTokenResponse(BaseModel):
 
 
 class LinkMiniappRequest(BaseModel):
-    """Mini App-side consumer payload — just the opaque token string."""
+    """Mini App-side consumer payload.
+
+    ``confirmed`` must be set to ``true`` — without it the endpoint
+    refuses the attach. Frontend is expected to first fetch
+    ``/auth/link-tokens/info`` to render a confirmation dialog and only
+    set ``confirmed`` after the user explicitly approves ([audit
+    F-NEW-tg-01]).
+    """
 
     link_token: str
+    confirmed: bool = False
+
+
+class LinkTokenInfoRequest(BaseModel):
+    """Read-only lookup payload — only the opaque token."""
+
+    link_token: str
+
+
+class LinkTokenInfoResult(BaseModel):
+    """Public-facing info about the originating identity behind a link
+    token. Surfaces just enough for the recipient to recognise their own
+    account in the consent dialog — masked email plus the registration
+    date — without leaking PII to whoever else might have the token."""
+
+    valid: bool
+    remote_email_masked: str = ""
+    remote_created_at: str = ""
 
 
 class LinkMiniappResult(BaseModel):
@@ -162,6 +210,57 @@ async def create_web_link_token(
     return LinkTokenResponse(url=f"{site}/?link_token={token}")
 
 
+@router.post("/link-tokens/info", response_model=LinkTokenInfoResult)
+async def link_token_info(
+    body: LinkTokenInfoRequest,
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_token),
+):
+    """Read-only lookup behind a TG-kind link token.
+
+    Used by the Mini App to render the consent dialog before the actual
+    attach — the token stays alive until either ``consume_miniapp_link``
+    or ``link_token_drop`` is called.
+
+    Returns:
+        :class:`LinkTokenInfoResult` with ``valid=False`` when the token
+        is missing, expired, or stored under another kind. On success,
+        ``remote_email_masked`` is empty for identities without an email
+        — the frontend hides the field in that case.
+    """
+    del identity  # caller must be authenticated, identity itself unused
+    token = (body.link_token or "").strip()
+    if not token:
+        return LinkTokenInfoResult(valid=False)
+    remote_id = await peek_link_token(LINK_KIND_TG, token)
+    if not remote_id:
+        return LinkTokenInfoResult(valid=False)
+    remote = await idb.get_identity_by_id(session, remote_id)
+    if remote is None:
+        return LinkTokenInfoResult(valid=False)
+    created_at = getattr(remote, "created_at", None)
+    return LinkTokenInfoResult(
+        valid=True,
+        remote_email_masked=_mask_email(getattr(remote, "email", None)),
+        remote_created_at=created_at.isoformat() if created_at else "",
+    )
+
+
+@router.post("/link-tokens/drop")
+async def link_token_drop(
+    body: LinkTokenInfoRequest,
+    identity=Depends(verify_identity_token),
+):
+    """Drops a TG-kind link token outright — called from the Mini App
+    when the user rejects the consent dialog so a leaked URL can't be
+    reused later. Best-effort: missing/expired token returns 200 too."""
+    del identity
+    token = (body.link_token or "").strip()
+    if token:
+        await drop_link_token(LINK_KIND_TG, token)
+    return {"ok": True}
+
+
 @router.post("/link-miniapp", response_model=LinkMiniappResult)
 async def consume_miniapp_link(
     body: LinkMiniappRequest,
@@ -182,6 +281,11 @@ async def consume_miniapp_link(
     token = (body.link_token or "").strip()
     if not token:
         raise HTTPException(status_code=400, detail="Токен обязателен")
+    if not body.confirmed:
+        # Consent gate ([audit F-NEW-tg-01]): the Mini App must show a
+        # confirmation dialog using /auth/link-tokens/info before this
+        # endpoint will perform the attach.
+        raise HTTPException(status_code=400, detail="Привязка требует подтверждения")
 
     tg_id = getattr(identity, "tg_id", None)
     if tg_id is None:

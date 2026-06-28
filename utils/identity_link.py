@@ -69,3 +69,39 @@ async def consume_link_token(kind: str, token: str) -> str | None:
         return None
     await cache_delete(key)
     return str(value)
+
+
+async def peek_link_token(kind: str, token: str) -> str | None:
+    """Looks up the identity behind a token *without* deleting it.
+
+    Used by consent flows where the actual attach happens only after the
+    recipient explicitly approves the link — peek is read-only, the
+    attach call later uses ``consume_link_token`` to lock the operation
+    in atomically.
+
+    Args:
+        kind: Discriminator the token was stored under.
+        token: Opaque token string from the URL.
+
+    Returns:
+        The originating ``identity_id`` on success, or ``None`` if the
+        token is missing, expired, or stored under another ``kind``.
+    """
+    if not token:
+        return None
+    value = await cache_get(_key(kind, token))
+    return str(value) if value else None
+
+
+async def drop_link_token(kind: str, token: str) -> None:
+    """Best-effort delete of a link token. Called when the recipient
+    explicitly rejects the link or the consent flow times out — kills
+    the token so a leaked URL can't be reused later.
+
+    Args:
+        kind: Discriminator the token was stored under.
+        token: Opaque token string from the URL.
+    """
+    if not token:
+        return
+    await cache_delete(_key(kind, token))
