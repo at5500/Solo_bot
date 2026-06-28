@@ -473,9 +473,10 @@ class PartnerApplyResponse(BaseModel):
     ok: bool = True
     message: str = ""
     partner_code: str = ""
-    partner_user_id: int = 0
+    # Internal sequential user.id columns (partner_user_id /
+    # joined_user_id) were stripped to avoid leaking row counts and
+    # registration order — audit F-015.
     partner_tg_id: int | None = None
-    joined_user_id: int = 0
     joined_tg_id: int | None = None
 
 
