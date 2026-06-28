@@ -8,7 +8,7 @@ from sqlalchemy import and_, distinct, exists, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.constants import PAYMENT_SYSTEMS_EXCLUDED
-from database.models import BlockedUser, Key, ManualBan, Payment, Server, Tariff, User
+from database.models import BlockedUser, Identity, Key, ManualBan, Payment, Server, Tariff, User
 from logger import logger
 
 
@@ -128,6 +128,19 @@ async def get_recipients(
             select(distinct(User.tg_id))
             .join(Key, Key.user_id == User.id)
             .where(Key.tariff_id.in_(trial_tariff_subquery))
+            .where(*tg_filters)
+            .where(_not_banned(User.id))
+        )
+
+    elif send_to == "no_email":
+        has_email = exists(
+            select(1)
+            .select_from(Identity)
+            .where(and_(Identity.tg_id == User.tg_id, Identity.email.isnot(None)))
+        )
+        query = (
+            select(distinct(User.tg_id))
+            .where(not_(has_email))
             .where(*tg_filters)
             .where(_not_banned(User.id))
         )

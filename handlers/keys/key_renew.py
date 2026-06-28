@@ -53,7 +53,6 @@ from hooks.processors import (
     process_renewal_forbidden_groups,
 )
 from logger import logger
-from middlewares.session import release_session_early
 from services.operations import renew_key_in_cluster
 from services.payments.currency_rates import format_for_user
 from services.tariffs.tariff_display import GB, get_effective_limits_for_key
@@ -1063,7 +1062,6 @@ async def complete_key_renewal(
         server_or_cluster = key_info["server_id"]
 
         try:
-            await release_session_early(session)
             await execute_renewal(
                 session=session,
                 billing_user_id=tg_id,
@@ -1080,6 +1078,24 @@ async def complete_key_renewal(
             )
         except ServiceError as e:
             logger.error(f"[Error] Сервис продления: {e.message}")
+            err_text = f"⚠️ {e.message}"
+            try:
+                if callback_query:
+                    await edit_or_send_message(
+                        target_message=callback_query.message,
+                        text=err_text,
+                        reply_markup=None,
+                    )
+                elif waiting_message:
+                    await edit_or_send_message(
+                        target_message=waiting_message,
+                        text=err_text,
+                        reply_markup=None,
+                    )
+                elif tg_notify is not None:
+                    await bot.send_message(tg_notify, err_text)
+            except Exception as notify_err:
+                logger.warning(f"[Renew] Не удалось показать ошибку продления: {notify_err}")
             return
 
         tariff = await get_tariff_by_id(session, tariff_id)

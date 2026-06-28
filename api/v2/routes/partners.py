@@ -1161,6 +1161,8 @@ async def update_partner_balance(
         return ORJSONResponse(content={"success": False, "message": "Неверная сумма"}, status_code=400)
     if amount_val < 0:
         return ORJSONResponse(content={"success": False, "message": "Сумма не может быть отрицательной"}, status_code=400)
+    if amount_val > 100_000_000:
+        return ORJSONResponse(content={"success": False, "message": "Слишком большая сумма"}, status_code=400)
     try:
         current_res = await session.execute(
             text("SELECT partner_balance FROM users WHERE tg_id = :tg_id"), {"tg_id": tg_id}

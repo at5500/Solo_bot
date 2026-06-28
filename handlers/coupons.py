@@ -85,6 +85,21 @@ async def activate_coupon(
     user_data: dict | None = None,
 ):
     logger.info(f"Активация купона: {coupon_code}")
+
+    if not admin:
+        try:
+            from core.redis_cache import cache_incr
+
+            _u = user_data or message.from_user or message.chat
+            _uid = _u["tg_id"] if isinstance(_u, dict) else getattr(_u, "id", 0)
+            attempts = await cache_incr(f"coupon_try:{_uid}", 60)
+            if attempts > 8:
+                await message.answer("❌ Слишком много попыток. Попробуйте через минуту.")
+                await state.clear()
+                return
+        except Exception:
+            pass
+
     coupon = await get_coupon_by_code(session, coupon_code)
 
     if not coupon:

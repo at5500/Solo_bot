@@ -1,6 +1,7 @@
 from core.tasks.cron_tasks import (
     AUDIT_DRAIN_TRIGGER,
     DAILY_STATS_REPORT_TRIGGER,
+    MONTHLY_STATS_REPORT_TRIGGER,
     DB_POOL_STATUS_TRIGGER,
     ABANDONED_CHECKOUT_TRIGGER,
     EXPIRED_GIFTS_CLEANUP_TRIGGER,
@@ -29,6 +30,7 @@ from core.tasks.cron_tasks import (
     scheduled_audit_drain_process_runner,
     scheduled_stats_report,
     scheduled_stats_report_process_runner,
+    scheduled_monthly_stats_report,
     sweep_stale_payments_job,
     sweep_stale_payments_process_runner,
 )
@@ -103,6 +105,12 @@ def register_periodic_tasks() -> None:
         "daily_stats_report",
         scheduled_stats_report,
         DAILY_STATS_REPORT_TRIGGER,
+    )
+
+    periodic_task_manager.register_cron_task(
+        "monthly_stats_report",
+        scheduled_monthly_stats_report,
+        MONTHLY_STATS_REPORT_TRIGGER,
     )
 
     if process_budget > 0:

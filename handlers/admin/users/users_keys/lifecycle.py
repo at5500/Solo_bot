@@ -317,48 +317,82 @@ async def handle_recreate_key_confirm(
             return
 
         remnawave_servers = [s for s in cluster if s.get("panel_type", "3x-ui").lower() == "remnawave"]
+        threexui_servers = [s for s in cluster if s.get("panel_type", "3x-ui").lower() != "remnawave"]
 
-        if not remnawave_servers:
+        if remnawave_servers:
+            api_url = remnawave_servers[0].get("api_url")
+            if not api_url:
+                await callback_query.message.edit_text(
+                    text="❗ У Remnawave сервера не задан api_url.",
+                    reply_markup=build_editor_kb(tg_id),
+                )
+                return
+
+            api = RemnawaveAPI(api_url)
+            try:
+                if not REMNAWAVE_TOKEN_LOGIN_ENABLED:
+                    await api.login(REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD)
+
+                user_data = await api.revoke_user_subscription(client_id)
+            finally:
+                await api.aclose()
+
+            if not user_data:
+                await callback_query.message.edit_text(
+                    text="❗ Не удалось выполнить revoke. Проверьте логи.",
+                    reply_markup=build_editor_kb(tg_id),
+                )
+                return
+
+            new_link = user_data.get("subscriptionUrl")
+
+            if not new_link:
+                await callback_query.message.edit_text(
+                    text="❗ Revoke выполнен, но новая ссылка не получена.",
+                    reply_markup=build_editor_kb(tg_id),
+                )
+                return
+
+            await update_key_subscription_links(session, old_email, new_link)
+
+        elif threexui_servers:
+            from config import PUBLIC_LINK, SUPERNODE
+            from database.keys import update_key_email_and_link
+            from panels._3xui import change_client_email, get_xui_instance
+
+            new_email = await generate_random_email(session=session)
+            changed_any = False
+            for server in threexui_servers:
+                api_url = server.get("api_url")
+                inbound_id = server.get("inbound_id")
+                server_name = server.get("server_name", "unknown")
+                if not api_url or not inbound_id:
+                    continue
+                old_unique = f"{old_email}_{server_name.lower()}" if SUPERNODE else old_email
+                new_unique = f"{new_email}_{server_name.lower()}" if SUPERNODE else new_email
+                try:
+                    xui = await get_xui_instance(api_url)
+                    if await change_client_email(xui, int(inbound_id), old_unique, new_unique, new_email, client_id):
+                        changed_any = True
+                except Exception as e:
+                    logger.error(f"[3x-ui revoke] сервер {server_name}: {e}")
+
+            if not changed_any:
+                await callback_query.message.edit_text(
+                    text="❗ Не удалось сменить ссылку ни на одном 3x-ui сервере. Проверьте логи.",
+                    reply_markup=build_editor_kb(tg_id),
+                )
+                return
+
+            new_link = f"{PUBLIC_LINK}{new_email}/{tg_id}"
+            await update_key_email_and_link(session, old_email, new_email, new_link, client_id)
+
+        else:
             await callback_query.message.edit_text(
-                text="❗ Revoke доступен только для Remnawave. Для 3x-ui используйте перевыпуск.",
+                text="❗ В кластере нет серверов Remnawave или 3x-ui.",
                 reply_markup=build_editor_kb(tg_id),
             )
             return
-
-        api_url = remnawave_servers[0].get("api_url")
-        if not api_url:
-            await callback_query.message.edit_text(
-                text="❗ У Remnawave сервера не задан api_url.",
-                reply_markup=build_editor_kb(tg_id),
-            )
-            return
-
-        api = RemnawaveAPI(api_url)
-        try:
-            if not REMNAWAVE_TOKEN_LOGIN_ENABLED:
-                await api.login(REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD)
-
-            user_data = await api.revoke_user_subscription(client_id)
-        finally:
-            await api.aclose()
-
-        if not user_data:
-            await callback_query.message.edit_text(
-                text="❗ Не удалось выполнить revoke. Проверьте логи.",
-                reply_markup=build_editor_kb(tg_id),
-            )
-            return
-
-        new_link = user_data.get("subscriptionUrl")
-
-        if not new_link:
-            await callback_query.message.edit_text(
-                text="❗ Revoke выполнен, но новая ссылка не получена.",
-                reply_markup=build_editor_kb(tg_id),
-            )
-            return
-
-        await update_key_subscription_links(session, old_email, new_link)
 
         try:
             user_text = (

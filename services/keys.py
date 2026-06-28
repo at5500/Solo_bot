@@ -28,7 +28,7 @@ from database.servers import cluster_name_exists, get_cluster_name_for_server_na
 from database.users import get_trial
 from logger import logger
 
-from .errors import NotFoundError, ValidationError
+from .errors import NotFoundError, ServiceError, ValidationError
 
 
 if TYPE_CHECKING:
@@ -304,6 +304,33 @@ async def compute_remaining_credit(
     return round(remaining_days * (old_price / old_duration), 2)
 
 
+def _is_same_subscription(
+    *,
+    current_tariff_id: int | None,
+    new_tariff_id: int,
+    new_tariff_configurable: bool,
+    current_selected_device: int | None,
+    new_selected_device: int | None,
+    current_selected_traffic: int | None,
+    new_selected_traffic: int | None,
+) -> bool:
+    """Продление того же тарифа (не смена). Для неконфигурируемых тарифов
+    лимиты устройств/трафика фиксированы тарифом и не выбираются пользователем —
+    их сравнивать нельзя (новые значения приходят как None), достаточно совпадения тарифа."""
+    if current_tariff_id is None or int(current_tariff_id) != int(new_tariff_id):
+        return False
+    if not new_tariff_configurable:
+        return True
+
+    def _opt(value: Any) -> int | None:
+        return int(value) if value is not None else None
+
+    return (
+        _opt(current_selected_device) == _opt(new_selected_device)
+        and _opt(current_selected_traffic) == _opt(new_selected_traffic)
+    )
+
+
 async def compute_renewal_expiry(
     session: AsyncSession,
     *,
@@ -337,14 +364,14 @@ async def compute_renewal_expiry(
     if remaining_ms <= 0:
         return now_ms + new_dur_ms
 
-    def _opt(value: Any) -> int | None:
-        return int(value) if value is not None else None
-
-    same_subscription = (
-        current_tariff_id is not None
-        and int(current_tariff_id) == int(new_tariff_id)
-        and _opt(current_selected_device) == _opt(new_selected_device)
-        and _opt(current_selected_traffic) == _opt(new_selected_traffic)
+    same_subscription = _is_same_subscription(
+        current_tariff_id=current_tariff_id,
+        new_tariff_id=new_tariff_id,
+        new_tariff_configurable=bool((new_tariff or {}).get("configurable")),
+        current_selected_device=current_selected_device,
+        new_selected_device=new_selected_device,
+        current_selected_traffic=current_selected_traffic,
+        new_selected_traffic=new_selected_traffic,
     )
     if same_subscription:
         return current_expiry_ms + new_dur_ms
@@ -522,7 +549,7 @@ async def execute_renewal(
     if not cluster_id:
         raise NotFoundError(f"Кластер для {key_server_id} не найден")
 
-    await renew_key_in_cluster(
+    renewed_ok = await renew_key_in_cluster(
         cluster_id=cluster_id,
         email=key_email,
         client_id=client_id,
@@ -535,11 +562,13 @@ async def execute_renewal(
         old_subgroup=current_subgroup,
         plan=tariff_id,
     )
+    if not renewed_ok:
+        raise ServiceError("Не удалось продлить подписку на сервере. Средства не списаны.")
 
     key_row = await get_key_details(session, key_email)
     effective_client_id = key_row["client_id"] if key_row else client_id
 
-    await update_key_expiry(session, effective_client_id, new_expiry_time)
+    await update_key_expiry(session, effective_client_id, new_expiry_time, record_event=False)
     from database.keys import invalidate_keys_list
 
     await invalidate_keys_list(session, billing_user_id)

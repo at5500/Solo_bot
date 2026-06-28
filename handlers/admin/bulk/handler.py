@@ -21,7 +21,15 @@ from .keyboard import (
     build_tariff_groups_kb,
     build_tariffs_kb,
 )
-from .operations import bulk_add_days, bulk_add_gb, bulk_delete, bulk_freeze, bulk_unfreeze
+from .operations import (
+    bulk_add_days,
+    bulk_add_gb,
+    bulk_delete,
+    bulk_freeze,
+    bulk_reissue,
+    bulk_reissue_link,
+    bulk_unfreeze,
+)
 from .query import fetch_matching_keys
 from .states import BulkStates
 
@@ -32,6 +40,8 @@ ACTION_LABELS = {
     "gb": "добавить трафик (ГБ)",
     "freeze": "заморозить",
     "unfreeze": "разморозить",
+    "reissue": "перевыпустить",
+    "reissue_link": "перевыпустить со сменой ссылки",
     "delete": "удалить",
 }
 
@@ -96,6 +106,17 @@ async def _show_preview(target: Message, edit: bool, state: FSMContext, session:
         text += "\n\n🚫 По фильтру ничего не найдено."
         await _respond(target, text, build_done_kb(), edit)
         return
+    action = data.get("action")
+    if action == "reissue":
+        text += (
+            "\n\n⚠️ Подписки будут пересозданы на серверах. Ссылка у клиентов сохранится. "
+            "Операция тяжёлая и необратимая."
+        )
+    elif action == "reissue_link":
+        text += (
+            "\n\n⚠️ Remnawave-ключам выпускается <b>новая ссылка</b> (старая перестанет работать, клиент будет уведомлён). "
+            "Ключи 3x-ui просто пересоздаются (ссылка та же). Операция необратимая."
+        )
     text += "\n\nПодтвердить выполнение?"
     await _respond(target, text, build_confirm_kb(), edit)
 
@@ -237,6 +258,7 @@ async def do_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncS
 
     await _respond(callback.message, f"⏳ Выполняю для {len(keys)} подписок…", None, True)
 
+    notified = 0
     if action == "days":
         ok, fail, skipped = await bulk_add_days(session, keys, int(data["action_value"]))
     elif action == "gb":
@@ -247,14 +269,20 @@ async def do_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncS
         ok, fail, skipped = await bulk_freeze(session, keys)
     elif action == "unfreeze":
         ok, fail, skipped = await bulk_unfreeze(session, keys)
+    elif action == "reissue":
+        ok, fail, skipped = await bulk_reissue(session, keys)
+    elif action == "reissue_link":
+        ok, fail, skipped, notified = await bulk_reissue_link(session, keys, callback.bot)
     else:
         ok, fail, skipped = 0, 0, 0
 
     await state.clear()
     summary = f"✅ Готово.\n\n{_describe(data)}\n\nОбработано: <b>{ok}</b>"
     if skipped:
-        note = " (безлимитные)" if action == "gb" else ""
+        note = " (безлимитные)" if action == "gb" else " (без Telegram ID)" if action in ("reissue", "reissue_link") else ""
         summary += f"\nПропущено: <b>{skipped}</b>{note}"
+    if action == "reissue_link" and notified:
+        summary += f"\nУведомлено клиентов: <b>{notified}</b>"
     if fail:
         summary += f"\nОшибок: <b>{fail}</b>"
     await callback.message.answer(summary, reply_markup=build_done_kb())

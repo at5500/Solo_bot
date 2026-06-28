@@ -18,6 +18,13 @@ def build_login_response(identity) -> LoginResponse:
         identity=IdentityResponse.model_validate(identity),
     )
 
+
+def safe_return_path(return_to: str | None, default: str) -> str:
+    path = str(return_to or "").strip()
+    if not path.startswith("/") or path.startswith("//") or path.startswith("/\\"):
+        return default
+    return path
+
 _TRUSTED_PROXY_CIDRS: list[str] = []
 
 

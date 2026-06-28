@@ -104,6 +104,9 @@ async def security_and_cache_middleware(request: Request, call_next):
 
     if path.startswith("/api/web/uploads/") and request.method == "GET" and response.status_code == 200:
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+        if path.lower().endswith(".svg"):
+            response.headers["Content-Disposition"] = "attachment"
         return response
 
     if request.method == "GET" and response.status_code == 200 and "application/json" in content_type:

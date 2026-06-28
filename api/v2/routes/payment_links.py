@@ -193,19 +193,12 @@ async def create_link(
 
 
 @router.get("/stream")
-async def payment_events_stream(
-    request: Request,
-    x_identity_id: str = "",
-    token: str = "",
-):
-    identity_id = str(request.headers.get("X-Identity-Id") or x_identity_id or "").strip()
-    token = str(request.headers.get("X-Token") or token or "").strip()
-    if not identity_id or not token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+async def payment_events_stream(request: Request):
+    from api.depends import _identity_from_cookie
 
     async with async_session_maker() as session:
-        identity = await idb.verify_identity_token(session, identity_id, token)
-        if not identity:
+        identity = await _identity_from_cookie(session, request)
+        if identity is None:
             raise HTTPException(status_code=401, detail="Unauthorized")
         billing_user_ref = await idb.ensure_billing_user_for_identity(session, identity)
         await session.commit()

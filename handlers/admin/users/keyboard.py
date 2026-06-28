@@ -6,6 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import HWID_RESET_BUTTON
+from core.bootstrap import BUTTONS_CONFIG
 from database import get_clusters, get_key_expiry_presets
 from handlers.buttons import BACK, FREEZE, UNFREEZE
 from handlers.utils import format_days
@@ -389,7 +390,7 @@ def build_key_edit_kb(
             ).pack(),
         )
 
-    if HWID_RESET_BUTTON:
+    if bool(BUTTONS_CONFIG.get("HWID_RESET_BUTTON_ENABLE", HWID_RESET_BUTTON)):
         builder.button(
             text="💻 HWID",
             callback_data=AdminUserEditorCallback(

@@ -15,7 +15,15 @@ from config import (
     CAPTCHA_ENABLE,
     CHANNEL_EXISTS,
     CHANNEL_REQUIRED,
+    CONNECT_ANDROID,
+    CONNECT_IOS,
+    CONNECT_MACOS,
+    CONNECT_WINDOWS,
     DONATIONS_ENABLE,
+    DOWNLOAD_ANDROID,
+    DOWNLOAD_IOS,
+    DOWNLOAD_MACOS,
+    DOWNLOAD_PC,
     GIFT_BUTTON,
     HAPP_CRYPTOLINK,
     HWID_RESET_BUTTON,
@@ -76,7 +84,14 @@ async def root():
 
 @router.get("/api/version", include_in_schema=True)
 async def version():
-    return {"version": 2, "api": "v2"}
+    bot_version = ""
+    try:
+        from utils.versioning import get_version
+
+        bot_version = get_version(include_git_info=False)
+    except Exception:
+        bot_version = ""
+    return {"version": 2, "api": "v2", "bot_version": bot_version}
 
 
 @router.get("/api/telegram-widget-bot", include_in_schema=True)
@@ -139,6 +154,22 @@ async def site_config(session: AsyncSession = Depends(get_session)):
     from api.v2.routes.partners import partners_table_exists
 
     partner_enabled = bool(_partner_feature_enabled()) and await partners_table_exists(session)
+
+    from sqlalchemy import select
+
+    from database.models import WebFlow
+
+    trial_flow_ids: list[str] = []
+    flows_rows = await session.execute(select(WebFlow.id, WebFlow.nodes))
+    for flow_id, nodes in flows_rows.all():
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            action_cfg = node.get("action_config")
+            if isinstance(action_cfg, dict) and action_cfg.get("action_type") == "activate-trial":
+                trial_flow_ids.append(flow_id)
+                break
+
     return {
         "bot_username": bot_username or None,
         "telegram_web_app_short_name": webapp_short,
@@ -167,7 +198,9 @@ async def site_config(session: AsyncSession = Depends(get_session)):
             "country_selection_enabled": bool(MODES_CONFIG.get("COUNTRY_SELECTION_ENABLED", USE_COUNTRY_SELECTION)),
             "captcha_enabled": bool(MODES_CONFIG.get("CAPTCHA_ENABLED", CAPTCHA_ENABLE)),
             "channel_check_enabled": bool(MODES_CONFIG.get("CHANNEL_CHECK_ENABLED", CHANNEL_REQUIRED)),
-            "trial_enabled": not bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE)),
+            "trial_enabled": not bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE))
+            and not bool(MODES_CONFIG.get("WEB_TRIAL_DISABLED", False)),
+            "trial_flow_ids": trial_flow_ids,
             "mini_app_enabled": bool(MODES_CONFIG.get("REMNAWAVE_WEBAPP_ENABLED", REMNAWAVE_WEBAPP)),
             "mini_app_open_in_browser": bool(
                 MODES_CONFIG.get("REMNAWAVE_WEBAPP_OPEN_IN_BROWSER", REMNAWAVE_WEBAPP_OPEN_IN_BROWSER)
@@ -196,6 +229,16 @@ async def site_config(session: AsyncSession = Depends(get_session)):
             "currency_one_screen": currency_one_screen,
             "cashback_enabled": cashback_percent > 0,
             "cashback_percent": cashback_percent,
+        },
+        "connect": {
+            "ios": str(CONNECT_IOS or "").strip() or None,
+            "android": str(CONNECT_ANDROID or "").strip() or None,
+            "macos": str(CONNECT_MACOS or "").strip() or None,
+            "windows": str(CONNECT_WINDOWS or "").strip() or None,
+            "download_ios": str(DOWNLOAD_IOS or "").strip() or None,
+            "download_android": str(DOWNLOAD_ANDROID or "").strip() or None,
+            "download_macos": str(DOWNLOAD_MACOS or "").strip() or None,
+            "download_windows": str(DOWNLOAD_PC or "").strip() or None,
         },
     }
 

@@ -30,7 +30,7 @@ from .keyboard import (
     build_tariff_visibility_kb,
 )
 from .tariff_states import TariffCreateState, TariffEditState
-from .tariff_utils import render_tariff_card, validate_tariff_name
+from .tariff_utils import MAX_TARIFF_NAME_LENGTH, render_tariff_card, validate_tariff_name
 
 
 @router.callback_query(AdminPanelCallback.filter(F.action == "tariffs"), IsAdminFilter())
@@ -310,6 +310,37 @@ async def view_tariff(callback: CallbackQuery, callback_data: AdminTariffCallbac
 
     text, markup = render_tariff_card(tariff)
     await callback.message.edit_text(text=text, reply_markup=markup)
+
+
+@router.callback_query(AdminTariffCallback.filter(F.action.startswith("duplicate|")), IsAdminFilter())
+async def duplicate_tariff(callback: CallbackQuery, callback_data: AdminTariffCallback, session: AsyncSession):
+    tariff_id = int(callback_data.action.split("|")[1])
+
+    result = await session.execute(select(Tariff).where(Tariff.id == tariff_id))
+    original = result.scalar_one_or_none()
+
+    if not original:
+        await callback.message.edit_text("❌ Тариф не найден.")
+        return
+
+    suffix = " (копия)"
+    base_name = original.name or "Тариф"
+    if len(base_name) + len(suffix) > MAX_TARIFF_NAME_LENGTH:
+        base_name = base_name[: MAX_TARIFF_NAME_LENGTH - len(suffix)]
+    new_name = f"{base_name}{suffix}"
+
+    excluded = {"id", "name", "created_at", "updated_at", "sort_order"}
+    dup_data = {
+        column.name: getattr(original, column.name)
+        for column in Tariff.__table__.columns
+        if column.name not in excluded
+    }
+    dup_data["name"] = new_name
+
+    new_tariff = await create_tariff(session, dup_data)
+
+    text, markup = render_tariff_card(new_tariff)
+    await callback.message.edit_text(text=f"📑 Тариф дублирован.\n\n{text}", reply_markup=markup)
 
 
 @router.callback_query(AdminTariffCallback.filter(F.action.startswith("delete|")), IsAdminFilter())

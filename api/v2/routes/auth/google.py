@@ -13,12 +13,15 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import (
+    _is_secure_request,
     bind_identity_actor,
     get_session,
     set_auth_cookie,
     set_is_admin_cookie,
 )
-from api.v2.routes.auth._common import _client_ip
+
+_GOOGLE_NONCE_COOKIE = "g_oauth_nonce"
+from api.v2.routes.auth._common import _client_ip, safe_return_path
 from database import identities as idb
 from logger import logger
 
@@ -42,8 +45,9 @@ except ImportError:
 try:
     from config import API_TOKEN as _API_TOKEN_RAW
 except ImportError:
-    _API_TOKEN_RAW = "solo-google-state-fallback"
-_GOOGLE_STATE_SECRET = hashlib.sha256(b"oauth-state:google:v1:" + str(_API_TOKEN_RAW or "").encode()).hexdigest()
+    _API_TOKEN_RAW = ""
+_GOOGLE_STATE_KEY = str(_API_TOKEN_RAW or "").strip() or secrets.token_hex(32)
+_GOOGLE_STATE_SECRET = hashlib.sha256(b"oauth-state:google:v1:" + _GOOGLE_STATE_KEY.encode()).hexdigest()
 
 
 GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -64,16 +68,16 @@ def _sign_state(payload: str) -> str:
     return base64.urlsafe_b64encode(mac).decode().rstrip("=")
 
 
-def _make_state(return_to: str) -> str:
+def _make_state(return_to: str) -> tuple[str, str]:
     nonce = secrets.token_urlsafe(16)
     ts = str(int(time.time()))
     payload = f"{nonce}.{ts}.{return_to}"
     sig = _sign_state(payload)
     raw = f"{payload}.{sig}".encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return base64.urlsafe_b64encode(raw).decode().rstrip("="), nonce
 
 
-def _verify_state(state: str) -> str | None:
+def _verify_state(state: str) -> tuple[str, str] | None:
     try:
         padded = state + "=" * (-len(state) % 4)
         raw = base64.urlsafe_b64decode(padded).decode()
@@ -95,7 +99,7 @@ def _verify_state(state: str) -> str | None:
             return None
     except Exception:
         return None
-    return return_to or _OAUTH_SUCCESS_URI
+    return (return_to or _OAUTH_SUCCESS_URI, _nonce)
 
 
 @router.get("/google/authorize")
@@ -106,8 +110,8 @@ async def google_authorize(
     """Начинает OAuth-флоу Google: редиректит юзера на Google consent screen."""
     if not google_configured():
         raise HTTPException(status_code=503, detail="Google Sign-In не настроен на этом сервере")
-    safe_return = return_to if return_to.startswith("/") else _OAUTH_SUCCESS_URI
-    state = _make_state(safe_return)
+    safe_return = safe_return_path(return_to, _OAUTH_SUCCESS_URI)
+    state, nonce = _make_state(safe_return)
     params = {
         "client_id": _GOOGLE_CLIENT_ID,
         "redirect_uri": _GOOGLE_REDIRECT_URI,
@@ -119,7 +123,17 @@ async def google_authorize(
     }
     url = f"{GOOGLE_AUTH_ENDPOINT}?{urlencode(params)}"
     logger.info("[Auth] Google authorize: ip={}", _client_ip(request))
-    return RedirectResponse(url, status_code=302)
+    resp = RedirectResponse(url, status_code=302)
+    resp.set_cookie(
+        key=_GOOGLE_NONCE_COOKIE,
+        value=nonce,
+        max_age=STATE_TTL_SECONDS,
+        path="/",
+        httponly=True,
+        secure=_is_secure_request(request),
+        samesite="lax",
+    )
+    return resp
 
 
 @router.get("/google/callback")
@@ -139,9 +153,14 @@ async def google_callback(
         return RedirectResponse(f"/login?error=google_{error}", status_code=302)
     if not code or not state:
         raise HTTPException(status_code=400, detail="Отсутствует code или state")
-    return_to = _verify_state(state)
-    if return_to is None:
+    verified = _verify_state(state)
+    if verified is None:
         logger.warning("[Auth] Google callback: invalid/expired state ip={}", _client_ip(request))
+        raise HTTPException(status_code=400, detail="Неверный или просроченный state")
+    return_to, state_nonce = verified
+    cookie_nonce = (request.cookies.get(_GOOGLE_NONCE_COOKIE) or "").strip()
+    if not cookie_nonce or not hmac.compare_digest(cookie_nonce, state_nonce):
+        logger.warning("[Auth] Google callback: state/cookie nonce mismatch ip={}", _client_ip(request))
         raise HTTPException(status_code=400, detail="Неверный или просроченный state")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -199,7 +218,8 @@ async def google_callback(
         google_sub,
         _client_ip(request),
     )
-    redirect = RedirectResponse(return_to, status_code=302)
+    redirect = RedirectResponse(safe_return_path(return_to, _OAUTH_SUCCESS_URI), status_code=302)
+    redirect.delete_cookie(_GOOGLE_NONCE_COOKIE, path="/")
     set_auth_cookie(redirect, token, request)
     set_is_admin_cookie(redirect, identity, request)
     return redirect

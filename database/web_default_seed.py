@@ -16,6 +16,7 @@ _SITE_FILE = _SEED_DIR / "default_site.json"
 
 _PACK_SITE_FILES = {
     "cyber-mono": "cyber_mono_site.json",
+    "capybara": "capybara_site.json",
 }
 
 

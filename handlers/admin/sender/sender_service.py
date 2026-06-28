@@ -407,6 +407,14 @@ class BroadcastService:
             if len(body) > 4000:
                 body = body[:4000] + "…"
 
+            image_url = None
+            photo_id = messages[0].get("photo")
+            if photo_id and self.bot is not None:
+                from utils.web_media import host_telegram_photo
+
+                image_url = await host_telegram_photo(self.bot, photo_id)
+            notif_data = {"image_url": image_url} if image_url else None
+
             session = self._session
             if session is None:
                 from database import async_session_maker
@@ -415,12 +423,12 @@ class BroadcastService:
                     for msg in messages:
                         tg_id = msg.get("tg_id")
                         if tg_id and tg_id not in self.blocked_users:
-                            await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body)
+                            await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data)
                     await session.commit()
             else:
                 for msg in messages:
                     tg_id = msg.get("tg_id")
                     if tg_id and tg_id not in self.blocked_users:
-                        await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body)
+                        await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data)
         except Exception as e:
             logger.warning(f"[Broadcast] Ошибка создания web-уведомлений: {e}")

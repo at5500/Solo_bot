@@ -52,8 +52,15 @@ def backup_thread_loop(stop_event, _bot, _sessionmaker) -> None:
             if stop_event.wait(BACKUP_TIME):
                 break
     finally:
-        loop.run_until_complete(backup_bot.session.close())
-        loop.close()
+        try:
+            loop.set_exception_handler(lambda _loop, _ctx: None)
+            loop.run_until_complete(backup_bot.session.close())
+        except Exception:
+            pass
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 
 async def blocked_drain_loop(_bot, sessionmaker) -> None:

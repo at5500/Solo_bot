@@ -54,6 +54,12 @@ def build_sender_kb(include_scheduled: bool = True) -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(
+            text="📭 Без почты в ЛК",
+            callback_data=AdminSenderCallback(type="no_email").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
             text="🧪 Триал",
             callback_data=AdminSenderCallback(type="trial").pack(),
         )
@@ -128,6 +134,7 @@ POLL_AUDIENCES = [
     ("untrial", "📍 Не использовавшие триал"),
     ("trial", "🧪 Триал"),
     ("hotleads", "🔥 Горячие лиды"),
+    ("no_email", "📭 Без почты в ЛК"),
 ]
 
 

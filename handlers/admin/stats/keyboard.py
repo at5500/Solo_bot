@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_btn
@@ -40,6 +40,7 @@ def build_audit_reset_confirm_kb(source: str) -> InlineKeyboardMarkup:
 def build_stats_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить", callback_data=AdminPanelCallback(action="stats").pack())
+    builder.button(text="📊 Графики", callback_data=AdminPanelCallback(action="stats_charts").pack())
     builder.button(
         text="📥 Выгрузить пользователей в CSV",
         callback_data=AdminPanelCallback(action="stats_export_users_csv").pack(),
@@ -58,4 +59,16 @@ def build_stats_kb() -> InlineKeyboardMarkup:
     )
     builder.row(build_admin_back_btn())
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_stats_charts_kb(period: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for p in (7, 30, 90):
+        mark = "✅ " if p == period else ""
+        builder.button(text=f"{mark}{p}д", callback_data=AdminPanelCallback(action=f"stats_chartp_{p}").pack())
+    builder.adjust(3)
+    builder.row(
+        InlineKeyboardButton(text="🗑 Закрыть", callback_data=AdminPanelCallback(action="stats_charts_close").pack())
+    )
     return builder.as_markup()

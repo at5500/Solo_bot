@@ -62,7 +62,9 @@ async def snapshot_all_key_traffic(session: AsyncSession) -> int:
 
 
 async def get_traffic_history(session: AsyncSession, client_id: str, days: int = 30) -> list[dict]:
-    since = _dt.datetime.utcnow().date() - _dt.timedelta(days=max(1, min(365, days)))
+    days = max(1, min(365, days))
+    today = _dt.datetime.utcnow().date()
+    since = today - _dt.timedelta(days=days - 1)
     baseline = (
         await session.execute(
             select(KeyTrafficHistory.used_gb)
@@ -78,7 +80,18 @@ async def get_traffic_history(session: AsyncSession, client_id: str, days: int =
             .order_by(KeyTrafficHistory.snapshot_date.asc())
         )
     ).all()
+    if not rows:
+        return []
+
     out: list[dict] = []
+    # Достраиваем ведущие дни без данных нулями — чтобы ось охватывала весь выбранный период
+    # (7д/30д/90д визуально соответствуют выбору, а не схлопываются к доступной истории).
+    pad_day = since
+    first_date = rows[0][0]
+    while pad_day < first_date:
+        out.append({"date": pad_day.isoformat(), "used_gb": 0.0, "limit_gb": None})
+        pad_day += _dt.timedelta(days=1)
+
     prev = float(baseline) if baseline is not None else None
     for (d, u, lim) in rows:
         cur = float(u) if u is not None else None

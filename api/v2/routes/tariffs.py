@@ -17,7 +17,8 @@ from api.v2.schemas.web_public import (
     TariffPurchaseRequest,
     TariffPurchaseResponse,
 )
-from core.bootstrap import PAYMENTS_CONFIG
+from core.bootstrap import MODES_CONFIG, PAYMENTS_CONFIG
+from config import TRIAL_TIME_DISABLE
 from core.redis_cache import cache_get, cache_key, cache_set
 from database import (
     get_balance,
@@ -37,12 +38,28 @@ from services.tariffs.cooldown import format_cooldown_left, get_tariff_cooldown_
 from services.tariffs.visibility import is_tariff_visible_for
 
 
+def _full_config_options(raw: object) -> list[int] | None:
+    """Все настроенные варианты для докупки в вебе."""
+    if not isinstance(raw, list):
+        return None
+    out: list[int] = []
+    for value in raw:
+        try:
+            out.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    out = sorted(set(out), key=lambda val: (int(val == 0), val))
+    return out or None
+
+
 def _tariff_to_public(t: Tariff) -> TariffPublic:
     dev_opts = getattr(t, "device_options", None)
     tr_opts = getattr(t, "traffic_options_gb", None)
     filtered_devices, filtered_traffic = filter_config_options(t)
     device_options = filtered_devices if isinstance(dev_opts, list) and filtered_devices else None
     traffic_options_gb = filtered_traffic if isinstance(tr_opts, list) and filtered_traffic else None
+    addon_device_options = _full_config_options(dev_opts)
+    addon_traffic_options = _full_config_options(tr_opts)
     return TariffPublic(
         id=t.id,
         name=t.name or "",
@@ -57,6 +74,8 @@ def _tariff_to_public(t: Tariff) -> TariffPublic:
         configurable=bool(getattr(t, "configurable", False)),
         device_options=device_options,
         traffic_options_gb=traffic_options_gb,
+        addon_device_options=addon_device_options,
+        addon_traffic_options=addon_traffic_options,
         cooldown_days=int(getattr(t, "cooldown_days", 0) or 0),
     )
 
@@ -93,11 +112,18 @@ def _public_tariffs_cache_key(
     group_code: str | None,
     tariff_ids: str | None,
     filter_vless: str | None,
+    site_trial_disabled: bool,
 ) -> str:
     normalized_group = (group_code or "").strip().lower()
     normalized_ids = ",".join(part.strip() for part in (tariff_ids or "").split(",") if part.strip())
     normalized_vless = (filter_vless or "").strip().lower()
-    return cache_key("tariffs_public", normalized_group or "-", normalized_ids or "-", normalized_vless or "-")
+    return cache_key(
+        "tariffs_public",
+        normalized_group or "-",
+        normalized_ids or "-",
+        normalized_vless or "-",
+        "notrial" if site_trial_disabled else "-",
+    )
 
 
 @public_router.get("/groups", response_model=list[TariffGroup])
@@ -125,7 +151,10 @@ async def get_tariffs_public(
     session: AsyncSession = Depends(get_session),
 ):
     """Публичный список активных тарифов (без авторизации)."""
-    cache_token = _public_tariffs_cache_key(group_code, tariff_ids, filter_vless)
+    site_trial_disabled = bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE)) or bool(
+        MODES_CONFIG.get("WEB_TRIAL_DISABLED", False)
+    )
+    cache_token = _public_tariffs_cache_key(group_code, tariff_ids, filter_vless, site_trial_disabled)
     cached = await cache_get(cache_token)
     if isinstance(cached, list):
         return cached
@@ -156,6 +185,8 @@ async def get_tariffs_public(
         q = q.where(Tariff.vless.is_(True))
     elif filter_vless == "app":
         q = q.where(Tariff.vless.is_(False))
+    if site_trial_disabled:
+        q = q.where((Tariff.group_code.is_(None)) | (Tariff.group_code != "trial"))
     result = await session.execute(q)
     rows = result.scalars().all()
     payload = [_tariff_to_public(t).model_dump() for t in rows]
@@ -348,6 +379,12 @@ async def activate_trial(
     """Активация триала (бесплатного или платного). Доступно 1 раз."""
     from database import get_trial, update_trial
     from database.tariffs import get_tariffs
+
+    trial_disabled = bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE)) or bool(
+        MODES_CONFIG.get("WEB_TRIAL_DISABLED", False)
+    )
+    if trial_disabled:
+        raise HTTPException(status_code=403, detail="Пробный период на сайте недоступен")
 
     tg_id = await idb.ensure_billing_user_for_identity(session, identity)
 

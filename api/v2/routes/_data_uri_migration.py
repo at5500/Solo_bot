@@ -43,6 +43,15 @@ def _save_data_uri_to_file(data_uri: str) -> str | None:
         return None
     if not decoded:
         return None
+    if ext == ".svg":
+        try:
+            from api.v2.routes.web import _sanitize_svg
+
+            decoded = _sanitize_svg(decoded)
+        except Exception:
+            return None
+        if not decoded:
+            return None
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4().hex}{ext}"
     (UPLOAD_DIR / name).write_bytes(decoded)

@@ -199,17 +199,11 @@ async def auth_summary(
             logger.warning("[auth_summary] billing_user_id не определён: {}", exc)
             billing_user_id = None
     async def _safe(factory, default):
-        sp = await session.begin_nested()
         try:
-            result = await factory()
-            await sp.commit()
-            return result
+            async with session.begin_nested():
+                return await factory()
         except Exception as exc:
             logger.warning("[auth_summary] пропущена агрегация: {}", exc)
-            try:
-                await sp.rollback()
-            except Exception:
-                pass
             return default
 
     async def _count(model, *conds) -> int:

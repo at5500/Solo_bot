@@ -227,6 +227,12 @@ def build_single_tariff_kb(
             ],
             [
                 InlineKeyboardButton(
+                    text="📑 Дублировать тариф",
+                    callback_data=AdminTariffCallback(action=f"duplicate|{tariff_id}").pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="✏️ Редактировать",
                     callback_data=AdminTariffCallback(action=f"edit|{tariff_id}").pack(),
                 ),

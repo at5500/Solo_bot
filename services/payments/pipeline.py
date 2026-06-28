@@ -109,7 +109,7 @@ async def process_success_payment(
                     status="success",
                     currency=parsed.currency,
                     payment_id=parsed.payment_id,
-                    metadata=parsed.metadata or metadata_patch,
+                    metadata=parsed.metadata or metadata_patch or (payment.get("metadata") if payment else None),
                 )
                 tg_id = parsed.tg_id
 

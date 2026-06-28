@@ -484,7 +484,7 @@ async def delete_key(session: AsyncSession, identifier: int | str):
     logger.info(f"Ключ с идентификатором {identifier} удалён")
 
 
-async def update_key_expiry(session: AsyncSession, client_id: str, new_expiry_time: int):
+async def update_key_expiry(session: AsyncSession, client_id: str, new_expiry_time: int, record_event: bool = True):
     try:
         ctx = (await session.execute(
             select(Key.user_id, Key.tg_id, Key.tariff_id, Key.server_id).where(Key.client_id == client_id).limit(1)
@@ -494,6 +494,8 @@ async def update_key_expiry(session: AsyncSession, client_id: str, new_expiry_ti
     await session.execute(update(Key).where(Key.client_id == client_id).values(expiry_time=new_expiry_time))
     await invalidate_key_details_by_client_id(session, client_id)
     logger.info(f"Срок действия ключа {client_id} обновлён до {new_expiry_time}")
+    if not record_event:
+        return
     try:
         from database.subscription_events import record_subscription_event
 
@@ -665,6 +667,24 @@ async def update_key_subscription_links(session: AsyncSession, email: str, link:
     ok = res.scalar_one_or_none() is not None
     if ok:
         await invalidate_key_details(email)
+    return ok
+
+
+async def update_key_email_and_link(
+    session: AsyncSession, old_email: str, new_email: str, link: str, client_id: str
+) -> bool:
+    stmt = (
+        update(Key)
+        .where(Key.email == old_email)
+        .values(email=new_email, key=link)
+        .returning(Key.client_id)
+    )
+    res = await session.execute(stmt)
+    ok = res.scalar_one_or_none() is not None
+    if ok:
+        await invalidate_key_details(old_email)
+        await invalidate_key_details(new_email)
+        await invalidate_key_email(client_id)
     return ok
 
 

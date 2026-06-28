@@ -330,6 +330,26 @@ async def delete_web_page(
     await session.execute(delete(WebBlock).where(WebBlock.page_slug == slug))
     await session.execute(delete(WebThemeModel).where(WebThemeModel.page_slug == slug))
     await session.delete(page)
+
+    flows_q = await session.execute(select(WebFlow))
+    for flow in flows_q.scalars().all():
+        nodes = flow.nodes
+        if not isinstance(nodes, list):
+            continue
+        changed = False
+        new_nodes = []
+        for node in nodes:
+            if isinstance(node, dict) and (node.get("page_slug") == slug or node.get("pageSlug") == slug):
+                node = dict(node)
+                if node.get("page_slug") == slug:
+                    node["page_slug"] = None
+                if node.get("pageSlug") == slug:
+                    node["pageSlug"] = None
+                changed = True
+            new_nodes.append(node)
+        if changed:
+            flow.nodes = new_nodes
+
     await session.flush()
     await bump_site_revision(session)
     await _audit_web_admin(session, identity, "page.delete", entity_type="page", entity_id=slug)
@@ -542,6 +562,55 @@ async def update_web_page_theme(
         variant_key=current.variant_key,
         tokens=dict(current.theme_tokens or {}),
     )
+
+
+class WebPageTitleUpdate(BaseModel):
+    title: str | None = None
+
+
+@router.get("/api/web/page-titles")
+async def list_web_page_titles(
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    """Кастомные заголовки вкладки (токен pageTitle) по всем страницам — для админ-списка «Страницы»."""
+    rows = (
+        await session.execute(
+            select(WebPageVariant.page_slug, WebPageVariant.theme_tokens).where(WebPageVariant.is_active.is_(True))
+        )
+    ).all()
+    titles: dict[str, str] = {}
+    for page_slug, tokens in rows:
+        value = (tokens or {}).get("pageTitle")
+        if isinstance(value, str) and value.strip():
+            titles[page_slug] = value.strip()
+    return {"titles": titles}
+
+
+@router.put("/api/web/pages/{slug}/title")
+async def update_web_page_title(
+    slug: str,
+    body: WebPageTitleUpdate,
+    variant: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    identity=Depends(verify_identity_admin),
+):
+    """Кастомный заголовок вкладки браузера для страницы (токен pageTitle). Пусто — сброс к дефолту."""
+    if not slug or len(slug) > 64 or not _SLUG_RE.match(slug):
+        raise HTTPException(400, "Некорректный slug страницы")
+    current, _ = await _resolve_variant(session, slug, variant)
+    tokens = dict(current.theme_tokens or {})
+    title = (body.title or "").strip()[:255]
+    if title:
+        tokens["pageTitle"] = title
+    else:
+        tokens.pop("pageTitle", None)
+    current.theme_tokens = tokens
+    await session.flush()
+    await bump_site_revision(session)
+    await _audit_web_admin(session, identity, "page.title.update", entity_type="page", entity_id=slug,
+                           metadata={"variant": current.variant_key, "set": bool(title)})
+    return {"slug": slug, "title": title or None}
 
 
 class PwaIconUpdate(BaseModel):
@@ -1167,7 +1236,7 @@ async def ingest_page_views(
             device=(str(raw.get("device"))[:16] if raw.get("device") else None),
             locale=(str(raw.get("locale"))[:8] if raw.get("locale") else None),
             authenticated=server_authenticated,
-            source=("webapp" if str(raw.get("source") or "").strip().lower() == "webapp" else "web"),
+            source=((lambda s: s if s in ("webapp", "pwa") else "web")(str(raw.get("source") or "").strip().lower())),
             ab_variant=(str(raw.get("abVariant"))[:16] if raw.get("abVariant") else None),
         )
         session.add(pv)
@@ -1251,9 +1320,13 @@ async def get_analytics_overview(
             .group_by(WebPageView.source)
         )
     ).all()
-    src_split = {"webapp": {"views": 0, "visitors": 0}, "web": {"views": 0, "visitors": 0}}
+    src_split = {
+        "webapp": {"views": 0, "visitors": 0},
+        "pwa": {"views": 0, "visitors": 0},
+        "web": {"views": 0, "visitors": 0},
+    }
     for s_row in source_rows:
-        key = "webapp" if (s_row.source == "webapp") else "web"
+        key = s_row.source if s_row.source in ("webapp", "pwa") else "web"
         src_split[key]["views"] += int(s_row.views or 0)
         src_split[key]["visitors"] += int(s_row.visitors or 0)
 
@@ -1272,9 +1345,10 @@ async def get_analytics_overview(
     ).all()
     daily_web: dict[str, dict[str, int]] = {}
     daily_webapp: dict[str, dict[str, int]] = {}
+    daily_pwa: dict[str, dict[str, int]] = {}
     for d_row in daily_src_rows:
         d_key = d_row.day.strftime("%Y-%m-%d")
-        bucket = daily_webapp if (d_row.source == "webapp") else daily_web
+        bucket = daily_webapp if (d_row.source == "webapp") else (daily_pwa if (d_row.source == "pwa") else daily_web)
         cur = bucket.setdefault(d_key, {"views": 0, "visitors": 0})
         cur["views"] += int(d_row.views or 0)
         cur["visitors"] += int(d_row.visitors or 0)
@@ -1352,6 +1426,38 @@ async def get_analytics_overview(
         )
     ) or 0
 
+    login_visitors = (
+        await session.scalar(
+            select(func.count(func.distinct(WebPageView.visitor_id)))
+            .where(WebPageView.created_at >= since)
+            .where(WebPageView.page_slug == "login")
+        )
+    ) or 0
+
+    errors_unresolved = (
+        await session.scalar(
+            select(func.count()).select_from(WebErrorReport).where(WebErrorReport.resolved.is_(False))
+        )
+    ) or 0
+    errors_new = (
+        await session.scalar(
+            select(func.count()).select_from(WebErrorReport).where(WebErrorReport.first_seen_at >= since)
+        )
+    ) or 0
+    top_errors_rows = (
+        await session.execute(
+            select(
+                WebErrorReport.error_name,
+                WebErrorReport.error_message,
+                WebErrorReport.count,
+                WebErrorReport.last_seen_at,
+            )
+            .where(WebErrorReport.resolved.is_(False))
+            .order_by(WebErrorReport.count.desc())
+            .limit(5)
+        )
+    ).all()
+
     registrations = (
         await session.scalar(
             select(func.count()).select_from(Identity).where(Identity.created_at >= since_naive)
@@ -1376,6 +1482,7 @@ async def get_analytics_overview(
             )
             .where(Payment.created_at >= since_naive)
             .where(Payment.status == "success")
+            .where(real_income)
             .where(web_payment_marker)
         )
     ).first()
@@ -1511,8 +1618,10 @@ async def get_analytics_overview(
             "visitors": int(totals_row.visitors or 0) if totals_row else 0,
             "viewsWeb": src_split["web"]["views"],
             "viewsWebapp": src_split["webapp"]["views"],
+            "viewsPwa": src_split["pwa"]["views"],
             "visitorsWeb": src_split["web"]["visitors"],
             "visitorsWebapp": src_split["webapp"]["visitors"],
+            "visitorsPwa": src_split["pwa"]["visitors"],
             "registrations": int(registrations),
             "registrationsTg": int(registrations_tg),
             "registrationsWeb": int(registrations_web),
@@ -1547,6 +1656,10 @@ async def get_analytics_overview(
         "dailyWebapp": [
             {"date": d, "views": v["views"], "visitors": v["visitors"]}
             for d, v in sorted(daily_webapp.items())
+        ],
+        "dailyPwa": [
+            {"date": d, "views": v["views"], "visitors": v["visitors"]}
+            for d, v in sorted(daily_pwa.items())
         ],
         "dailyRegistrations": [
             {"date": row.day.strftime("%Y-%m-%d"), "count": int(row.cnt)}
@@ -1601,6 +1714,25 @@ async def get_analytics_overview(
         ],
         "activeTrend": sub_dynamics["activeTrend"],
         "retention": retention,
+        "funnel": [
+            {"key": "visitors", "value": int(totals_row.visitors or 0) if totals_row else 0},
+            {"key": "login", "value": int(login_visitors)},
+            {"key": "checkout", "value": int(checkout_visitors)},
+            {"key": "paid", "value": int(payments_row.payers or 0) if payments_row else 0},
+        ],
+        "errors": {
+            "unresolved": int(errors_unresolved),
+            "newInPeriod": int(errors_new),
+            "top": [
+                {
+                    "name": r[0] or "Error",
+                    "message": (r[1] or "")[:120],
+                    "count": int(r[2] or 0),
+                    "lastSeen": r[3].isoformat() if r[3] else "",
+                }
+                for r in top_errors_rows
+            ],
+        },
         "tariffs": [
             {"tariff": r.name or "Без тарифа", "count": int(r.cnt)}
             for r in tariff_rows

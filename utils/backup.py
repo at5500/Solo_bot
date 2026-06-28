@@ -246,6 +246,15 @@ def _create_backup_archive() -> tuple[str | None, Exception | None]:
                 else:
                     logger.warning("[Backup] img/ не найдена")
 
+                uploads_dir = project_root / "static" / "web_uploads"
+                if uploads_dir.exists() and uploads_dir.is_dir():
+                    upload_files = [f for f in uploads_dir.iterdir() if f.is_file()]
+                    for upload_file in upload_files:
+                        tar.add(upload_file, arcname=f"{archive_folder}/web_uploads/{upload_file.name}")
+                    logger.info("[Backup] web_uploads/ в архив ({} файлов)", len(upload_files))
+                else:
+                    logger.info("[Backup] web_uploads/ пуста или не найдена")
+
         logger.info("[Backup] Архив создан: {}", archive_path)
 
         if db_backup_path and os.path.exists(db_backup_path) and db_backup_path != str(archive_path):
@@ -361,13 +370,62 @@ async def _send_backup_telegram(backup_file_path: str, bot_instance: Bot | None 
     elif active_bot is None:
         from bot import bot as active_bot
 
+    TELEGRAM_SEND_LIMIT = 49 * 1024 * 1024
+
     try:
+        filename = os.path.basename(backup_file_path)
+        chat_id, thread_id = _parse_destination()
+
+        file_size = os.path.getsize(backup_file_path)
+        if file_size > TELEGRAM_SEND_LIMIT:
+            size_mb = file_size / (1024 * 1024)
+            targets = [chat_id] if chat_id else list(ADMIN_ID)
+
+            db_path, db_err = _create_database_backup()
+            db_sent = False
+            if db_path and not db_err and os.path.getsize(db_path) <= TELEGRAM_SEND_LIMIT:
+                try:
+                    async with aiofiles.open(db_path, "rb") as f:
+                        db_bytes = await f.read()
+                    db_doc = BufferedInputFile(file=db_bytes, filename=os.path.basename(db_path))
+                    for target in targets:
+                        kw: dict = {
+                            "chat_id": target,
+                            "document": db_doc,
+                            "caption": "💾 Дамп БД (полный бэкап с медиа сохранён на сервере)",
+                        }
+                        if chat_id and thread_id:
+                            kw["message_thread_id"] = thread_id
+                        await active_bot.send_document(**kw)
+                    db_sent = True
+                except Exception as e:
+                    logger.error("[Backup] Не удалось отправить дамп БД: {}", e)
+                finally:
+                    try:
+                        os.unlink(db_path)
+                    except Exception:
+                        pass
+
+            notice = (
+                f"⚠️ Полный бэкап <code>{filename}</code> ({size_mb:.1f} МБ) превышает лимит Telegram (50 МБ).\n"
+                + ("В чат отправлен только дамп БД. " if db_sent else "")
+                + f"Полный архив с медиа сохранён на сервере:\n<code>{backup_file_path}</code>\n\n"
+                "Восстановить: админ-панель → «Управление ботом» → «Управление БД» → «🖥 Восстановить с сервера»."
+            )
+            for target in targets:
+                try:
+                    kw = {"chat_id": target, "text": notice, "parse_mode": "HTML"}
+                    if chat_id and thread_id:
+                        kw["message_thread_id"] = thread_id
+                    await active_bot.send_message(**kw)
+                except Exception as e:
+                    logger.error("[Backup] Не отправлено уведомление о большом бэкапе {}: {}", target, e)
+            logger.warning("[Backup] Полный архив {:.1f} МБ > лимита Telegram; дамп БД отправлен={}", size_mb, db_sent)
+            return
+
         async with aiofiles.open(backup_file_path, "rb") as f:
             backup_data = await f.read()
-        filename = os.path.basename(backup_file_path)
         backup_input_file = BufferedInputFile(file=backup_data, filename=filename)
-
-        chat_id, thread_id = _parse_destination()
 
         if chat_id:
             send_kwargs: dict = {"chat_id": chat_id, "document": backup_input_file}

@@ -290,6 +290,62 @@ async def toggle_client(
         return False
 
 
+async def change_client_email(
+    xui: py3xui.AsyncApi,
+    inbound_id: int,
+    old_email: str,
+    new_email: str,
+    new_sub_id: str,
+    client_id: str,
+) -> bool:
+    """Меняет email/ссылку клиента: удаляет старого и создаёт нового с тем же UUID.
+
+    3x-ui не умеет переименовывать email через updateClient (матчит по email → record not found),
+    поэтому delete+add. UUID (client_id) сохраняется → активные конфиги юзера продолжают работать,
+    срок и квота переносятся.
+    """
+    try:
+        client = await xui.client.get_by_email(old_email)
+        if not client or not _client_identity(client):
+            logger.warning(f"Клиент {old_email} не найден для смены ссылки (ID {client_id}).")
+            return False
+
+        expiry_time = int(getattr(client, "expiry_time", 0) or 0)
+        total_gb = int(getattr(client, "total_gb", 0) or 0)
+        limit_ip = int(getattr(client, "limit_ip", 0) or 0)
+        enable = bool(getattr(client, "enable", True))
+        tg_id_val = getattr(client, "tg_id", "") or ""
+
+        if not await delete_client(xui, inbound_id, old_email, client_id):
+            logger.error(f"Не удалось удалить клиента {old_email} при смене ссылки (ID {client_id}).")
+            return False
+
+        result = await add_client(
+            xui,
+            ClientConfig(
+                client_id=client_id,
+                email=new_email,
+                tg_id=tg_id_val,
+                limit_ip=limit_ip,
+                total_gb=total_gb,
+                expiry_time=expiry_time,
+                enable=enable,
+                inbound_id=inbound_id,
+                sub_id=new_sub_id,
+            ),
+        )
+        if not result or result.get("status") not in ("success", "duplicate"):
+            logger.error(f"Не удалось создать клиента {new_email} при смене ссылки (ID {client_id}).")
+            return False
+
+        logger.info(f"Ссылка сменена: {old_email} → {new_email} (ID {client_id}).")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка смены email {old_email} → {new_email} (ID {client_id}): {e}")
+        return False
+
+
 def build_vless_link_from_inbound(
     inbound: py3xui.Inbound,
     user_uuid: str,

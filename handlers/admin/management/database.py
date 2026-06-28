@@ -1,10 +1,14 @@
+import gzip
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import traceback
 
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from aiogram import Bot, F
@@ -12,7 +16,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from config import DB_NAME, DB_PASSWORD, DB_USER, PG_HOST, PG_IN_DOCKER, PG_PORT
+from config import BACK_DIR, DB_NAME, DB_PASSWORD, DB_USER, PG_HOST, PG_IN_DOCKER, PG_PORT
 from core.executor import run_io
 from filters.admin import HasPermission
 from filters.permissions import PERM_MANAGEMENT
@@ -210,6 +214,93 @@ def sync_restore_database(
         return False, str(e)
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def list_local_backups(limit: int = 20) -> list[Path]:
+    backup_dir = Path(BACK_DIR)
+    if not backup_dir.exists():
+        return []
+    files: list[Path] = []
+    for pattern in ("*.tar.gz", "*.sql", "*.sql.gz", "*.dump"):
+        files.extend(p for p in backup_dir.glob(pattern) if p.is_file())
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[:limit]
+
+
+def _restore_media_from_dir(extracted_root: Path) -> int:
+    restored = 0
+    mapping = {
+        "web_uploads": _PROJECT_ROOT / "static" / "web_uploads",
+        "img": _PROJECT_ROOT / "img",
+    }
+    for src_name, dest_dir in mapping.items():
+        src_dir = extracted_root / src_name
+        if not src_dir.is_dir():
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for item in src_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, dest_dir / item.name)
+                restored += 1
+    return restored
+
+
+def sync_restore_from_path(
+    source_path: str,
+    db_name: str,
+    db_user: str,
+    db_password: str,
+    pg_host: str,
+    pg_port: str,
+) -> tuple[bool, str]:
+    """Восстановление из локального файла бэкапа (.tar.gz / .sql / .sql.gz / .dump). Без лимита Telegram."""
+    src = Path(source_path)
+    if not src.is_file():
+        return False, f"Файл не найден: {source_path}"
+
+    name = src.name.lower()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dump_path: str | None = None
+        media_note = ""
+
+        if name.endswith(".tar.gz") or name.endswith(".tgz"):
+            try:
+                with tarfile.open(src, "r:gz") as tar:
+                    tar.extractall(tmpdir, filter="data")
+            except Exception as e:
+                return False, f"Не удалось распаковать архив: {e}"
+            extracted_root = Path(tmpdir)
+            inner = [p for p in extracted_root.iterdir() if p.is_dir()]
+            base = inner[0] if len(inner) == 1 else extracted_root
+            db_file = base / "database.sql"
+            if not db_file.is_file():
+                found = list(extracted_root.rglob("database.sql"))
+                db_file = found[0] if found else None
+                if db_file is not None:
+                    base = db_file.parent
+            if db_file is None or not db_file.is_file():
+                return False, "В архиве не найден database.sql"
+            dump_path = str(db_file)
+            media_count = _restore_media_from_dir(base)
+            if media_count:
+                media_note = f" Восстановлено медиа-файлов: {media_count}."
+        elif name.endswith(".sql.gz") or name.endswith(".gz"):
+            dump_path = os.path.join(tmpdir, "database.sql")
+            try:
+                with gzip.open(src, "rb") as gz, open(dump_path, "wb") as out:
+                    shutil.copyfileobj(gz, out)
+            except Exception as e:
+                return False, f"Не удалось распаковать .gz: {e}"
+        else:
+            dump_path = str(src)
+
+        success, err = sync_restore_database(dump_path, db_name, db_user, db_password, pg_host, pg_port)
+        if not success:
+            return False, err
+        return True, media_note
+
+
 class DatabaseState(StatesGroup):
     waiting_for_backup_file = State()
 
@@ -246,8 +337,10 @@ async def restore_database(message: Message, state: FSMContext, bot: Bot):
             "❌ Файл слишком большой для восстановления через бота: "
             f"{size_mb:.1f} МБ при лимите Telegram 20 МБ.\n\n"
             "Telegram не отдаёт ботам файлы больше 20 МБ. Варианты:\n"
-            "• выгрузить дамп в сжатом формате (custom/gzip) — он меньше;\n"
-            "• восстановить базу на сервере напрямую через <code>psql</code>/<code>pg_restore</code>.",
+            "• «🖥 Восстановить с сервера» в меню БД — если копия уже лежит на сервере "
+            f"(<code>{BACK_DIR}</code>), лимита нет;\n"
+            "• загрузить файл бэкапа на сервер в эту папку любым способом (scp/панель) и выбрать его там;\n"
+            "• выгрузить дамп в сжатом формате (custom/gzip) — он меньше.",
         )
         return
 
@@ -301,6 +394,79 @@ async def restore_database(message: Message, state: FSMContext, bot: Bot):
             os.remove(tmp_path)
         except Exception:
             pass
+
+
+@router.callback_query(AdminPanelCallback.filter(F.action == "restore_db_local"), HasPermission(PERM_MANAGEMENT))
+async def prompt_restore_db_local(callback: CallbackQuery):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    backups = list_local_backups()
+    if not backups:
+        await callback.message.edit_text(
+            "📂 На сервере нет резервных копий.\n"
+            f"Они появляются здесь: <code>{BACK_DIR}</code>",
+            reply_markup=build_back_to_db_menu(),
+        )
+        return
+
+    builder = InlineKeyboardBuilder()
+    for idx, path in enumerate(backups):
+        try:
+            size_mb = path.stat().st_size / (1024 * 1024)
+        except Exception:
+            size_mb = 0.0
+        builder.button(
+            text=f"📦 {path.name[:48]} · {size_mb:.1f} МБ",
+            callback_data=AdminPanelCallback(action=f"restore_local|{idx}").pack(),
+        )
+    builder.button(text=BACK, callback_data=AdminPanelCallback(action="back_to_db_menu").pack())
+    builder.adjust(1)
+    await callback.message.edit_text(
+        "🖥 <b>Восстановление с сервера</b>\n\n"
+        "Выберите копию из тех, что уже лежат на сервере — это обходит лимит Telegram 20 МБ.\n"
+        "Поддерживаются <code>.tar.gz</code> (БД + медиа), <code>.sql</code>, <code>.sql.gz</code>.\n"
+        "⚠️ Все текущие данные будут перезаписаны, бот перезапустится.",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(AdminPanelCallback.filter(F.action.startswith("restore_local|")), HasPermission(PERM_MANAGEMENT))
+async def restore_db_local(callback: CallbackQuery):
+    try:
+        idx = int(callback.data.split("|", 1)[1].split(":")[-1])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный выбор", show_alert=True)
+        return
+
+    backups = list_local_backups()
+    if idx < 0 or idx >= len(backups):
+        await callback.answer("Файл не найден, обновите список", show_alert=True)
+        return
+
+    source = backups[idx]
+    await callback.message.edit_text(f"⏳ Восстановление из <code>{source.name}</code>…")
+
+    success, note = await run_io(
+        sync_restore_from_path,
+        str(source),
+        DB_NAME,
+        DB_USER,
+        DB_PASSWORD,
+        PG_HOST,
+        PG_PORT,
+    )
+
+    if not success:
+        logger.error("[Restore] Локальное восстановление не удалось: {}", note)
+        await callback.message.edit_text(
+            f"❌ Ошибка при восстановлении:\n<pre>{note}</pre>",
+            reply_markup=build_back_to_db_menu(),
+        )
+        return
+
+    logger.info("[Restore] База восстановлена из локального файла {}", source.name)
+    await callback.message.edit_text(f"✅ Восстановлено из <code>{source.name}</code>.{note}\n♻️ Перезапуск…")
+    sys.exit(0)
 
 
 @router.callback_query(AdminPanelCallback.filter(F.action == "export_db"), HasPermission(PERM_MANAGEMENT))

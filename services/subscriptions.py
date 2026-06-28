@@ -260,11 +260,8 @@ async def handle_subscription(request: web.Request) -> web.Response:
         async with sessionmaker() as session:
             try:
                 key = await get_key_details(session, email)
-                if not key:
-                    return web.Response(text="❌ Клиент с таким email не найден.", status=404)
-
-                if int(tg_id) != int(key["tg_id"]):
-                    return web.Response(text="❌ Неверные данные. Получите свой ключ в боте.", status=403)
+                if not key or int(tg_id) != int(key["tg_id"]):
+                    return web.Response(text="❌ Подписка не найдена. Получите свой ключ в боте.", status=404)
 
                 expiry_time_ms = key["expiry_time"]
                 server_id = key["server_id"]
@@ -298,4 +295,4 @@ async def handle_subscription(request: web.Request) -> web.Response:
             except Exception as e:
                 await session.rollback()
                 logger.error(f"Ошибка в handle_subscription: {e}", exc_info=True)
-                return web.Response(text=f"❌ Ошибка сервера: {e}", status=500)
+                return web.Response(text="❌ Временная ошибка сервера. Попробуйте позже.", status=500)

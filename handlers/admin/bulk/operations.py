@@ -3,17 +3,101 @@ from datetime import datetime, timezone
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_tariff_by_id, update_key_expiry
-from database.keys import delete_key, mark_key_as_frozen, mark_key_as_unfrozen
+from config import REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD, REMNAWAVE_TOKEN_LOGIN_ENABLED
+from database import get_servers, get_tariff_by_id, update_key_expiry
+from database.keys import delete_key, mark_key_as_frozen, mark_key_as_unfrozen, update_key_subscription_links
 from database.models import Key
 from logger import logger
+from panels.remnawave import RemnawaveAPI
 from services.operations import (
     delete_key_from_cluster,
     renew_key_in_cluster,
     toggle_client_on_cluster,
+    update_subscription,
 )
 
 DAY_MS = 86400 * 1000
+
+
+def _find_cluster_servers(servers: dict, server_id: str) -> list:
+    cluster = servers.get(server_id)
+    if cluster is not None:
+        return cluster
+    for server_list in servers.values():
+        for server_info in server_list:
+            if server_info.get("server_name", "").lower() == str(server_id).lower():
+                return [server_info]
+    return []
+
+
+async def bulk_reissue(session: AsyncSession, keys: list[Key]) -> tuple[int, int, int]:
+    targets = [(key.tg_id, key.email) for key in keys]
+    ok = fail = skipped = 0
+    for tg_id, email in targets:
+        if not tg_id:
+            skipped += 1
+            continue
+        try:
+            await update_subscription(tg_id=tg_id, email=email, session=session)
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.error(f"[Bulk] reissue {email}: {type(e).__name__}: {e!r}")
+    return ok, fail, skipped
+
+
+async def bulk_reissue_link(session: AsyncSession, keys: list[Key], bot) -> tuple[int, int, int, int]:
+    servers = await get_servers(session)
+    targets = [(key.tg_id, key.email, key.client_id, key.server_id) for key in keys]
+    ok = fail = skipped = notified = 0
+    for tg_id, email, client_id, server_id in targets:
+        try:
+            cluster_servers = _find_cluster_servers(servers, server_id)
+            remnawave_servers = [
+                s for s in cluster_servers if s.get("panel_type", "3x-ui").lower() == "remnawave"
+            ]
+
+            if remnawave_servers and client_id:
+                api_url = remnawave_servers[0].get("api_url")
+                if not api_url:
+                    fail += 1
+                    continue
+                api = RemnawaveAPI(api_url)
+                try:
+                    if not REMNAWAVE_TOKEN_LOGIN_ENABLED:
+                        await api.login(REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD)
+                    user_data = await api.revoke_user_subscription(client_id)
+                finally:
+                    await api.aclose()
+                new_link = (user_data or {}).get("subscriptionUrl")
+                if not new_link:
+                    fail += 1
+                    continue
+                await update_key_subscription_links(session, email, new_link)
+                ok += 1
+                if tg_id and tg_id > 0:
+                    try:
+                        await bot.send_message(
+                            chat_id=tg_id,
+                            text=(
+                                "🔄 <b>Ваша подписка была перевыпущена</b>\n\n"
+                                f"🔗 <b>Новая ссылка подписки:</b>\n<code>{new_link}</code>\n\n"
+                                "<i>Старая ссылка больше не работает.</i>"
+                            ),
+                        )
+                        notified += 1
+                    except Exception as e:
+                        logger.warning(f"[Bulk] reissue_link notify {tg_id}: {type(e).__name__}: {e!r}")
+            else:
+                if not tg_id:
+                    skipped += 1
+                    continue
+                await update_subscription(tg_id=tg_id, email=email, session=session)
+                ok += 1
+        except Exception as e:
+            fail += 1
+            logger.error(f"[Bulk] reissue_link {email}: {type(e).__name__}: {e!r}")
+    return ok, fail, skipped, notified
 
 
 async def _key_limits(session: AsyncSession, key: Key) -> tuple[int, int]:

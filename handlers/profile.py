@@ -24,12 +24,14 @@ from handlers.buttons import (
     ADMIN_BTN,
     BACK,
     BALANCE,
+    BIND_EMAIL,
     GIFTS,
     INSTRUCTIONS,
     INVITE,
     MY_SUB,
     MY_SUBS,
     TRIAL_SUB,
+    WEB_CABINET,
 )
 from handlers.texts import ADD_SUBSCRIPTION_HINT
 from hooks.hook_buttons import insert_hook_buttons
@@ -114,14 +116,14 @@ async def process_callback_view_profile(
         site_url = get_site_url()
         if site_url:
             webapp_url = f"{site_url}/dashboard?webapp=1"
-            builder.row(InlineKeyboardButton(text="🌐 Личный кабинет", web_app=WebAppInfo(url=webapp_url)))
+            builder.row(InlineKeyboardButton(text=WEB_CABINET, web_app=WebAppInfo(url=webapp_url)))
 
     if is_email_binding_enabled():
         from database.identities import get_identity_by_tg_id
 
         identity = await get_identity_by_tg_id(session, chat_id)
         if not (identity and identity.email):
-            builder.row(InlineKeyboardButton(text="📧 Привязать почту", callback_data="bind_email"))
+            builder.row(InlineKeyboardButton(text=BIND_EMAIL, callback_data="bind_email"))
 
     trial_time_disabled = bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE))
 

@@ -24,6 +24,13 @@ async def scheduled_stats_report() -> None:
         await send_daily_stats_report(session)
 
 
+async def scheduled_monthly_stats_report() -> None:
+    from handlers.admin.stats.stats_handler import send_monthly_stats_report
+
+    async with async_session_maker() as session:
+        await send_monthly_stats_report(session)
+
+
 async def sweep_stale_payments_job() -> None:
     async with async_session_maker() as session:
         await cancel_expired_pending_payments(session)
@@ -269,6 +276,7 @@ async def log_db_pool_status() -> None:
 
 AUDIT_DRAIN_TRIGGER = CronTrigger(hour=0, minute=0, timezone="Europe/Moscow")
 DAILY_STATS_REPORT_TRIGGER = CronTrigger(hour=0, minute=1, timezone="Europe/Moscow")
+MONTHLY_STATS_REPORT_TRIGGER = CronTrigger(day=1, hour=0, minute=10, timezone="Europe/Moscow")
 STALE_PAYMENTS_SWEEP_TRIGGER = CronTrigger(minute=0, timezone="Europe/Moscow")
 EXPIRED_GIFTS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=0, timezone="Europe/Moscow")
 WEB_ANALYTICS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=30, timezone="Europe/Moscow")

@@ -81,6 +81,10 @@ def build_database_kb() -> InlineKeyboardMarkup:
         callback_data=AdminPanelCallback(action="restore_db").pack(),
     )
     builder.button(
+        text="🖥 Восстановить с сервера",
+        callback_data=AdminPanelCallback(action="restore_db_local").pack(),
+    )
+    builder.button(
         text="📤 Получить данные БД из панели",
         callback_data=AdminPanelCallback(action="export_db").pack(),
     )
