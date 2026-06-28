@@ -558,7 +558,7 @@ class PartnerPayoutHistoryResponse(BaseModel):
 
 class PartnerPayoutMethodUpdateRequest(BaseModel):
     method: str = Field(..., min_length=1, max_length=16, description="Машинный код способа: card|sbp|usdt|ton")
-    destination: str = Field(..., min_length=1, max_length=256, description="Реквизиты выплаты — номер карты, телефон СБП или адрес кошелька")
+    destination: str = Field(..., min_length=1, max_length=128, description="Реквизиты выплаты — номер карты, телефон СБП или адрес кошелька")
 
 
 class PartnerPayoutMethodResponse(BaseModel):
