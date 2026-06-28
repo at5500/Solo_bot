@@ -1,10 +1,24 @@
 from datetime import datetime
+from typing import Annotated, Optional
 
 from pydantic import BaseModel, Field
 
 
+# Minimal RFC-shaped email check: one ``@``, at least one ``.`` in the
+# domain part, no whitespace. Strict enough to bounce obvious garbage
+# (``notanemail``, ``a@``, ``@b.com``, ``a@b``) at the Pydantic layer
+# with 422 — see audit F-016. Not full RFC 5322 (that would require
+# email-validator); pyproject doesn't pull it in, and the existing
+# normalisation downstream relies on the same shape anyway.
+_EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+EmailStr = Annotated[str, Field(min_length=3, max_length=254, pattern=_EMAIL_PATTERN)]
+OptionalEmailStr = Optional[
+    Annotated[str, Field(min_length=3, max_length=254, pattern=_EMAIL_PATTERN)]
+]
+
+
 class IdentityCreate(BaseModel):
-    email: str | None = Field(None, description="Почта для привязки")
+    email: OptionalEmailStr = Field(None, description="Почта для привязки")
     tg_id: int | None = Field(None, description="Telegram ID для привязки")
 
 
@@ -25,7 +39,7 @@ class IdentityResponse(BaseModel):
 
 
 class RegisterByEmailRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     password: str = Field(..., min_length=8, description="Пароль (минимум 8 символов)")
     referral_code: str | None = Field(None, min_length=1)
     turnstile_token: str | None = Field(default=None, description="Cloudflare Turnstile CAPTCHA token")
@@ -36,7 +50,7 @@ class RegisterResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     password: str = Field(...)
 
 
@@ -57,7 +71,7 @@ class LoginResponse(BaseModel):
 
 
 class SendLoginCodeRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     allow_register: bool = Field(
         default=True,
         description="Если true и email новый — создать идентичность и отправить код (passwordless flow)",
@@ -74,7 +88,7 @@ class SendLoginCodeRequest(BaseModel):
 
 
 class LoginByCodeRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     code: str = Field(..., min_length=1)
     link_token: str | None = Field(
         default=None,
@@ -87,7 +101,7 @@ class LoginByCodeRequest(BaseModel):
 
 
 class ConfirmPasswordResetRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     code: str = Field(..., min_length=1)
     password: str = Field(..., min_length=8)
     password_confirm: str = Field(..., min_length=8)
@@ -118,15 +132,15 @@ class LinkTelegramRequest(BaseModel):
 
 
 class IdentityAttachEmail(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
 
 
 class LinkEmailSendCodeRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
 
 
 class LinkEmailConfirmRequest(BaseModel):
-    email: str = Field(..., min_length=1)
+    email: EmailStr
     code: str = Field(..., min_length=1, max_length=16)
 
 
