@@ -1,6 +1,17 @@
 """Bot handler for `/start link_<token>` — consent-gated attach of the
 caller's Telegram to a web-side identity.
 
+UPSTREAM-MERGE NOTE
+-------------------
+This file was rewritten in commit 509d53d8 to close audit F-NEW-tg-01
+(one-click account takeover via the bot deeplink). On the next merge
+with upstream-https/dev: if Vladless landed the same fix (inline-
+button consent / two-step confirmation), prefer his version — it will
+integrate better with the obfuscated module ecosystem and our fork
+here becomes redundant. If upstream did not touch this file, keep
+the current implementation.
+
+
 A web user mints a token via ``POST /api/auth/link-tokens/telegram`` and
 shares the bot deeplink. Anyone who clicks it lands here. We **do not**
 attach immediately — that would let an attacker «kidnap» a victim's

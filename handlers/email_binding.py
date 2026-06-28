@@ -1,5 +1,16 @@
 """Bot-side «Привязать почту» flow with OTP verification (audit F-NEW-tg-03).
 
+UPSTREAM-MERGE NOTE
+-------------------
+This file was rewritten in commit 528752a1 to close audit F-NEW-tg-03
+(email squat — the bot used to attach any email without verification).
+On the next merge with upstream-https/dev: if Vladless landed OTP
+verification himself, prefer his version — it will integrate better
+with the obfuscated module ecosystem and our fork here becomes
+redundant. If upstream did not touch this file, keep the current
+implementation.
+
+
 Mirrors the webapp `/auth/link-email/send-code` + `/auth/link-email/confirm`
 pair so the bot can't be used to squat an email the attacker doesn't own.
 
