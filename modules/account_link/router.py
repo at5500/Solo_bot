@@ -338,11 +338,14 @@ async def link_confirm_callback(query: CallbackQuery, state: FSMContext) -> None
                 expected_remote_id,
                 type(exc).__name__,
             )
+            # ``consume_link_token`` above already burned the token, so
+            # the original ``?start=link_…`` URL is dead — tell the
+            # user to mint a fresh one instead of «попробуйте позже».
             if message is not None:
                 try:
                     await message.edit_text(
-                        "❌ Не удалось связать аккаунты. Попробуйте позже "
-                        "или обратитесь в поддержку.",
+                        "❌ Не удалось связать аккаунты. Запросите новую "
+                        "ссылку в личном кабинете и попробуйте ещё раз.",
                         reply_markup=None,
                     )
                 except Exception:

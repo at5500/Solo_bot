@@ -196,6 +196,17 @@ async def receive_code(message: Message, state: FSMContext, session) -> None:
         await message.answer("❌ Сессия истекла. Начните заново.")
         return
 
+    # Without this guard a Redis outage between send-code and confirm
+    # would make ``verify_and_consume_code`` silently return False
+    # (cache_get → None) and the user would see «Неверный код»
+    # forever instead of a transient «недоступен» he can react to.
+    if not await email_link_code.redis_ready():
+        await state.clear()
+        await message.answer(
+            "❌ Сервис временно недоступен. Попробуйте позже."
+        )
+        return
+
     if not await email_link_code.try_consume_email_verify_budget(email_norm):
         await state.clear()
         await message.answer("❌ Слишком много попыток. Запросите новый код.")
