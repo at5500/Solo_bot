@@ -424,15 +424,15 @@ async def link_reject_callback(query: CallbackQuery, state: FSMContext) -> None:
     if await _pop_consent(cid) is None:
         return
     token = str(consent.get("token") or "")
-    # The Mini App side could have consumed the token while we were
-    # showing the consent dialog. Distinguish the two cases so the
-    # bot message reflects reality instead of claiming «отклонено»
-    # when the link in fact succeeded elsewhere.
+    # If the token is no longer in Redis the request was already
+    # finalised in a parallel channel (Mini App ``consume_miniapp_link``
+    # OR ``link_token_drop``). Neutral phrasing — we can't tell which,
+    # and «связаны» would lie when the parallel channel rejected too.
     if token and await peek_link_token(LINK_KIND_TG, token) is None:
         if message is not None:
             try:
                 await message.edit_text(
-                    "✅ Аккаунты уже связаны через другой способ.",
+                    "ℹ️ Запрос уже обработан в другом окне.",
                     reply_markup=None,
                 )
             except Exception:
