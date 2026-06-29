@@ -325,8 +325,29 @@ async def link_confirm_callback(query: CallbackQuery, state: FSMContext) -> None
                     pass
             return
 
-        merged = await idb.attach_telegram(session, remote_id, caller_tg_id)
-        await session.commit()
+        try:
+            merged = await idb.attach_telegram(session, remote_id, caller_tg_id)
+            await session.commit()
+        except Exception as exc:
+            # ``consume_link_token`` above already burned the token, the
+            # envelope is popped — without explicit feedback the user
+            # would see an unresponsive «Подтвердите привязку?» bubble.
+            logger.error(
+                "[account_link] attach_telegram failed for tg_id=%s remote=%s: %s",
+                caller_tg_id,
+                expected_remote_id,
+                type(exc).__name__,
+            )
+            if message is not None:
+                try:
+                    await message.edit_text(
+                        "❌ Не удалось связать аккаунты. Попробуйте позже "
+                        "или обратитесь в поддержку.",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            return
 
     if merged is None:
         logger.info(
@@ -400,6 +421,20 @@ async def link_reject_callback(query: CallbackQuery, state: FSMContext) -> None:
     if await _pop_consent(cid) is None:
         return
     token = str(consent.get("token") or "")
+    # The Mini App side could have consumed the token while we were
+    # showing the consent dialog. Distinguish the two cases so the
+    # bot message reflects reality instead of claiming «отклонено»
+    # when the link in fact succeeded elsewhere.
+    if token and await peek_link_token(LINK_KIND_TG, token) is None:
+        if message is not None:
+            try:
+                await message.edit_text(
+                    "✅ Аккаунты уже связаны через другой способ.",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+        return
     await drop_link_token(LINK_KIND_TG, token)
     if message is not None:
         try:
