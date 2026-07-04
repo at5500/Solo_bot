@@ -25,6 +25,7 @@ from database import (
     get_key_details,
     update_trial,
 )
+from database.keys import count_all_keys, get_keys_page
 from database.access.resolution import resolve_user_optional
 from database.models import Admin, Identity, Key, ManualBan, Payment, Referral, Tariff, User
 from database.subscription_events import get_user_subscription_history, resolve_user_ref_by_client_id
@@ -41,6 +42,7 @@ from ..panel.keyboard import (
 from .keyboard import (
     SITE_TAB_LABELS,
     AdminUserEditorCallback,
+    build_all_keys_kb,
     build_editor_kb,
     build_user_edit_kb,
     build_user_site_send_kb,
@@ -84,6 +86,37 @@ async def handle_search_key(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text(
         text="🔑 Введите имя ключа для поиска:",
         reply_markup=build_admin_back_kb(),
+    )
+
+
+_ALL_KEYS_PER_PAGE = 10
+
+
+@router.callback_query(
+    AdminPanelCallback.filter(F.action == "show_all_keys"),
+    IsAdminFilter(),
+)
+async def handle_show_all_keys(
+    callback_query: CallbackQuery,
+    callback_data: AdminPanelCallback,
+    session: AsyncSession,
+):
+    total = await count_all_keys(session)
+    if total == 0:
+        await callback_query.message.edit_text(
+            text="🔑 Подписок пока нет.",
+            reply_markup=build_admin_back_kb(),
+        )
+        return
+
+    total_pages = (total + _ALL_KEYS_PER_PAGE - 1) // _ALL_KEYS_PER_PAGE
+    page = min(max(1, int(callback_data.page or 1)), total_pages)
+    rows = await get_keys_page(
+        session, limit=_ALL_KEYS_PER_PAGE, offset=(page - 1) * _ALL_KEYS_PER_PAGE
+    )
+    await callback_query.message.edit_text(
+        text=f"🔑 <b>Все подписки</b> — стр. {page}/{total_pages} (всего {total})",
+        reply_markup=build_all_keys_kb(rows, page, total_pages),
     )
 
 

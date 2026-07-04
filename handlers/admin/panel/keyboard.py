@@ -67,6 +67,14 @@ async def build_panel_kb(
     if can(PERM_KEYS):
         builder.row(
             InlineKeyboardButton(
+                text="🔑 Показать все подписки",
+                callback_data=AdminPanelCallback(action="show_all_keys", page=1).pack(),
+            )
+        )
+
+    if can(PERM_KEYS):
+        builder.row(
+            InlineKeyboardButton(
                 text="📦 Массовые действия",
                 callback_data=AdminPanelCallback(action="bulk").pack(),
             )

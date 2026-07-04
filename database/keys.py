@@ -195,6 +195,30 @@ async def get_all_keys(session: AsyncSession):
     return result.scalars().all()
 
 
+async def count_all_keys(session: AsyncSession) -> int:
+    """Total number of subscription keys — for the admin 'show all' pagination."""
+    return int(await session.scalar(select(func.count()).select_from(Key)) or 0)
+
+
+async def get_keys_page(session: AsyncSession, *, limit: int, offset: int):
+    """One page of all subscriptions for the admin list, longest-remaining first.
+
+    @param limit: Page size.
+    @param offset: Rows to skip.
+    @return: Rows of (email, client_id, expiry_time, is_frozen, tg_id) where
+        ``tg_id`` is the owner ``User.tg_id`` — needed to open the key editor.
+    """
+    stmt = (
+        select(Key.email, Key.client_id, Key.expiry_time, Key.is_frozen, User.tg_id)
+        .join(User, Key.user_id == User.id)
+        .order_by(Key.expiry_time.desc().nulls_last())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return result.all()
+
+
 async def get_key_by_server(session: AsyncSession, legacy_user_ref: int, client_id: str):
     u = await resolve_user_optional(session, legacy_user_ref)
     if u is None:

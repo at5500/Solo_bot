@@ -14,7 +14,7 @@ from hooks.hook_buttons import insert_hook_buttons
 from hooks.hooks import run_hooks
 from services.users_utils import build_admin_key_ref
 
-from ..panel.keyboard import build_admin_back_btn
+from ..panel.keyboard import AdminPanelCallback, build_admin_back_btn
 
 
 class AdminUserEditorCallback(CallbackData, prefix="admin_users"):
@@ -30,6 +30,58 @@ class AdminUserKeyEditorCallback(CallbackData, prefix="admin_users_key"):
     data: str
     month: int | None = None
     edit: bool = False
+
+
+def build_all_keys_kb(rows, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Keyboard for the admin "all subscriptions" list.
+
+    Each row opens the existing key editor via the owner's ``tg_id`` and a
+    ``build_admin_key_ref`` hash (same as ``build_user_edit_kb``). Navigation
+    rides on ``AdminPanelCallback.page``.
+
+    @param rows: ``get_keys_page`` rows (email, client_id, expiry_time,
+        is_frozen, tg_id).
+    @param page: Current 1-based page.
+    @param total_pages: Total number of pages.
+    """
+    builder = InlineKeyboardBuilder()
+    now = datetime.now(tz=timezone.utc)
+    for r in rows:
+        if r.tg_id is None:
+            continue
+        days = (datetime.fromtimestamp(r.expiry_time / 1000, tz=timezone.utc) - now).days
+        frozen = "❄️ " if r.is_frozen else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🔑 {frozen}{r.email} ({'<1' if days < 1 else days} дн.)",
+                callback_data=AdminUserEditorCallback(
+                    action="users_key_edit",
+                    tg_id=r.tg_id,
+                    data=build_admin_key_ref(r.client_id, r.email),
+                ).pack(),
+            )
+        )
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=AdminPanelCallback(action="show_all_keys", page=page - 1).pack(),
+            )
+        )
+    if page < total_pages:
+        nav.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=AdminPanelCallback(action="show_all_keys", page=page + 1).pack(),
+            )
+        )
+    if nav:
+        builder.row(*nav)
+
+    builder.row(build_admin_back_btn())
+    return builder.as_markup()
 
 
 async def build_user_edit_kb(
