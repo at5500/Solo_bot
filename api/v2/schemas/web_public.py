@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from pydantic import BaseModel, Field
 
 
@@ -310,6 +312,24 @@ class TariffPurchaseResponse(BaseModel):
     required_amount_rub: int = 0
     payment_id: str | None = None
     payment_url: str | None = None
+    # Set on the email-purchase flow when a blocking subscription already exists:
+    # "active" (live paid key) or "frozen" (paid key on pause). None otherwise.
+    subscription_state: str | None = None
+
+
+# Same format check register applies (api/v2/schemas/identities.py) — defined
+# locally to avoid an identities -> web_public import cycle.
+_EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+EmailStr = Annotated[str, Field(min_length=3, max_length=254, pattern=_EMAIL_PATTERN)]
+
+
+class TariffPurchaseByEmailRequest(TariffPurchaseRequest):
+    """Guest purchase: the buyer identity is derived from ``email`` server-side
+    instead of a session cookie. ``turnstile_token`` mirrors register and is
+    only checked when Turnstile is enabled."""
+
+    email: EmailStr
+    turnstile_token: str | None = None
 
 
 class GiftCreateRequest(BaseModel):

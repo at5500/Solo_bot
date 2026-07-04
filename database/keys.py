@@ -3,7 +3,7 @@ import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.cache_config import (
@@ -422,6 +422,54 @@ async def count_active_keys_for_user(session: AsyncSession, user_id: int) -> int
         select(func.count()).select_from(Key).where(Key.user_id == int(user_id), Key.is_frozen.is_(False))
     )
     return int(result.scalar() or 0)
+
+
+async def get_blocking_paid_subscription_state(session: AsyncSession, user_id: int) -> str | None:
+    """Reports whether the user already owns a live *paid* subscription.
+
+    Used by the guest email-purchase flow to refuse a duplicate paid purchase.
+    A key blocks when it is non-expired and NOT a trial (trial keys never
+    block — a trial user may upgrade to paid). Trial is derived from the linked
+    ``Tariff.group_code == "trial"``; a key whose tariff was deleted
+    (``tariff_id IS NULL``) is treated as paid (blocks), since its nature is
+    unknown and we err toward not double-selling.
+
+    @param session: Active DB session.
+    @param user_id: Internal ``users.id`` (as returned by
+        ``ensure_billing_user_for_identity``).
+    @return: ``"active"`` if a live non-frozen paid key exists; else
+        ``"frozen"`` if the only live paid key(s) are frozen; else ``None``.
+    """
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    trial_tariff_ids = select(Tariff.id).where(Tariff.group_code == "trial")
+    non_trial = or_(Key.tariff_id.is_(None), Key.tariff_id.notin_(trial_tariff_ids))
+
+    active = await session.scalar(
+        select(
+            exists().where(
+                Key.user_id == int(user_id),
+                Key.expiry_time > now_ms,
+                Key.is_frozen.is_(False),
+                non_trial,
+            )
+        )
+    )
+    if active:
+        return "active"
+
+    frozen = await session.scalar(
+        select(
+            exists().where(
+                Key.user_id == int(user_id),
+                Key.expiry_time > now_ms,
+                Key.is_frozen.is_(True),
+                non_trial,
+            )
+        )
+    )
+    if frozen:
+        return "frozen"
+    return None
 
 
 async def _log_key_deletions(session: AsyncSession, rows, client_ids) -> None:

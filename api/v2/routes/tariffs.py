@@ -5,15 +5,18 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pytz import timezone as tz_moscow
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, validate_redirect_url, verify_identity_token
 from api.v2.base_crud import generate_crud_router
+from api.v2.routes.auth._common import _client_ip
 from api.v2.routes.coupon_pricing import resolve_percent_coupon_pricing
 from api.v2.schemas import TariffBase, TariffResponse, TariffUpdate
 from api.v2.schemas.tariffs import TariffGroup, TariffPublic
 from api.v2.schemas.web_public import (
     TariffConfigPriceResponse,
+    TariffPurchaseByEmailRequest,
     TariffPurchaseRequest,
     TariffPurchaseResponse,
 )
@@ -25,6 +28,7 @@ from database import (
     identities as idb,
 )
 from database.coupons import mark_coupon_used
+from database.keys import get_blocking_paid_subscription_state
 from database.models import Server, Tariff
 from database.tariffs import get_tariff_by_id
 from database.temporary_data import create_temporary_data
@@ -36,6 +40,8 @@ from services.payments.providers import WEB_LINK_PROVIDER_IDS
 from services.tariffs import calculate_config_price, filter_config_options
 from services.tariffs.cooldown import format_cooldown_left, get_tariff_cooldown_remaining
 from services.tariffs.visibility import is_tariff_visible_for
+from utils.disposable_emails import is_disposable_email
+from utils.turnstile import turnstile_enabled, verify_turnstile_token
 
 
 def _full_config_options(raw: object) -> list[int] | None:
@@ -206,6 +212,212 @@ async def get_tariff_config_price(
         raise HTTPException(status_code=404, detail="Тариф не найден")
     price = int(calculate_config_price(tariff, selected_device_limit, selected_traffic_gb))
     return TariffConfigPriceResponse(price_rub=price)
+
+
+@public_router.post("/purchase-by-email", response_model=TariffPurchaseResponse)
+async def purchase_tariff_by_email(
+    body: TariffPurchaseByEmailRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Guest tariff purchase keyed by email — no session required.
+
+    The buyer identity is resolved (or created) from ``body.email`` instead of
+    a cookie, then the flow is identical to ``purchase_tariff_with_balance``.
+    A purchase is refused when the user already owns a live paid subscription
+    (``already_active`` / frozen). Trial keys never block.
+
+    IMPORTANT: the create path below is a verbatim copy of
+    ``purchase_tariff_with_balance`` (the ``preview`` branch removed). If the
+    purchase pricing/metadata logic there changes, update it here too.
+    """
+    # --- per-IP rate limit: mirrors register (auth/password.py), distinct key ---
+    ip = _client_ip(request)
+    try:
+        from api.v2.routes.auth._fallback_limiter import check_and_increment
+        from core.redis_cache import cache_incr_checked
+
+        count, redis_ok = await cache_incr_checked(f"purchase_email_rate:{ip}", 3600)
+        if not redis_ok:
+            count = check_and_increment(f"purchase_email_rate:{ip}", 5, 3600)
+        if count > 5:
+            raise HTTPException(status_code=429, detail="Слишком много попыток с этого IP. Попробуйте позже.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    if turnstile_enabled():
+        if not await verify_turnstile_token(body.turnstile_token, ip):
+            raise HTTPException(status_code=400, detail="Проверка CAPTCHA не пройдена")
+
+    email = body.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email обязателен")
+    if is_disposable_email(email):
+        raise HTTPException(status_code=400, detail="Одноразовые email-адреса не поддерживаются")
+
+    # Resolve the buyer: existing identity, or a fresh passwordless one. The
+    # unique ``identities.email`` constraint turns a concurrent double-create
+    # into an IntegrityError, which we recover from by re-fetching.
+    identity = await idb.get_identity_by_email(session, email)
+    if identity is None:
+        try:
+            async with session.begin_nested():
+                identity = await idb.create_identity(session, email=email)
+        except IntegrityError:
+            identity = await idb.get_identity_by_email(session, email)
+            if identity is None:
+                raise HTTPException(status_code=409, detail="Не удалось создать аккаунт, попробуйте ещё раз") from None
+    tg_id = await idb.ensure_billing_user_for_identity(session, identity)
+
+    blocking = await get_blocking_paid_subscription_state(session, int(tg_id))
+    if blocking == "active":
+        return TariffPurchaseResponse(
+            ok=True,
+            message="У вас уже есть активная подписка на этой почте.",
+            subscription_state="active",
+        )
+    if blocking == "frozen":
+        return TariffPurchaseResponse(
+            ok=True,
+            message="На этой почте есть замороженная подписка. Разморозьте её в личном кабинете.",
+            subscription_state="frozen",
+        )
+
+    # ===== verbatim copy of purchase_tariff_with_balance:223-370 (no preview) =====
+    tariff = await get_tariff_by_id(session, body.tariff_id)
+    if not tariff or not tariff.get("is_active", True):
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    tariff_group_code = (tariff.get("group_code") or "").strip()
+    if not tariff_group_code:
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    tariff_is_purchasable = await session.scalar(
+        select(Server.id)
+        .where(Server.tariff_group == tariff_group_code, Server.enabled.is_(True))
+        .limit(1)
+    )
+    if not tariff_is_purchasable:
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    if not await is_tariff_visible_for(session, int(tg_id), tariff):
+        raise HTTPException(status_code=404, detail="Тариф недоступен")
+    cooldown_left = await get_tariff_cooldown_remaining(
+        session, int(tg_id), int(body.tariff_id), int(tariff.get("cooldown_days") or 0)
+    )
+    if cooldown_left > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=TARIFF_COOLDOWN_MESSAGE.format(
+                days=int(tariff.get("cooldown_days") or 0),
+                left=format_cooldown_left(cooldown_left),
+            ),
+        )
+    price = int(calculate_config_price(tariff, body.selected_device_limit, body.selected_traffic_gb))
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="Некорректная цена тарифа")
+    final_price, discount_rub, coupon_id, applied_coupon_code = await resolve_percent_coupon_pricing(
+        session=session,
+        billing_user_id=int(tg_id),
+        base_price_rub=int(price),
+        coupon_code=body.coupon_code,
+    )
+    balance = float(await get_balance(session, tg_id))
+    duration = int(tariff.get("duration_days") or 0)
+    if duration <= 0:
+        raise HTTPException(status_code=400, detail="Некорректная длительность тарифа")
+    required_amount = int(max(0, ceil(float(final_price) - balance)))
+    if required_amount > 0:
+        provider_id = str(body.provider_id or _resolve_default_web_payment_provider() or "").strip().upper()
+        if not provider_id:
+            raise HTTPException(status_code=503, detail="Нет доступных провайдеров оплаты")
+        base_url = _resolve_public_base_url(request)
+        success_url = validate_redirect_url(str(body.success_url or ""), f"{base_url}/payment-success")
+        failure_url = validate_redirect_url(str(body.failure_url or ""), f"{base_url}/payment-failure")
+        payment_request = PaymentLinkRequest(
+            legacy_user_ref=int(tg_id),
+            amount=required_amount,
+            currency="RUB",
+            provider_id=provider_id,
+            success_url=success_url,
+            failure_url=failure_url,
+            metadata={
+                "payment_flow": "tariff_purchase",
+                "tariff_id": int(body.tariff_id),
+                "selected_device_limit": body.selected_device_limit,
+                "selected_traffic_gb": body.selected_traffic_gb,
+                "selected_duration_days": int(duration),
+                "selected_price_rub": int(final_price),
+                "base_price_rub": int(price),
+                "discount_rub": int(discount_rub),
+                "applied_coupon_code": applied_coupon_code,
+                "coupon_id": int(coupon_id) if coupon_id is not None else None,
+            },
+        )
+        payment_result = await create_payment_link(session, payment_request)
+        if not payment_result.success or not payment_result.payment_url or not payment_result.payment_id:
+            raise HTTPException(status_code=400, detail=payment_result.error or "Не удалось создать ссылку оплаты")
+        await create_temporary_data(
+            session,
+            int(tg_id),
+            "waiting_for_payment",
+            {
+                "tariff_id": int(body.tariff_id),
+                "required_amount": int(required_amount),
+                "selected_price_rub": int(final_price),
+                "selected_device_limit": body.selected_device_limit,
+                "selected_traffic_limit_gb": body.selected_traffic_gb,
+                "selected_duration_days": int(duration),
+                "base_price_rub": int(price),
+                "discount_rub": int(discount_rub),
+                "applied_coupon_code": applied_coupon_code,
+                "coupon_id": int(coupon_id) if coupon_id is not None else None,
+            },
+        )
+        logger.info(
+            f"[PurchaseByEmail] returning payment_id={payment_result.payment_id} "
+            f"to user_id={tg_id} provider={provider_id} amount={required_amount}"
+        )
+        return TariffPurchaseResponse(
+            ok=True,
+            message="Требуется оплата для оформления подписки",
+            key_email=None,
+            charged_rub=0,
+            base_price_rub=int(price),
+            discount_rub=int(discount_rub),
+            final_price_rub=int(final_price),
+            applied_coupon_code=applied_coupon_code,
+            payment_required=True,
+            required_amount_rub=required_amount,
+            payment_id=payment_result.payment_id,
+            payment_url=payment_result.payment_url,
+        )
+    moscow_tz = tz_moscow("Europe/Moscow")
+    expiry = datetime.now(moscow_tz) + timedelta(days=duration)
+    try:
+        await create_vpn_key_headless(
+            session=session,
+            tg_id=tg_id,
+            expiry_time=expiry,
+            plan=body.tariff_id,
+            selected_device_limit=body.selected_device_limit,
+            selected_traffic_gb=body.selected_traffic_gb,
+            selected_price_rub=final_price,
+        )
+        if coupon_id is not None:
+            await mark_coupon_used(session, int(coupon_id), int(tg_id))
+    except Exception:
+        logger.exception("web tariff purchase-by-email failed")
+        raise HTTPException(status_code=500, detail="Не удалось оформить подписку") from None
+    return TariffPurchaseResponse(
+        ok=True,
+        message="Подписка оформлена. Ключ в разделе «Мои ключи».",
+        key_email=None,
+        charged_rub=final_price,
+        base_price_rub=int(price),
+        discount_rub=int(discount_rub),
+        final_price_rub=int(final_price),
+        applied_coupon_code=applied_coupon_code,
+    )
 
 
 user_tariff_router = APIRouter()
