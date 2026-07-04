@@ -214,6 +214,13 @@ async def get_tariff_config_price(
     return TariffConfigPriceResponse(price_rub=price)
 
 
+# Guest purchase creates identities + payment links, so it needs abuse
+# throttling. Unlike register (5/h — a person registers rarely), buyers share
+# IPs behind CGNAT / public Wi-Fi, so a low per-IP ceiling would reject
+# legitimate customers; the limit here is deliberately higher.
+_PURCHASE_EMAIL_RATE_PER_HOUR = 30
+
+
 @public_router.post("/purchase-by-email", response_model=TariffPurchaseResponse)
 async def purchase_tariff_by_email(
     body: TariffPurchaseByEmailRequest,
@@ -239,8 +246,8 @@ async def purchase_tariff_by_email(
 
         count, redis_ok = await cache_incr_checked(f"purchase_email_rate:{ip}", 3600)
         if not redis_ok:
-            count = check_and_increment(f"purchase_email_rate:{ip}", 5, 3600)
-        if count > 5:
+            count = check_and_increment(f"purchase_email_rate:{ip}", _PURCHASE_EMAIL_RATE_PER_HOUR, 3600)
+        if count > _PURCHASE_EMAIL_RATE_PER_HOUR:
             raise HTTPException(status_code=429, detail="Слишком много попыток с этого IP. Попробуйте позже.")
     except HTTPException:
         raise
