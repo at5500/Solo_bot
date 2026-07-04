@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_token
+from api.v2.routes.auth._common import _client_ip
 from api.v2.schemas.payment_links import PaymentLinkCreateRequest, PaymentLinkCreateResponse, PaymentLinkStatusResponse
 from config import REDIS_URL
 from database import (
@@ -294,6 +295,71 @@ async def get_link_status(
                 status = "cancelled"
         except Exception as e:
             logger.warning(f"[PaymentLinks] Сверка платежа {payment_id} с провайдером не удалась: {e}")
+    return PaymentLinkStatusResponse(
+        success=True,
+        payment_id=payment_id,
+        status=status,
+        completed=status in {"success", "failed", "cancelled"},
+        paid=status == "success",
+    )
+
+
+# Poll cadence on the result screen is ~3s, so a legitimate payer emits many
+# requests over the payment window; the ceiling only backstops abuse.
+_PUBLIC_STATUS_RATE_PER_MIN = 600
+
+
+@router.get("/public/{payment_id}", response_model=PaymentLinkStatusResponse)
+async def get_link_status_public(
+    payment_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Public payment status by id — no session required.
+
+    Used by the guest email-purchase flow to poll its own payment (the buyer
+    has no session cookie). Mirrors ``get_link_status`` but WITHOUT the owner
+    check — there is no identity to compare against — so the response must stay
+    free of any PII (only status flags). Rate-limited per IP.
+
+    @param payment_id: Server-issued id from the purchase response.
+    @return: Payment status flags (status / completed / paid).
+    """
+    ip = _client_ip(request)
+    try:
+        from api.v2.routes.auth._fallback_limiter import check_and_increment
+        from core.redis_cache import cache_incr_checked
+
+        count, redis_ok = await cache_incr_checked(f"payment_status_public_rate:{ip}", 60)
+        if not redis_ok:
+            count = check_and_increment(f"payment_status_public_rate:{ip}", _PUBLIC_STATUS_RATE_PER_MIN, 60)
+        if count > _PUBLIC_STATUS_RATE_PER_MIN:
+            raise HTTPException(status_code=429, detail="Слишком много запросов. Попробуйте позже.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    payment = await get_payment_from_db_by_payment_id(session, payment_id)
+    if payment is None:
+        payment = await get_payment_by_payment_id(session, payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    status = str(payment.get("status") or "").lower() or None
+    if status not in {"success", "failed", "cancelled"} and not _payment_link_expired(payment.get("created_at")):
+        from services.payments.reconcile import reconcile_pending_payment
+
+        try:
+            outcome = await reconcile_pending_payment(payment)
+            if outcome == "success":
+                status = "success"
+            elif outcome == "canceled":
+                internal_id = payment.get("id")
+                if internal_id is not None:
+                    await update_payment_status(session, int(internal_id), "cancelled")
+                status = "cancelled"
+        except Exception as e:
+            logger.warning(f"[PaymentLinks] Публичная сверка платежа {payment_id} не удалась: {e}")
     return PaymentLinkStatusResponse(
         success=True,
         payment_id=payment_id,
