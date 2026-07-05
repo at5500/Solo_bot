@@ -50,10 +50,23 @@ def build_all_keys_kb(rows, page: int, total_pages: int) -> InlineKeyboardMarkup
         if r.tg_id is None:
             continue
         days = (datetime.fromtimestamp(r.expiry_time / 1000, tz=timezone.utc) - now).days
+        days_txt = "<1" if days < 1 else str(days)
         frozen = "❄️ " if r.is_frozen else ""
+
+        # Identify the subscription: account email (or key email) · name · tg_id.
+        parts: list[str] = []
+        email = r.account_email or r.email
+        if email:
+            parts.append(email)
+        if r.username:
+            parts.append(f"@{r.username}")
+        elif r.first_name:
+            parts.append(r.first_name)
+        parts.append(f"id{r.tg_id}")
+
         builder.row(
             InlineKeyboardButton(
-                text=f"🔑 {frozen}{r.email} ({'<1' if days < 1 else days} дн.)",
+                text=f"🔑 {frozen}{' · '.join(parts)} · {days_txt}д",
                 callback_data=AdminUserEditorCallback(
                     action="users_key_edit",
                     tg_id=r.tg_id,

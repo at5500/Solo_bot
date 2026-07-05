@@ -13,7 +13,7 @@ from core.cache_config import (
 )
 from core.redis_cache import cache_delete, cache_get, cache_key, cache_set
 from database.access.resolution import resolve_user_optional
-from database.models import Key, Tariff, User
+from database.models import Identity, Key, Tariff, User
 from database.users import invalidate_profile_cache, invalidate_user_snapshot
 from logger import logger
 
@@ -205,12 +205,25 @@ async def get_keys_page(session: AsyncSession, *, limit: int, offset: int):
 
     @param limit: Page size.
     @param offset: Rows to skip.
-    @return: Rows of (email, client_id, expiry_time, is_frozen, tg_id) where
-        ``tg_id`` is the owner ``User.tg_id`` — needed to open the key editor.
+    @return: Rows of (client_id, email, expiry_time, is_frozen, tg_id, username,
+        first_name, account_email) — enough to identify whose subscription it
+        is. ``tg_id`` is the owner ``User.tg_id`` (needed to open the editor);
+        ``account_email`` is the linked ``Identity.email`` (the web-account
+        email), ``email`` is the key's own email.
     """
     stmt = (
-        select(Key.email, Key.client_id, Key.expiry_time, Key.is_frozen, User.tg_id)
+        select(
+            Key.client_id,
+            Key.email,
+            Key.expiry_time,
+            Key.is_frozen,
+            User.tg_id,
+            User.username,
+            User.first_name,
+            Identity.email.label("account_email"),
+        )
         .join(User, Key.user_id == User.id)
+        .outerjoin(Identity, User.identity_id == Identity.id)
         .order_by(Key.expiry_time.desc().nulls_last())
         .offset(offset)
         .limit(limit)
