@@ -203,7 +203,7 @@ async def handle_admin_unfreeze_subscription(
         leftover = record["expiry_time"]
         if leftover < 0:
             leftover = 0
-        new_expiry_time = now_ms + leftover
+        new_expiry_time = leftover if leftover > now_ms else now_ms + leftover
 
         await mark_key_as_unfrozen(session, record["tg_id"], client_id, new_expiry_time)
         session.expire_all()

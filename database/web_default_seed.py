@@ -1,4 +1,5 @@
 import json
+
 from pathlib import Path
 
 from sqlalchemy import delete, func, select, update
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models.admin import Setting
 from database.models.web import WebFlow, WebPage, WebPageVariant, WebPageVariantBlock
+
 
 DEFAULT_VARIANT_KEY = "default"
 DEFAULT_VARIANT_NAME = "Основной"
@@ -80,6 +82,33 @@ def _apply_runtime_links(theme_tokens: dict) -> dict:
     return theme_tokens
 
 
+def _apply_support_links_to_pages(pages: dict) -> None:
+    try:
+        from config import SUPPORT_CHAT_URL, USERNAME_BOT
+    except Exception:
+        return
+    bot_url = f"https://t.me/{USERNAME_BOT}" if USERNAME_BOT else ""
+    support_url = SUPPORT_CHAT_URL or bot_url
+    if not support_url:
+        return
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if obj.get("telegramUsername") == "solonet_sup":
+                obj["telegramUsername"] = None
+                obj["linkType"] = "url"
+                obj["href"] = support_url
+            if obj.get("href") == "https://t.me/solonet_sup":
+                obj["href"] = support_url
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(pages)
+
+
 async def seed_default_site(session: AsyncSession, force: bool = False) -> bool:
     """Засевает дефолтный сайт. По умолчанию (force=False) — только в пустую БД
     (идемпотентно). При force=True перезаписывает страницы дефолта (кнопка
@@ -107,13 +136,12 @@ async def _apply_site(
     page_themes[slug] (если задан) переопределяет тему конкретной страницы — нужно
     для захваченных наборов, где у кабинета свои page-scoped токены."""
     page_themes = page_themes or {}
+    _apply_support_links_to_pages(pages)
     seeded = False
     for slug, blocks in pages.items():
         page_theme = page_themes.get(slug)
         page_theme_tokens = dict(page_theme) if isinstance(page_theme, dict) else dict(theme_tokens)
-        page = (
-            await session.execute(select(WebPage).where(WebPage.slug == slug))
-        ).scalar_one_or_none()
+        page = (await session.execute(select(WebPage).where(WebPage.slug == slug))).scalar_one_or_none()
         if page is None:
             session.add(WebPage(slug=slug, title=slug))
             await session.flush()
@@ -140,11 +168,7 @@ async def _apply_site(
             variant.is_active = True
             variant.theme_tokens = dict(page_theme_tokens)
             if force:
-                await session.execute(
-                    delete(WebPageVariantBlock).where(
-                        WebPageVariantBlock.variant_id == variant.id
-                    )
-                )
+                await session.execute(delete(WebPageVariantBlock).where(WebPageVariantBlock.variant_id == variant.id))
 
         if force:
             await session.execute(
@@ -179,9 +203,7 @@ async def _apply_site(
         entry = flow.get("entry_node_id")
         existing = await session.get(WebFlow, fid)
         if existing is None:
-            session.add(
-                WebFlow(id=fid, name=name, nodes=nodes, edges=edges, entry_node_id=entry, version=1)
-            )
+            session.add(WebFlow(id=fid, name=name, nodes=nodes, edges=edges, entry_node_id=entry, version=1))
             seeded = True
         elif force:
             existing.name = name
@@ -218,26 +240,34 @@ async def capture_current_site(session: AsyncSession) -> dict:
         if page.slug == "landing":
             global_theme = tokens
         blocks = (
-            await session.execute(
-                select(WebPageVariantBlock)
-                .where(WebPageVariantBlock.variant_id == variant.id)
-                .order_by(WebPageVariantBlock.order.asc())
+            (
+                await session.execute(
+                    select(WebPageVariantBlock)
+                    .where(WebPageVariantBlock.variant_id == variant.id)
+                    .order_by(WebPageVariantBlock.order.asc())
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         out[page.slug] = [{"type": b.type, "data": dict(b.data or {})} for b in blocks]
     out["_theme"] = global_theme or (next(iter(page_themes.values()), {}) if page_themes else {})
     out["_page_themes"] = page_themes
     flows = (await session.execute(select(WebFlow))).scalars().all()
     out["_flows"] = [
-        {"id": f.id, "name": f.name, "nodes": list(f.nodes or []), "edges": list(f.edges or []), "entry_node_id": f.entry_node_id}
+        {
+            "id": f.id,
+            "name": f.name,
+            "nodes": list(f.nodes or []),
+            "edges": list(f.edges or []),
+            "entry_node_id": f.entry_node_id,
+        }
         for f in flows
     ]
     return out
 
 
-async def store_pack_design(
-    session: AsyncSession, pack_id: str, site: dict, meta: dict | None = None
-) -> None:
+async def store_pack_design(session: AsyncSession, pack_id: str, site: dict, meta: dict | None = None) -> None:
     payload = dict(site)
     if meta is not None:
         payload["_meta"] = meta
@@ -269,7 +299,7 @@ async def list_custom_pack_designs(session: AsyncSession, builtin_ids: set[str])
     ).all()
     out: list[dict] = []
     for key, value in rows:
-        pack_id = str(key)[len(PACK_DESIGN_SETTING_PREFIX):]
+        pack_id = str(key)[len(PACK_DESIGN_SETTING_PREFIX) :]
         if not pack_id or pack_id in builtin_ids:
             continue
         meta = value.get("_meta") if isinstance(value, dict) else None

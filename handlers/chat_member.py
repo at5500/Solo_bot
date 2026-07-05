@@ -5,6 +5,7 @@ from core.cache_config import BLOCKED_EVENTS_REDIS_KEY
 from core.redis_cache import cache_rpush
 from logger import logger
 
+
 router = Router(name="chat_member_router")
 
 

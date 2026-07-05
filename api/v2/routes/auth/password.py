@@ -23,6 +23,7 @@ from database import (
     add_referral,
     get_referral_by_referred_id,
     identities as idb,
+    identity_sessions as idsess,
 )
 from database.access.resolution import resolve_user_optional
 from logger import logger
@@ -469,6 +470,7 @@ async def confirm_password_reset(
         raise HTTPException(status_code=400, detail="Не удалось обновить пароль")
     await bind_identity_actor(request, session, updated)
     token = await idb.issue_token_for_identity(session, updated, request=request)
+    await idsess.delete_other_sessions(session, identity_id=updated.id, keep_token_hash=idb.hash_token(token))
     set_auth_cookie(response, token, request)
     set_is_admin_cookie(response, updated, request)
     return build_login_response(updated)

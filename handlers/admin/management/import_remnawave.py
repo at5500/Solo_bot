@@ -169,7 +169,7 @@ def actualize_remnawave_key(key: Key, user: dict) -> list[str]:
         changes.append("устройства")
 
     traffic_bytes = user.get("trafficLimitBytes")
-    if isinstance(traffic_bytes, (int, float)):
+    if isinstance(traffic_bytes, int | float):
         traffic_gb = int(traffic_bytes) // (1024**3)
         if key.current_traffic_limit != traffic_gb:
             key.current_traffic_limit = traffic_gb
@@ -195,9 +195,7 @@ async def import_remnawave_keys(session: AsyncSession, users: list[dict], server
             logger.warning(f"[SKIP] Пропущен клиент: tg_id={tg_id}, client_id={client_id}")
             continue
 
-        existing = (
-            await session.execute(select(Key).where(Key.client_id == client_id))
-        ).scalar_one_or_none()
+        existing = (await session.execute(select(Key).where(Key.client_id == client_id))).scalar_one_or_none()
 
         if existing is not None:
             changes = actualize_remnawave_key(existing, user)

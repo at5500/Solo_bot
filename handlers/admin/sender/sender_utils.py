@@ -134,16 +134,9 @@ async def get_recipients(
 
     elif send_to == "no_email":
         has_email = exists(
-            select(1)
-            .select_from(Identity)
-            .where(and_(Identity.tg_id == User.tg_id, Identity.email.isnot(None)))
+            select(1).select_from(Identity).where(and_(Identity.tg_id == User.tg_id, Identity.email.isnot(None)))
         )
-        query = (
-            select(distinct(User.tg_id))
-            .where(not_(has_email))
-            .where(*tg_filters)
-            .where(_not_banned(User.id))
-        )
+        query = select(distinct(User.tg_id)).where(not_(has_email)).where(*tg_filters).where(_not_banned(User.id))
 
     else:
         query = select(distinct(User.tg_id)).where(*tg_filters).where(_not_banned(User.id))

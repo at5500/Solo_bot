@@ -33,9 +33,7 @@ def _build_category_kb(node_id: str, show_subs: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if show_subs:
         builder.row(InlineKeyboardButton(text=MY_SUBS, callback_data="view_keys"))
-    builder.row(
-        InlineKeyboardButton(text=NOT_HELPED, callback_data=TriageCallback(action="fail", node=node_id).pack())
-    )
+    builder.row(InlineKeyboardButton(text=NOT_HELPED, callback_data=TriageCallback(action="fail", node=node_id).pack()))
     builder.row(InlineKeyboardButton(text=BACK, callback_data=TriageCallback(action="root").pack()))
     return builder.as_markup()
 

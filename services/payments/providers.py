@@ -140,6 +140,19 @@ TELEGRAM_ONLY_PROVIDER_IDS = (
     "STARS",
 )
 
+_MODULE_WEB_LINK_PROVIDER_IDS: list[str] = []
+
+
+def register_web_link_provider(provider_id: str) -> None:
+    key = (provider_id or "").strip().upper()
+    if not key or key in WEB_LINK_PROVIDER_IDS or key in _MODULE_WEB_LINK_PROVIDER_IDS:
+        return
+    _MODULE_WEB_LINK_PROVIDER_IDS.append(key)
+
+
+def get_web_link_provider_ids() -> tuple[str, ...]:
+    return tuple(WEB_LINK_PROVIDER_IDS) + tuple(_MODULE_WEB_LINK_PROVIDER_IDS)
+
 
 def _get_effective_order(name: str, cfg: dict[str, Any]) -> int:
     """Возвращает эффективный порядок провайдера (админ > модуль > дефолт)."""

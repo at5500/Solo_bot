@@ -26,6 +26,4 @@ class IdentityNotifPref(DictLikeMixin, Base):
     enabled = Column(Boolean, nullable=False, default=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    __table_args__ = (
-        PrimaryKeyConstraint("identity_id", "channel"),
-    )
+    __table_args__ = (PrimaryKeyConstraint("identity_id", "channel"),)

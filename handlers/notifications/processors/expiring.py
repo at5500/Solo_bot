@@ -12,7 +12,11 @@ from config import EXECUTOR_POOL_SIZE
 from database import add_notification, check_notification_time_bulk, check_notifications_bulk
 from database.web_notifications import notify_web
 from handlers.notifications.context import NotificationContext
-from handlers.notifications.keyboards import build_change_tariff_kb, build_notification_expired_kb, build_notification_kb
+from handlers.notifications.keyboards import (
+    build_change_tariff_kb,
+    build_notification_expired_kb,
+    build_notification_kb,
+)
 from handlers.notifications.renewal import RenewalResult, RenewalStatus, try_auto_renew
 from handlers.notifications.sender import (
     NotificationRateLimiter,
@@ -25,6 +29,7 @@ from handlers.utils import get_russian_month
 from logger import logger
 from middlewares.session import wrap_session
 from services.tariffs.tariff_display import GB, get_effective_limits_for_key
+
 
 moscow_tz = pytz.timezone("Europe/Moscow")
 
@@ -54,9 +59,7 @@ async def process_expiring_keys(
     allowed_set = {(u["tg_id"], u["email"]) for u in allowed}
 
     notify_pairs = [
-        (k.tg_id, f"{(k.email or '')}_{notify_type}")
-        for k in expiring_keys
-        if (k.tg_id, k.email or "") in allowed_set
+        (k.tg_id, f"{(k.email or '')}_{notify_type}") for k in expiring_keys if (k.tg_id, k.email or "") in allowed_set
     ]
     can_notify_set = await check_notification_time_bulk(ctx.session, notify_pairs, max_hours)
 
@@ -134,7 +137,6 @@ async def _process_renew_candidates(
 
         key, notification_id, renewal_result = item
         tg_id = key.tg_id
-        email = key.email or ""
 
         await rate_limiter.acquire()
 
@@ -172,7 +174,9 @@ async def _send_simple_warnings(ctx: NotificationContext, items: list[tuple], ph
         })
 
         try:
-            await notify_web(ctx.session, tg_id=tg_id, type="key_expiry", template_vars={"email": email}, data={"email": email})
+            await notify_web(
+                ctx.session, tg_id=tg_id, type="key_expiry", template_vars={"email": email}, data={"email": email}
+            )
         except Exception as e:
             logger.warning(f"[Notifications] web-уведомление key_expiry tg_id={tg_id}: {e}")
 

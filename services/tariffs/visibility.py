@@ -7,6 +7,7 @@ from core.constants import PAYMENT_SYSTEMS_EXCLUDED
 from database.access.resolution import resolve_user_optional
 from database.models import Key, Payment
 
+
 PREDICATE_LABELS = {
     "has_active": "есть активная подписка",
     "hot_lead": "горячий лид",

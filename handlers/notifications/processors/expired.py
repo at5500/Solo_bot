@@ -4,7 +4,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy import exists, or_, select
 
-from database import add_notification, check_notifications_bulk, delete_key, delete_notification, get_last_notification_times_bulk
+from database import (
+    add_notification,
+    check_notifications_bulk,
+    delete_key,
+    delete_notification,
+    get_last_notification_times_bulk,
+)
 from database.models import Key
 from database.models.users import BlockedUser, ManualBan
 from handlers.notifications.context import NotificationContext
@@ -178,20 +184,17 @@ async def process_expired_keys(
 
 
 async def _get_blocked_expired_keys(session, current_time: int) -> list:
-    stmt = (
-        select(Key)
-        .where(
-            Key.is_frozen.is_(False),
-            Key.expiry_time.isnot(None),
-            Key.expiry_time < current_time,
-            or_(
-                exists().where(BlockedUser.tg_id == Key.tg_id),
-                exists().where(
-                    ManualBan.tg_id == Key.tg_id,
-                    or_(ManualBan.until.is_(None), ManualBan.until > datetime.now(timezone.utc)),
-                ),
+    stmt = select(Key).where(
+        Key.is_frozen.is_(False),
+        Key.expiry_time.isnot(None),
+        Key.expiry_time < current_time,
+        or_(
+            exists().where(BlockedUser.tg_id == Key.tg_id),
+            exists().where(
+                ManualBan.tg_id == Key.tg_id,
+                or_(ManualBan.until.is_(None), ManualBan.until > datetime.now(timezone.utc)),
             ),
-        )
+        ),
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())

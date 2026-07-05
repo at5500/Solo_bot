@@ -16,7 +16,8 @@ from database import delete_user_data
 from database.access.resolution import resolve_user_optional
 from database.models import BlockedUser, Key, ManualBan, User
 from database.users import add_user
-from filters.admin import IsAdminFilter
+from filters.admin import HasPermission, IsAdminFilter
+from filters.permissions import PERM_MANAGEMENT
 from logger import logger
 from middlewares.ban_checker import invalidate_ban_cache
 
@@ -27,9 +28,6 @@ from .keyboard import (
     build_manual_bans_kb,
     build_shadow_bans_kb,
 )
-
-from filters.admin import HasPermission
-from filters.permissions import PERM_MANAGEMENT
 
 
 router = Router()

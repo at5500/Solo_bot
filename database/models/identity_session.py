@@ -34,6 +34,4 @@ class IdentitySession(DictLikeMixin, Base):
     last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     expires_at = Column(DateTime, nullable=True)
 
-    __table_args__ = (
-        Index("ix_identity_sessions_identity_last_seen", "identity_id", "last_seen_at"),
-    )
+    __table_args__ = (Index("ix_identity_sessions_identity_last_seen", "identity_id", "last_seen_at"),)

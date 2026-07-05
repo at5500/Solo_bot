@@ -31,6 +31,7 @@ router = APIRouter()
 def _get_oidc_credentials() -> tuple[str, str]:
     try:
         from config import TELEGRAM_CLIENT_ID, TELEGRAM_CLIENT_SECRET
+
         cid = str(TELEGRAM_CLIENT_ID).strip()
         secret = str(TELEGRAM_CLIENT_SECRET).strip()
         if cid and secret:
@@ -209,6 +210,7 @@ async def login_telegram_oidc(
 
     if getattr(identity, "is_admin", False):
         from database.site_state import mark_site_initialized
+
         await mark_site_initialized(session)
 
     logger.info(

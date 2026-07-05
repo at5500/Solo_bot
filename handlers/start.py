@@ -234,7 +234,7 @@ _CABINET_TABS = {"profile", "keys", "instructions", "referrals", "partners", "gi
 async def handle_cabinet_tab_link(message, tab):
     if tab not in _CABINET_TABS:
         return False
-    from core.settings.web_config import get_site_url, is_web_enabled
+    from core.settings.web_config import get_site_url, is_web_enabled, is_web_open_in_browser
 
     if not is_web_enabled():
         return False
@@ -242,12 +242,14 @@ async def handle_cabinet_tab_link(message, tab):
     if not site_url:
         return False
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
+    if is_web_open_in_browser():
+        button = InlineKeyboardButton(text="🌐 Личный кабинет", url=f"{site_url}/dashboard?tab={tab}")
+    else:
+        button = InlineKeyboardButton(
             text="🌐 Личный кабинет",
             web_app=WebAppInfo(url=f"{site_url}/dashboard?tab={tab}&webapp=1"),
         )
-    )
+    builder.row(button)
     await message.answer(WELCOME_TEXT, reply_markup=builder.as_markup())
     return True
 

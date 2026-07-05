@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 import qrcode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session, verify_identity_token
@@ -18,8 +19,6 @@ from api.v2.schemas.web_public import (
     ReferralTopEntryResponse,
     ReferralTopResponse,
 )
-from sqlalchemy import select
-from database.models import Referral
 from config import (
     CHECK_REFERRAL_REWARD_ISSUED,
     REFERRAL_BONUS_PERCENTAGES,
@@ -35,6 +34,7 @@ from database import (
     identities as idb,
 )
 from database.access.resolution import resolve_user_optional
+from database.models import Referral
 from database.referrals import get_referral_position, get_top_referrals
 from utils.referral_codes import decode_referral_code, encode_referral_code
 
@@ -168,11 +168,7 @@ async def referral_list(
     if not bool(BUTTONS_CONFIG.get("REFERRAL_BUTTON_ENABLED", REFERRAL_BUTTON)):
         raise HTTPException(status_code=403, detail="Реферальная программа отключена")
     billing_uid = await idb.ensure_billing_user_for_identity(session, identity)
-    rows_stmt = (
-        select(Referral)
-        .where(Referral.referrer_user_id == int(billing_uid))
-        .limit(limit)
-    )
+    rows_stmt = select(Referral).where(Referral.referrer_user_id == int(billing_uid)).limit(limit)
     result = await session.execute(rows_stmt)
     rows = result.scalars().all()
     items = [

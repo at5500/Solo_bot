@@ -7,6 +7,7 @@ from sqlalchemy import String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import (
+    AUTH_COOKIE_NAME,
     bind_identity_actor,
     clear_auth_cookie,
     get_request_actor,
@@ -14,7 +15,6 @@ from api.depends import (
     hash_token,
     verify_identity_token,
 )
-from api.depends import AUTH_COOKIE_NAME
 from api.v2.routes.auth._common import _resolve_partner_snapshot
 from api.v2.schemas.identities import (
     ChangePasswordRequest,
@@ -93,9 +93,7 @@ async def revoke_my_session(
     identity=Depends(verify_identity_token),
 ):
     """Удаляет одну сессию текущей identity. Если удалена текущая — очищаем cookie."""
-    ok = await idsess.delete_session_by_id(
-        session, session_id=session_id, identity_id=identity.id
-    )
+    ok = await idsess.delete_session_by_id(session, session_id=session_id, identity_id=identity.id)
     if not ok:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     current_hash = _current_token_hash(request)
@@ -115,9 +113,7 @@ async def revoke_other_sessions(
     current_hash = _current_token_hash(request)
     if not current_hash:
         raise HTTPException(status_code=400, detail="Текущая сессия не определена")
-    removed = await idsess.delete_other_sessions(
-        session, identity_id=identity.id, keep_token_hash=current_hash
-    )
+    removed = await idsess.delete_other_sessions(session, identity_id=identity.id, keep_token_hash=current_hash)
     return {"ok": True, "removed": removed}
 
 
@@ -198,6 +194,7 @@ async def auth_summary(
         except Exception as exc:
             logger.warning("[auth_summary] billing_user_id не определён: {}", exc)
             billing_user_id = None
+
     async def _safe(factory, default):
         try:
             async with session.begin_nested():
@@ -283,10 +280,7 @@ async def my_payments(
         return MyPaymentsResponse(ok=True, payments=[])
     safe_limit = max(1, min(200, int(limit) if limit else 50))
     rows = await session.execute(
-        select(Payment)
-        .where(Payment.user_id == billing_user_id)
-        .order_by(Payment.created_at.desc())
-        .limit(safe_limit)
+        select(Payment).where(Payment.user_id == billing_user_id).order_by(Payment.created_at.desc()).limit(safe_limit)
     )
     payments = rows.scalars().all()
     dated: list[tuple] = []
@@ -312,10 +306,7 @@ async def my_payments(
         ))
 
     gift_rows = await session.execute(
-        select(Gift)
-        .where(Gift.sender_user_id == billing_user_id)
-        .order_by(Gift.created_at.desc())
-        .limit(safe_limit)
+        select(Gift).where(Gift.sender_user_id == billing_user_id).order_by(Gift.created_at.desc()).limit(safe_limit)
     )
     for g in gift_rows.scalars().all():
         try:
@@ -344,11 +335,7 @@ async def my_payments(
 def _esc(value: object) -> str:
     s = "" if value is None else str(value)
     return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
     )
 
 
@@ -384,7 +371,13 @@ async def get_my_payment_invoice(
     currency = str(payment.currency or "RUB").upper()
     status_raw = str(payment.status or "")
     status_norm = status_raw.lower()
-    status_label = "ОПЛАЧЕН" if status_norm in {"completed", "success", "paid"} else "ОЖИДАЕТ" if status_norm in {"pending", "processing"} else "ОТКЛОНЁН"
+    status_label = (
+        "ОПЛАЧЕН"
+        if status_norm in {"completed", "success", "paid"}
+        else "ОЖИДАЕТ"
+        if status_norm in {"pending", "processing"}
+        else "ОТКЛОНЁН"
+    )
     provider = str(payment.payment_system or "").upper() or "—"
     user_label = identity.email or (f"tg · {identity.tg_id}" if identity.tg_id else identity.id)
     payment_identifier = str(payment.payment_id).strip() if payment.payment_id else ""
@@ -452,10 +445,10 @@ async def get_my_notification_prefs(
     identity=Depends(verify_identity_token),
 ):
     rows = (
-        await session.execute(
-            select(IdentityNotifPref).where(IdentityNotifPref.identity_id == identity.id)
-        )
-    ).scalars().all()
+        (await session.execute(select(IdentityNotifPref).where(IdentityNotifPref.identity_id == identity.id)))
+        .scalars()
+        .all()
+    )
     return NotifChannelPrefsResponse(
         ok=True,
         channels=[NotifChannelPref(channel=str(r.channel), enabled=bool(r.enabled)) for r in rows],
@@ -481,17 +474,15 @@ async def set_my_notification_prefs(
             )
         ).scalar_one_or_none()
         if existing is None:
-            session.add(
-                IdentityNotifPref(identity_id=identity.id, channel=channel, enabled=bool(entry.enabled))
-            )
+            session.add(IdentityNotifPref(identity_id=identity.id, channel=channel, enabled=bool(entry.enabled)))
         else:
             existing.enabled = bool(entry.enabled)
     await session.flush()
     rows = (
-        await session.execute(
-            select(IdentityNotifPref).where(IdentityNotifPref.identity_id == identity.id)
-        )
-    ).scalars().all()
+        (await session.execute(select(IdentityNotifPref).where(IdentityNotifPref.identity_id == identity.id)))
+        .scalars()
+        .all()
+    )
     return NotifChannelPrefsResponse(
         ok=True,
         channels=[NotifChannelPref(channel=str(r.channel), enabled=bool(r.enabled)) for r in rows],
@@ -522,37 +513,48 @@ async def my_search(
 
     # Keys: alias / email / server_id
     keys_rows = (
-        await session.execute(
-            select(Key)
-            .where(Key.user_id == billing_user_id)
-            .where(
-                func.lower(func.coalesce(Key.alias, ""))
-                .like(pattern)
-                | func.lower(func.coalesce(Key.email, "")).like(pattern)
-                | func.lower(func.coalesce(Key.server_id, "")).like(pattern)
-                | func.lower(func.coalesce(Key.client_id, "")).like(pattern)
+        (
+            await session.execute(
+                select(Key)
+                .where(Key.user_id == billing_user_id)
+                .where(
+                    func.lower(func.coalesce(Key.alias, "")).like(pattern)
+                    | func.lower(func.coalesce(Key.email, "")).like(pattern)
+                    | func.lower(func.coalesce(Key.server_id, "")).like(pattern)
+                    | func.lower(func.coalesce(Key.client_id, "")).like(pattern)
+                )
+                .limit(safe_limit)
             )
-            .limit(safe_limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for k in keys_rows:
         label = (k.alias or k.email or k.client_id or "").strip() or "—"
         sublabel = (k.server_id or "").strip() or "—"
-        hits.append(AccountSearchHit(kind="subscription", label=label, sublabel=sublabel, href="/dashboard/keys", meta=str(k.client_id)))
+        hits.append(
+            AccountSearchHit(
+                kind="subscription", label=label, sublabel=sublabel, href="/dashboard/keys", meta=str(k.client_id)
+            )
+        )
 
     # Payments: provider / metadata.purpose
     payments_rows = (
-        await session.execute(
-            select(Payment)
-            .where(Payment.user_id == billing_user_id)
-            .where(
-                func.lower(func.coalesce(Payment.payment_system, "")).like(pattern)
-                | func.cast(Payment.metadata_, String).ilike(pattern)
+        (
+            await session.execute(
+                select(Payment)
+                .where(Payment.user_id == billing_user_id)
+                .where(
+                    func.lower(func.coalesce(Payment.payment_system, "")).like(pattern)
+                    | func.cast(Payment.metadata_, String).ilike(pattern)
+                )
+                .order_by(Payment.created_at.desc())
+                .limit(safe_limit)
             )
-            .order_by(Payment.created_at.desc())
-            .limit(safe_limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for p in payments_rows:
         meta = p.metadata_ if isinstance(p.metadata_, dict) else None
         purpose = ""
@@ -561,35 +563,42 @@ async def my_search(
             if v is not None:
                 purpose = str(v)
         amount_label = f"{float(p.amount or 0):,.0f} {(p.currency or 'RUB').upper()}"
-        hits.append(AccountSearchHit(
-            kind="payment",
-            label=purpose or amount_label,
-            sublabel=f"{(p.payment_system or '').upper()} · {amount_label}",
-            href="/dashboard",
-            meta=str(p.id),
-        ))
+        hits.append(
+            AccountSearchHit(
+                kind="payment",
+                label=purpose or amount_label,
+                sublabel=f"{(p.payment_system or '').upper()} · {amount_label}",
+                href="/dashboard",
+                meta=str(p.id),
+            )
+        )
 
     # Notifications: title / message
     notif_rows = (
-        await session.execute(
-            select(WebNotification)
-            .where(WebNotification.identity_id == identity.id)
-            .where(
-                func.lower(WebNotification.title).like(pattern)
-                | func.lower(WebNotification.message).like(pattern)
+        (
+            await session.execute(
+                select(WebNotification)
+                .where(WebNotification.identity_id == identity.id)
+                .where(
+                    func.lower(WebNotification.title).like(pattern) | func.lower(WebNotification.message).like(pattern)
+                )
+                .order_by(WebNotification.created_at.desc())
+                .limit(safe_limit)
             )
-            .order_by(WebNotification.created_at.desc())
-            .limit(safe_limit)
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for n in notif_rows:
-        hits.append(AccountSearchHit(
-            kind="notification",
-            label=str(n.title or "—"),
-            sublabel=(str(n.message or "")[:80]),
-            href="/dashboard/notifications",
-            meta=str(n.id),
-        ))
+        hits.append(
+            AccountSearchHit(
+                kind="notification",
+                label=str(n.title or "—"),
+                sublabel=(str(n.message or "")[:80]),
+                href="/dashboard/notifications",
+                meta=str(n.id),
+            )
+        )
 
     return AccountSearchResponse(query=query_raw, hits=hits, total=len(hits))
 
@@ -638,4 +647,7 @@ async def change_password(
     refreshed = await idb.get_identity_by_id(session, identity.id)
     if refreshed:
         await bind_identity_actor(request, session, refreshed)
+    current_hash = _current_token_hash(request)
+    if current_hash:
+        await idsess.delete_other_sessions(session, identity_id=identity.id, keep_token_hash=current_hash)
     return {"ok": True}

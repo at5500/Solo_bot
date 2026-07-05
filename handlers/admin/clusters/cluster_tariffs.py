@@ -293,7 +293,6 @@ async def apply_tariffs(
                     for sid in to_insert
                 ])
 
-
         await state.update_data({
             f"subgrp_sel:{cluster_name}": [],
             f"tariff_sel:{cluster_name}": [],

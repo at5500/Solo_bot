@@ -9,14 +9,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, MessageEntity
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from filters.admin import IsAdminFilter
+from filters.admin import HasPermission, IsAdminFilter
+from filters.permissions import PERM_EMOJI
 from handlers.buttons import BACK
 
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_kb
-
-
-from filters.admin import HasPermission
-from filters.permissions import PERM_EMOJI
 
 
 class AdminEmojiState(StatesGroup):

@@ -58,6 +58,4 @@ async def toggle_maintenance_mode(callback: CallbackQuery, session: AsyncSession
     await callback.answer(f"🛠️ Режим обслуживания {new_status}.", show_alert=True)
 
     _, _, perms = await get_admin_context(tg_id)
-    await callback.message.edit_reply_markup(
-        reply_markup=build_management_kb(admin.role, permissions=perms)
-    )
+    await callback.message.edit_reply_markup(reply_markup=build_management_kb(admin.role, permissions=perms))

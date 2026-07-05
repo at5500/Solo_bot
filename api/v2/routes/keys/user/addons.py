@@ -644,7 +644,10 @@ async def user_key_apply_addons(
             has_traffic_choice=bool(has_traffic_option and include_traffic_effective),
             config_mode="addon",
         )
-    await update_balance(session, int(billing_user_id), -int(final_extra_price_rub))
+    if int(final_extra_price_rub) > 0:
+        debited = await update_balance(session, int(billing_user_id), -int(final_extra_price_rub))
+        if debited is None:
+            raise HTTPException(status_code=402, detail="Недостаточно средств на балансе")
     if coupon_id is not None:
         await mark_coupon_used(session, int(coupon_id), int(billing_user_id))
     return AccountKeyApplyAddonsResponse(

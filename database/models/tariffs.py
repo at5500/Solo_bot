@@ -51,6 +51,4 @@ class TariffSubgroupSetting(DictLikeMixin, Base):
     description = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("group_code", "subgroup_title", name="uq_tariff_subgroup_setting"),
-    )
+    __table_args__ = (UniqueConstraint("group_code", "subgroup_title", name="uq_tariff_subgroup_setting"),)

@@ -20,6 +20,7 @@ from api.depends import (
     set_is_admin_cookie,
 )
 
+
 _GOOGLE_NONCE_COOKIE = "g_oauth_nonce"
 from api.v2.routes.auth._common import _client_ip, safe_return_path
 from database import identities as idb

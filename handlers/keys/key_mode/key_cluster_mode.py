@@ -49,6 +49,7 @@ from hooks.processors import (
     process_remnawave_webapp_override,
 )
 from logger import logger
+from services.errors import InsufficientFundsError
 from services.operations import create_key_on_cluster
 from services.tariffs.tariff_display import (
     build_key_created_message,
@@ -151,7 +152,9 @@ async def send_or_edit_key_created_view(
                     )
                 )
 
-        builder.row(InlineKeyboardButton(text=MY_SUB, callback_data=build_key_callback("view_key", client_id, key_name)))
+        builder.row(
+            InlineKeyboardButton(text=MY_SUB, callback_data=build_key_callback("view_key", client_id, key_name))
+        )
         builder.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
@@ -200,8 +203,7 @@ async def send_or_edit_key_created_view(
             )
     except Exception as e:
         logger.error(
-            f"[Key Created View] Ошибка отправки/редактирования окна о создании ключа "
-            f"для пользователя {tg_id}: {e}"
+            f"[Key Created View] Ошибка отправки/редактирования окна о создании ключа для пользователя {tg_id}: {e}"
         )
 
 
@@ -344,7 +346,9 @@ async def key_cluster_mode(
                 await update_trial(session, tg_id, 1)
 
         if price_to_charge and not skip_balance_charge:
-            await update_balance(session, tg_id, -int(price_to_charge))
+            debited = await update_balance(session, tg_id, -int(price_to_charge))
+            if debited is None:
+                raise InsufficientFundsError("Недостаточно средств на балансе")
 
     except Exception as e:
         logger.error(f"[Error] Ошибка при создании ключа для пользователя {tg_id}: {e}")

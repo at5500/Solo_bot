@@ -21,11 +21,11 @@ from .web import (
     WebErrorReport,
     WebFlow,
     WebFlowEvent,
-    WebPageView,
     WebNotification,
     WebPage,
     WebPageVariant,
     WebPageVariantBlock,
+    WebPageView,
     WebPushSubscription,
     WebTheme,
 )

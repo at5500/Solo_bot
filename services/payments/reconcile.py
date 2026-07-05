@@ -4,6 +4,7 @@ import time
 from logger import logger
 from services.payments.pipeline import ParsedPayment, process_success_payment
 
+
 _RECONCILE_MIN_INTERVAL_SEC = 5.0
 _last_attempts: dict[str, float] = {}
 

@@ -88,7 +88,10 @@ _broadcast_bot: Bot | None = None
 def _get_broadcast_bot() -> Bot:
     global _broadcast_bot
     if _broadcast_bot is None:
-        _broadcast_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
+        _broadcast_bot = Bot(
+            token=API_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()),
+        )
     elif _broadcast_bot.default is not None:
         _broadcast_bot.default.protect_content = resolve_protect_content()
     return _broadcast_bot

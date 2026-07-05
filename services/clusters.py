@@ -24,7 +24,7 @@ from .errors import NotFoundError, ValidationError
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-ALLOWED_GROUP_CODES = ["trial", "discounts", "discounts_max", "gifts"]
+ALLOWED_GROUP_CODES = ["trial", "discounts", "discounts_max", "cold_discounts", "cold_discounts_max", "gifts"]
 
 
 @dataclass

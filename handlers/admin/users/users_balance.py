@@ -51,10 +51,7 @@ def format_user_payment(
 def format_gift_purchase(amount: float, created_at: datetime) -> str:
     date_str = created_at.strftime("%Y-%m-%d %H:%M:%S")
     abs_amount = abs(int(amount or 0))
-    return (
-        f"\n<blockquote>🎁 Покупка подарка: -{abs_amount}Р\n"
-        f"⏳ Дата: {date_str}</blockquote>"
-    )
+    return f"\n<blockquote>🎁 Покупка подарка: -{abs_amount}Р\n⏳ Дата: {date_str}</blockquote>"
 
 
 async def _render_balance_page(

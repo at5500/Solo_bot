@@ -136,8 +136,7 @@ async def delete_one_for_identity(
     from sqlalchemy import delete as sql_delete
 
     result = await session.execute(
-        sql_delete(WebNotification)
-        .where(
+        sql_delete(WebNotification).where(
             WebNotification.identity_id == identity_id,
             WebNotification.id == notification_id,
         )
@@ -151,9 +150,7 @@ async def delete_all_for_identity(
 ) -> int:
     from sqlalchemy import delete as sql_delete
 
-    result = await session.execute(
-        sql_delete(WebNotification).where(WebNotification.identity_id == identity_id)
-    )
+    result = await session.execute(sql_delete(WebNotification).where(WebNotification.identity_id == identity_id))
     return result.rowcount or 0
 
 
@@ -197,9 +194,7 @@ class _SafeFormatDict(dict):
 def _render_template(template: str, **kwargs: object) -> str:
     """Safe format — unknown placeholders stay as-is."""
     try:
-        return template.format_map(
-            _SafeFormatDict({k: str(v) for k, v in kwargs.items() if v is not None})
-        )
+        return template.format_map(_SafeFormatDict({k: str(v) for k, v in kwargs.items() if v is not None}))
     except Exception:
         return template
 
@@ -281,7 +276,9 @@ async def notify_web(
                         await delete_push_subscription_by_endpoint(session, endpoint)
                     logger.debug(
                         "[notify_web] push sent to {}/{} subscriptions, removed {} dead",
-                        sent, len(sub_infos), len(dead),
+                        sent,
+                        len(sub_infos),
+                        len(dead),
                     )
         except Exception as push_err:
             logger.warning("[notify_web] push delivery failed: {}", push_err)

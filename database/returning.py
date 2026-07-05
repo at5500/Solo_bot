@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Key, Notification, SubscriptionEvent
 
+
 RETURNING_NOTIFICATION_TYPE = "returning"
 
 
@@ -26,9 +27,7 @@ async def get_returning_targets(session: AsyncSession, min_days: int, max_days: 
         .where(SubscriptionEvent.created_at >= lo)
         .distinct()
     )
-    already = select(Notification.user_id).where(
-        Notification.notification_type == RETURNING_NOTIFICATION_TYPE
-    )
+    already = select(Notification.user_id).where(Notification.notification_type == RETURNING_NOTIFICATION_TYPE)
 
     stmt = (
         select(SubscriptionEvent.user_id)

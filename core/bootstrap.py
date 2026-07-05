@@ -1,9 +1,8 @@
-from logger import logger
-
 from database import async_session_maker
 from database.db import warm_pool
 from database.settings_cache import settings_cache
 from database.tariffs import initialize_all_tariff_weights
+from logger import logger
 
 from .settings.buttons_config import BUTTONS_CONFIG, load_buttons_config, update_buttons_config
 from .settings.management_config import MANAGEMENT_CONFIG, load_management_config, update_management_config

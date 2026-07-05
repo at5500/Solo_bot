@@ -33,6 +33,7 @@ from hooks.hook_buttons import insert_hook_buttons
 from hooks.processors import process_addon_purchase_complete, process_addons_menu
 from logger import logger
 from middlewares.session import release_session_early
+from services.errors import InsufficientFundsError
 from services.payments.currency_rates import format_for_user
 from services.tariffs.tariff_display import GB, get_effective_limits_for_key
 
@@ -894,7 +895,9 @@ async def handle_addons_confirm(callback: CallbackQuery, state: FSMContext, sess
             config_mode="addon",
         )
 
-        await update_balance(session, tg_id, -extra_price)
+        debited = await update_balance(session, tg_id, -extra_price)
+        if debited is None:
+            raise InsufficientFundsError("Недостаточно средств на балансе")
 
         logger.info(
             "[ADDONS] Успешное применение расширения: "

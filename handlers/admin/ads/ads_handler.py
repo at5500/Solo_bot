@@ -16,7 +16,8 @@ from core.cache_config import START_UTM_EXISTS_TTL_SEC
 from core.redis_cache import cache_delete, cache_key, cache_set
 from database import create_tracking_source, get_tracking_source_stats
 from database.models import TrackingSource, User
-from filters.admin import IsAdminFilter
+from filters.admin import HasPermission, IsAdminFilter
+from filters.permissions import PERM_ADS
 from logger import logger
 
 from ..panel.keyboard import AdminPanelCallback
@@ -28,9 +29,6 @@ from .keyboard import (
     build_ads_stats_kb,
     build_cancel_input_kb,
 )
-
-from filters.admin import HasPermission
-from filters.permissions import PERM_ADS
 
 
 router = Router()

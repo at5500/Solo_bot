@@ -11,7 +11,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import _identity_from_cookie, get_session, verify_identity_admin
-from database.site_revision import bump_site_revision
+from api.v2.routes._data_uri_migration import migrate_json_data_uris
 from api.v2.schemas import WebBlockResponse, WebPageResponse, WebPageUpdate, WebTheme
 from api.v2.schemas.web import (
     WebPageSaveResponse,
@@ -31,13 +31,12 @@ from database.models import (
     WebFlowEvent,
     WebPage,
     WebPageVariant,
-    WebPageView,
     WebPageVariantBlock,
+    WebPageView,
     WebTheme as WebThemeModel,
 )
+from database.site_revision import bump_site_revision
 from logger import logger
-
-from api.v2.routes._data_uri_migration import migrate_json_data_uris
 
 
 UPLOAD_DIR = Path("static/web_uploads")
@@ -98,14 +97,55 @@ def _optimize_image_bytes(data: bytes, ext: str) -> bytes:
 _SVG_NS = "http://www.w3.org/2000/svg"
 _XLINK_NS = "http://www.w3.org/1999/xlink"
 _SVG_ALLOWED_TAGS = frozenset({
-    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
-    "text", "tspan", "textpath", "defs", "lineargradient", "radialgradient", "stop",
-    "clippath", "mask", "pattern", "use", "symbol", "title", "desc", "marker", "metadata",
-    "filter", "fegaussianblur", "feoffset", "feblend", "femerge", "femergenode",
-    "fecolormatrix", "fecomposite", "feflood", "femorphology", "fedropshadow",
-    "fespecularlighting", "fediffuselighting", "fepointlight", "fedistantlight",
-    "fetile", "feturbulence", "fedisplacementmap", "fecomponenttransfer",
-    "fefuncr", "fefuncg", "fefuncb", "fefunca", "switch",
+    "svg",
+    "g",
+    "path",
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "text",
+    "tspan",
+    "textpath",
+    "defs",
+    "lineargradient",
+    "radialgradient",
+    "stop",
+    "clippath",
+    "mask",
+    "pattern",
+    "use",
+    "symbol",
+    "title",
+    "desc",
+    "marker",
+    "metadata",
+    "filter",
+    "fegaussianblur",
+    "feoffset",
+    "feblend",
+    "femerge",
+    "femergenode",
+    "fecolormatrix",
+    "fecomposite",
+    "feflood",
+    "femorphology",
+    "fedropshadow",
+    "fespecularlighting",
+    "fediffuselighting",
+    "fepointlight",
+    "fedistantlight",
+    "fetile",
+    "feturbulence",
+    "fedisplacementmap",
+    "fecomponenttransfer",
+    "fefuncr",
+    "fefuncg",
+    "fefuncb",
+    "fefunca",
+    "switch",
 })
 _SVG_BAD_URL_SCHEMES = ("javascript:", "vbscript:", "data:text/html")
 
@@ -441,13 +481,11 @@ async def _resolve_variant(
             raise HTTPException(404, "Вариант страницы не найден")
         return current, variants
     active = next((variant for variant in variants if variant.is_active), variants[0])
+    active_variants = [variant for variant in variants if variant.is_active]
     bucket = (ab_bucket or "").strip().lower()
-    if bucket and len(bucket) == 1 and bucket.isalpha() and len(variants) > 1:
+    if bucket and len(bucket) == 1 and bucket.isalpha() and len(active_variants) > 1:
         idx = ord(bucket) - ord("a")
-        if idx > 0:
-            others = [variant for variant in variants if not variant.is_active]
-            if others:
-                return others[min(idx - 1, len(others) - 1)], variants
+        return active_variants[idx % len(active_variants)], variants
     return active, variants
 
 
@@ -555,8 +593,14 @@ async def update_web_page_theme(
     current.theme_tokens = cleaned_tokens
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "page.theme.update", entity_type="page", entity_id=slug,
-                           metadata={"variant": current.variant_key})
+    await _audit_web_admin(
+        session,
+        identity,
+        "page.theme.update",
+        entity_type="page",
+        entity_id=slug,
+        metadata={"variant": current.variant_key},
+    )
     return WebPageThemeResponse(
         slug=slug,
         variant_key=current.variant_key,
@@ -608,8 +652,14 @@ async def update_web_page_title(
     current.theme_tokens = tokens
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "page.title.update", entity_type="page", entity_id=slug,
-                           metadata={"variant": current.variant_key, "set": bool(title)})
+    await _audit_web_admin(
+        session,
+        identity,
+        "page.title.update",
+        entity_type="page",
+        entity_id=slug,
+        metadata={"variant": current.variant_key, "set": bool(title)},
+    )
     return {"slug": slug, "title": title or None}
 
 
@@ -624,7 +674,7 @@ def _valid_pwa_icon_url(raw: str | None) -> str:
     prefix = "/api/web/uploads/"
     if not url.startswith(prefix) or len(url) > 255 or ".." in url or "\\" in url:
         raise HTTPException(400, "Недопустимый адрес иконки")
-    filename = url[len(prefix):]
+    filename = url[len(prefix) :]
     if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
         raise HTTPException(400, "Недопустимый адрес иконки")
     return url
@@ -654,8 +704,9 @@ async def set_pwa_icon(
     current.theme_tokens = tokens
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "pwa_icon.set", entity_type="setting", entity_id="pwaIconUrl",
-                           metadata={"set": bool(url)})
+    await _audit_web_admin(
+        session, identity, "pwa_icon.set", entity_type="setting", entity_id="pwaIconUrl", metadata={"set": bool(url)}
+    )
     return {"url": url or None}
 
 
@@ -694,8 +745,14 @@ async def update_web_page(
 
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "page.update", entity_type="page", entity_id=slug,
-                           metadata={"variant": current.variant_key, "blocks": len(body.blocks)})
+    await _audit_web_admin(
+        session,
+        identity,
+        "page.update",
+        entity_type="page",
+        entity_id=slug,
+        metadata={"variant": current.variant_key, "blocks": len(body.blocks)},
+    )
     refreshed_variants = await _list_variants(session, slug)
     refreshed_current = next((item for item in refreshed_variants if item.id == current.id), current)
     if minimal:
@@ -721,6 +778,7 @@ async def get_web_page_variants(
         raise
     except Exception as exc:
         from logger import logger
+
         logger.warning("[web] variants resolve failed for slug={}: {}", slug, exc)
         raise HTTPException(status_code=404, detail="Страница или вариант не найдены")
     active = next((item for item in variants if item.is_active), current)
@@ -768,8 +826,9 @@ async def create_web_page_variant(
         )
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "variant.create", entity_type="page", entity_id=slug,
-                           metadata={"variant": variant_key})
+    await _audit_web_admin(
+        session, identity, "variant.create", entity_type="page", entity_id=slug, metadata={"variant": variant_key}
+    )
 
     refreshed = await _list_variants(session, slug)
     return WebPageVariantsResponse(
@@ -799,8 +858,14 @@ async def update_web_page_variant(
         variants = await _list_variants(session, slug)
 
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "variant.update", entity_type="page", entity_id=slug,
-                           metadata={"variant": current.variant_key, "make_active": body.make_active is True})
+    await _audit_web_admin(
+        session,
+        identity,
+        "variant.update",
+        entity_type="page",
+        entity_id=slug,
+        metadata={"variant": current.variant_key, "make_active": body.make_active is True},
+    )
     active = next((item for item in variants if item.is_active), current)
     return WebPageVariantsResponse(
         slug=slug,
@@ -831,8 +896,14 @@ async def delete_web_page_variant(
         replacement_variants = await _list_variants(session, slug)
 
     await bump_site_revision(session)
-    await _audit_web_admin(session, identity, "variant.delete", entity_type="page", entity_id=slug,
-                           metadata={"variant": current.variant_key})
+    await _audit_web_admin(
+        session,
+        identity,
+        "variant.delete",
+        entity_type="page",
+        entity_id=slug,
+        metadata={"variant": current.variant_key},
+    )
     current_variant_key = replacement.variant_key if replacement is not None else DEFAULT_VARIANT_KEY
     active_variant_key = next(
         (item.variant_key for item in replacement_variants if item.is_active),
@@ -1255,8 +1326,14 @@ async def reset_analytics_page_views(
     Удаляет только web_page_views — реальные регистрации/платежи не трогаются.
     """
     result = await session.execute(delete(WebPageView))
-    await _audit_web_admin(session, _identity, "analytics.reset", entity_type="analytics", entity_id="page_views",
-                           metadata={"deleted": int(result.rowcount or 0)})
+    await _audit_web_admin(
+        session,
+        _identity,
+        "analytics.reset",
+        entity_type="analytics",
+        entity_id="page_views",
+        metadata={"deleted": int(result.rowcount or 0)},
+    )
     return {"deleted": int(result.rowcount or 0)}
 
 
@@ -1435,9 +1512,7 @@ async def get_analytics_overview(
     ) or 0
 
     errors_unresolved = (
-        await session.scalar(
-            select(func.count()).select_from(WebErrorReport).where(WebErrorReport.resolved.is_(False))
-        )
+        await session.scalar(select(func.count()).select_from(WebErrorReport).where(WebErrorReport.resolved.is_(False)))
     ) or 0
     errors_new = (
         await session.scalar(
@@ -1459,9 +1534,7 @@ async def get_analytics_overview(
     ).all()
 
     registrations = (
-        await session.scalar(
-            select(func.count()).select_from(Identity).where(Identity.created_at >= since_naive)
-        )
+        await session.scalar(select(func.count()).select_from(Identity).where(Identity.created_at >= since_naive))
     ) or 0
     registrations_tg = (
         await session.scalar(
@@ -1501,9 +1574,9 @@ async def get_analytics_overview(
 
     active_keys = (
         await session.scalar(
-            select(func.count()).select_from(Key).where(
-                Key.expiry_time > int(datetime.now(timezone.utc).timestamp() * 1000)
-            )
+            select(func.count())
+            .select_from(Key)
+            .where(Key.expiry_time > int(datetime.now(timezone.utc).timestamp() * 1000))
         )
     ) or 0
 
@@ -1536,80 +1609,116 @@ async def get_analytics_overview(
     ).all()
 
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    since_ms = int(since.timestamp() * 1000)
+    int(since.timestamp() * 1000)
 
-    bot_users_total = (await session.scalar(
-        select(func.count()).select_from(User).where(User.created_at >= since_naive)
-    )) or 0
+    bot_users_total = (
+        await session.scalar(select(func.count()).select_from(User).where(User.created_at >= since_naive))
+    ) or 0
     bot_user_day = func.date_trunc("day", User.created_at).label("day")
-    daily_bot_rows = (await session.execute(
-        select(bot_user_day, func.count().label("cnt"))
-        .where(User.created_at >= since_naive)
-        .group_by(bot_user_day).order_by(bot_user_day)
-    )).all()
+    daily_bot_rows = (
+        await session.execute(
+            select(bot_user_day, func.count().label("cnt"))
+            .where(User.created_at >= since_naive)
+            .group_by(bot_user_day)
+            .order_by(bot_user_day)
+        )
+    ).all()
 
     src_name_map = dict((await session.execute(select(TrackingSource.code, TrackingSource.name))).all())
-    bot_source_rows = (await session.execute(
-        select(User.source_code, func.count().label("cnt"))
-        .where(User.created_at >= since_naive)
-        .group_by(User.source_code).order_by(func.count().desc()).limit(8)
-    )).all()
+    bot_source_rows = (
+        await session.execute(
+            select(User.source_code, func.count().label("cnt"))
+            .where(User.created_at >= since_naive)
+            .group_by(User.source_code)
+            .order_by(func.count().desc())
+            .limit(8)
+        )
+    ).all()
 
     method_col = func.lower(func.coalesce(Payment.payment_system, "unknown")).label("method")
-    method_rows = (await session.execute(
-        select(
-            method_col,
-            func.count().label("cnt"),
-            func.coalesce(func.sum(Payment.amount), 0).label("rev"),
+    method_rows = (
+        await session.execute(
+            select(
+                method_col,
+                func.count().label("cnt"),
+                func.coalesce(func.sum(Payment.amount), 0).label("rev"),
+            )
+            .where(Payment.created_at >= since_naive)
+            .where(Payment.status == "success")
+            .where(real_income)
+            .group_by(method_col)
+            .order_by(func.count().desc())
         )
-        .where(Payment.created_at >= since_naive).where(Payment.status == "success").where(real_income)
-        .group_by(method_col).order_by(func.count().desc())
-    )).all()
+    ).all()
 
-    all_payers = (await session.scalar(
-        select(func.count(func.distinct(Payment.user_id)))
-        .where(Payment.created_at >= since_naive).where(Payment.status == "success").where(real_income)
-    )) or 0
+    all_payers = (
+        await session.scalar(
+            select(func.count(func.distinct(Payment.user_id)))
+            .where(Payment.created_at >= since_naive)
+            .where(Payment.status == "success")
+            .where(real_income)
+        )
+    ) or 0
     first_pay_sq = (
         select(Payment.user_id, func.min(Payment.created_at).label("first"))
-        .where(Payment.status == "success").where(real_income).group_by(Payment.user_id)
+        .where(Payment.status == "success")
+        .where(real_income)
+        .group_by(Payment.user_id)
     ).subquery()
-    new_buyers = (await session.scalar(
-        select(func.count()).select_from(first_pay_sq).where(first_pay_sq.c.first >= since_naive)
-    )) or 0
+    new_buyers = (
+        await session.scalar(select(func.count()).select_from(first_pay_sq).where(first_pay_sq.c.first >= since_naive))
+    ) or 0
     total_revenue = float(all_payments_row.revenue or 0) if all_payments_row else 0.0
 
-    coupons_used = (await session.scalar(
-        select(func.count()).select_from(CouponUsage).where(CouponUsage.used_at >= since_naive)
-    )) or 0
-    gifts_used = (await session.scalar(
-        select(func.count()).select_from(GiftUsage).where(GiftUsage.used_at >= since_naive)
-    )) or 0
-    referrals_cnt = (await session.scalar(
-        select(func.count()).select_from(Referral)
-        .join(User, Referral.referred_user_id == User.id)
-        .where(User.created_at >= since_naive)
-    )) or 0
+    coupons_used = (
+        await session.scalar(select(func.count()).select_from(CouponUsage).where(CouponUsage.used_at >= since_naive))
+    ) or 0
+    gifts_used = (
+        await session.scalar(select(func.count()).select_from(GiftUsage).where(GiftUsage.used_at >= since_naive))
+    ) or 0
+    referrals_cnt = (
+        await session.scalar(
+            select(func.count())
+            .select_from(Referral)
+            .join(User, Referral.referred_user_id == User.id)
+            .where(User.created_at >= since_naive)
+        )
+    ) or 0
 
     from database.subscription_events import get_retention_metrics, get_subscription_dynamics
 
     sub_dynamics = await get_subscription_dynamics(session, days)
     retention = await get_retention_metrics(session, days)
 
-    expiring_soon = (await session.scalar(
-        select(func.count()).select_from(Key)
-        .where(Key.expiry_time > now_ms).where(Key.expiry_time <= now_ms + 7 * 86400 * 1000)
-    )) or 0
+    expiring_soon = (
+        await session.scalar(
+            select(func.count())
+            .select_from(Key)
+            .where(Key.expiry_time > now_ms)
+            .where(Key.expiry_time <= now_ms + 7 * 86400 * 1000)
+        )
+    ) or 0
 
-    tariff_rows = (await session.execute(
-        select(Tariff.name, func.count().label("cnt"))
-        .select_from(Key).join(Tariff, Key.tariff_id == Tariff.id, isouter=True)
-        .where(Key.expiry_time > now_ms).group_by(Tariff.name).order_by(func.count().desc()).limit(8)
-    )).all()
-    server_rows = (await session.execute(
-        select(Key.server_id, func.count().label("cnt"))
-        .where(Key.expiry_time > now_ms).group_by(Key.server_id).order_by(func.count().desc()).limit(8)
-    )).all()
+    tariff_rows = (
+        await session.execute(
+            select(Tariff.name, func.count().label("cnt"))
+            .select_from(Key)
+            .join(Tariff, Key.tariff_id == Tariff.id, isouter=True)
+            .where(Key.expiry_time > now_ms)
+            .group_by(Tariff.name)
+            .order_by(func.count().desc())
+            .limit(8)
+        )
+    ).all()
+    server_rows = (
+        await session.execute(
+            select(Key.server_id, func.count().label("cnt"))
+            .where(Key.expiry_time > now_ms)
+            .group_by(Key.server_id)
+            .order_by(func.count().desc())
+            .limit(8)
+        )
+    ).all()
 
     return {
         "days": days,
@@ -1649,22 +1758,12 @@ async def get_analytics_overview(
             }
             for row in daily_rows
         ],
-        "dailyWeb": [
-            {"date": d, "views": v["views"], "visitors": v["visitors"]}
-            for d, v in sorted(daily_web.items())
-        ],
+        "dailyWeb": [{"date": d, "views": v["views"], "visitors": v["visitors"]} for d, v in sorted(daily_web.items())],
         "dailyWebapp": [
-            {"date": d, "views": v["views"], "visitors": v["visitors"]}
-            for d, v in sorted(daily_webapp.items())
+            {"date": d, "views": v["views"], "visitors": v["visitors"]} for d, v in sorted(daily_webapp.items())
         ],
-        "dailyPwa": [
-            {"date": d, "views": v["views"], "visitors": v["visitors"]}
-            for d, v in sorted(daily_pwa.items())
-        ],
-        "dailyRegistrations": [
-            {"date": row.day.strftime("%Y-%m-%d"), "count": int(row.cnt)}
-            for row in daily_reg_rows
-        ],
+        "dailyPwa": [{"date": d, "views": v["views"], "visitors": v["visitors"]} for d, v in sorted(daily_pwa.items())],
+        "dailyRegistrations": [{"date": row.day.strftime("%Y-%m-%d"), "count": int(row.cnt)} for row in daily_reg_rows],
         "dailyPayments": [
             {
                 "date": row.day.strftime("%Y-%m-%d"),
@@ -1676,17 +1775,10 @@ async def get_analytics_overview(
             for row in daily_pay_rows
         ],
         "topPages": [
-            {"slug": row.page_slug, "views": int(row.views), "visitors": int(row.visitors)}
-            for row in top_pages
+            {"slug": row.page_slug, "views": int(row.views), "visitors": int(row.visitors)} for row in top_pages
         ],
-        "referrers": [
-            {"source": row.referrer, "visitors": int(row.visitors)}
-            for row in referrers
-        ],
-        "devices": [
-            {"device": row.device or "unknown", "visitors": int(row.visitors)}
-            for row in devices
-        ],
+        "referrers": [{"source": row.referrer, "visitors": int(row.visitors)} for row in referrers],
+        "devices": [{"device": row.device or "unknown", "visitors": int(row.visitors)} for row in devices],
         "abVariants": [
             {
                 "variant": row.ab_variant,
@@ -1696,10 +1788,7 @@ async def get_analytics_overview(
             }
             for row in ab_rows
         ],
-        "dailyBotUsers": [
-            {"date": r.day.strftime("%Y-%m-%d"), "count": int(r.cnt)}
-            for r in daily_bot_rows
-        ],
+        "dailyBotUsers": [{"date": r.day.strftime("%Y-%m-%d"), "count": int(r.cnt)} for r in daily_bot_rows],
         "botSources": [
             {"source": (src_name_map.get(r.source_code) or r.source_code or "Прямой"), "users": int(r.cnt)}
             for r in bot_source_rows
@@ -1709,8 +1798,7 @@ async def get_analytics_overview(
             for r in method_rows
         ],
         "dailySubs": [
-            {"date": e["date"], "created": e["created"], "expired": e["expired"]}
-            for e in sub_dynamics["dailyEvents"]
+            {"date": e["date"], "created": e["created"], "expired": e["expired"]} for e in sub_dynamics["dailyEvents"]
         ],
         "activeTrend": sub_dynamics["activeTrend"],
         "retention": retention,
@@ -1733,14 +1821,8 @@ async def get_analytics_overview(
                 for r in top_errors_rows
             ],
         },
-        "tariffs": [
-            {"tariff": r.name or "Без тарифа", "count": int(r.cnt)}
-            for r in tariff_rows
-        ],
-        "servers": [
-            {"server": r.server_id or "—", "count": int(r.cnt)}
-            for r in server_rows
-        ],
+        "tariffs": [{"tariff": r.name or "Без тарифа", "count": int(r.cnt)} for r in tariff_rows],
+        "servers": [{"server": r.server_id or "—", "count": int(r.cnt)} for r in server_rows],
     }
 
 
@@ -1826,7 +1908,7 @@ def _sanitize_http_url(value: str | None) -> str | None:
     if not trimmed:
         return None
     lowered = trimmed.lower()
-    if not (lowered.startswith("http://") or lowered.startswith("https://") or lowered.startswith("/")):
+    if not (lowered.startswith(("http://", "https://", "/"))):
         return None
     return _scrub_secret_strings(trimmed[:500])
 
@@ -1929,7 +2011,9 @@ async def ingest_error_report(
         if server_identity_id:
             existing.last_identity_id = server_identity_id[:36]
         if existing.count in _ERROR_ALERT_THRESHOLDS:
-            await _alert_web_error(existing.error_name, existing.error_message, existing.url, existing.count, is_new=False)
+            await _alert_web_error(
+                existing.error_name, existing.error_message, existing.url, existing.count, is_new=False
+            )
         return {"ok": True, "id": existing.id, "count": existing.count, "deduplicated": True}
 
     try:
@@ -2165,7 +2249,11 @@ async def import_blocks_pack(
         blueprints = None
     if not isinstance(blueprints, list) or not blueprints:
         raise HTTPException(status_code=400, detail="Файл набора не содержит блоков (blueprints)")
-    valid = [b for b in blueprints if isinstance(b, dict) and str(b.get("slug") or "").strip() and str(b.get("runtime") or "").strip()]
+    valid = [
+        b
+        for b in blueprints
+        if isinstance(b, dict) and str(b.get("slug") or "").strip() and str(b.get("runtime") or "").strip()
+    ]
     if not valid:
         raise HTTPException(status_code=400, detail="Некорректный формат блоков в файле набора")
     current, _ = await _resolve_variant(session, "landing", None)
@@ -2193,7 +2281,8 @@ async def import_blocks_pack(
 
 async def _merge_blueprints_into_landing(session: AsyncSession, blueprints: list) -> tuple[int, int]:
     valid = [
-        b for b in blueprints
+        b
+        for b in blueprints
         if isinstance(b, dict) and str(b.get("slug") or "").strip() and str(b.get("runtime") or "").strip()
     ]
     current, _ = await _resolve_variant(session, "landing", None)
@@ -2240,7 +2329,10 @@ async def export_current_as_pack_zip(
     safe_name = str(name or "Набор")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("meta.json", _json.dumps({"name": safe_name, "version": 1, "kind": "solo-pack"}, ensure_ascii=False, indent=2))
+        zf.writestr(
+            "meta.json",
+            _json.dumps({"name": safe_name, "version": 1, "kind": "solo-pack"}, ensure_ascii=False, indent=2),
+        )
         zf.writestr("blocks.json", _json.dumps({"blueprints": blueprints}, ensure_ascii=False, indent=2))
         zf.writestr("design.json", _json.dumps(design, ensure_ascii=False, indent=2))
     buf.seek(0)
@@ -2262,6 +2354,7 @@ async def import_pack_zip(
     import io
     import json as _json
     import zipfile
+
     from uuid import uuid4
 
     from database.web_default_seed import store_pack_design
@@ -2309,7 +2402,9 @@ async def import_pack_zip(
     has_design = any(not k.startswith("_") and isinstance(v, list) for k, v in design.items())
     if has_design:
         pack_id = "c" + uuid4().hex[:20]
-        await store_pack_design(session, pack_id, design, meta={"name": name, "description": description, "custom": True})
+        await store_pack_design(
+            session, pack_id, design, meta={"name": name, "description": description, "custom": True}
+        )
         pages_count = sum(1 for k, v in design.items() if not k.startswith("_") and isinstance(v, list))
 
     if not blueprints and not has_design:
@@ -2317,7 +2412,9 @@ async def import_pack_zip(
 
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, _identity, "design.import_pack_zip", entity_type="pack", entity_id=pack_id or "blocks")
+    await _audit_web_admin(
+        session, _identity, "design.import_pack_zip", entity_type="pack", entity_id=pack_id or "blocks"
+    )
     return {"ok": True, "id": pack_id, "name": name, "addedBlocks": added_blocks, "pages": pages_count}
 
 
@@ -2354,7 +2451,9 @@ async def import_pack_file(
     has_design = any(not k.startswith("_") and isinstance(v, list) for k, v in design.items())
     if has_design:
         pack_id = "c" + uuid4().hex[:20]
-        await store_pack_design(session, pack_id, design, meta={"name": name, "description": description, "custom": True})
+        await store_pack_design(
+            session, pack_id, design, meta={"name": name, "description": description, "custom": True}
+        )
         pages_count = sum(1 for k, v in design.items() if not k.startswith("_") and isinstance(v, list))
 
     if not blueprints and not has_design:
@@ -2362,7 +2461,9 @@ async def import_pack_file(
 
     await session.flush()
     await bump_site_revision(session)
-    await _audit_web_admin(session, _identity, "design.import_pack_file", entity_type="pack", entity_id=pack_id or "blocks")
+    await _audit_web_admin(
+        session, _identity, "design.import_pack_file", entity_type="pack", entity_id=pack_id or "blocks"
+    )
     return {"ok": True, "id": pack_id, "name": name, "addedBlocks": added_blocks, "pages": pages_count}
 
 
@@ -2430,20 +2531,24 @@ async def web_admin_audit(
     base = AuditEvent.event_type == "web_admin_action"
     total = await session.scalar(select(func.count()).select_from(AuditEvent).where(base))
     rows = (
-        await session.execute(
-            select(AuditEvent)
-            .where(base)
-            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
-            .limit(limit)
-            .offset(offset)
+        (
+            await session.execute(
+                select(AuditEvent)
+                .where(base)
+                .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     ident_ids = {r.actor_identity_id for r in rows if r.actor_identity_id}
     emails: dict[str, str | None] = {}
     if ident_ids:
         eres = await session.execute(select(Identity.id, Identity.email).where(Identity.id.in_(ident_ids)))
-        emails = {iid: email for (iid, email) in eres.all()}
+        emails = dict(eres.all())
 
     items = [
         {
@@ -2460,7 +2565,6 @@ async def web_admin_audit(
         for r in rows
     ]
     return {"total": int(total or 0), "items": items}
-
 
 
 _BOT_LOG_PATH = Path("logs/logging.log")
@@ -2495,7 +2599,13 @@ def _parse_log_line(raw: str) -> dict:
         return {"ts": ts, "level": level, "loc": loc, "text": msg}
     up = raw.upper()
     level = "INFO"
-    for token, mapped in (("CRITICAL", "CRITICAL"), ("ERROR", "ERROR"), ("WARNING", "WARNING"), ("WARN", "WARNING"), ("DEBUG", "DEBUG")):
+    for token, mapped in (
+        ("CRITICAL", "CRITICAL"),
+        ("ERROR", "ERROR"),
+        ("WARNING", "WARNING"),
+        ("WARN", "WARNING"),
+        ("DEBUG", "DEBUG"),
+    ):
         if token in up:
             level = mapped
             break
@@ -2545,10 +2655,17 @@ async def _fetch_site_log_lines(max_lines: int) -> tuple[list[str], bool, str | 
                     body = (await resp.text())[:200]
                     logger.warning(
                         "[logs] site-log: {} вернул HTTP {} (токен len={}); ответ: {}",
-                        url, resp.status, len(token), body,
+                        url,
+                        resp.status,
+                        len(token),
+                        body,
                     )
                     if resp.status in (401, 403):
-                        return [], False, "Токен не подошёл: PLUGIN_BUILDER_TOKEN на боте и в веб-аппе различаются (или пуст в одном из них)."
+                        return (
+                            [],
+                            False,
+                            "Токен не подошёл: PLUGIN_BUILDER_TOKEN на боте и в веб-аппе различаются (или пуст в одном из них).",
+                        )
                     return [], False, f"Веб-апп вернул HTTP {resp.status} на запрос логов сайта."
                 data = await resp.json()
         if not isinstance(data, dict):

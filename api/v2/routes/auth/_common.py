@@ -9,7 +9,7 @@ from utils.referral_codes import encode_partner_code
 
 
 TOKEN_TTL_HINT = "бессрочно" if API_TOKEN_TTL_DAYS is None else f"{API_TOKEN_TTL_DAYS} дн."
-TELEGRAM_LOGIN_MAX_AGE = 86400
+TELEGRAM_LOGIN_MAX_AGE = 3600
 
 
 def build_login_response(identity) -> LoginResponse:
@@ -21,9 +21,10 @@ def build_login_response(identity) -> LoginResponse:
 
 def safe_return_path(return_to: str | None, default: str) -> str:
     path = str(return_to or "").strip()
-    if not path.startswith("/") or path.startswith("//") or path.startswith("/\\"):
+    if not path.startswith("/") or path.startswith(("//", "/\\")):
         return default
     return path
+
 
 _TRUSTED_PROXY_CIDRS: list[str] = []
 
@@ -194,7 +195,9 @@ async def _resolve_partner_snapshot(session: AsyncSession, billing_user_id: int)
         except Exception:
             referred_paid = 0
     payload.update({
-        "partner_enabled": bool(partner_table_ok and (partner_feature_enabled or code or referred_total > 0 or balance > 0)),
+        "partner_enabled": bool(
+            partner_table_ok and (partner_feature_enabled or code or referred_total > 0 or balance > 0)
+        ),
         "partner_code": code,
         "partner_balance": balance,
         "partner_percent": percent_value,

@@ -31,13 +31,19 @@ async def process_hot_leads(bot: Bot, session: AsyncSession):
 
         flags = await get_hot_lead_notification_flags(session, leads)
         can_send_after_step1 = await check_notification_time_bulk(
-            session, [(tid, "hot_lead_step_1") for tid in leads], hot_lead_interval,
+            session,
+            [(tid, "hot_lead_step_1") for tid in leads],
+            hot_lead_interval,
         )
         step2_expired_can_send = await check_notification_time_bulk(
-            session, [(tid, "hot_lead_step_2") for tid in leads], discount_active,
+            session,
+            [(tid, "hot_lead_step_2") for tid in leads],
+            discount_active,
         )
         can_send_after_step2 = await check_notification_time_bulk(
-            session, [(tid, "hot_lead_step_2") for tid in leads], hot_lead_interval,
+            session,
+            [(tid, "hot_lead_step_2") for tid in leads],
+            hot_lead_interval,
         )
 
         discount_tariffs = await get_tariffs(session, group_code="discounts")

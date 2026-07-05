@@ -41,7 +41,10 @@ def run_broadcast_in_thread(
     asyncio.set_event_loop(loop)
     bot = None
     try:
-        bot = Bot(token=api_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
+        bot = Bot(
+            token=api_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()),
+        )
         keyboard = InlineKeyboardMarkup.model_validate(keyboard_data) if keyboard_data else None
         messages = [{"tg_id": tg_id, "text": text_message, "photo": photo, "keyboard": keyboard} for tg_id in tg_ids]
         service = BroadcastService(bot=bot, session=None, messages_per_second=DEFAULT_MESSAGES_PER_SECOND)
@@ -201,7 +204,7 @@ class BroadcastService:
         while True:
             try:
                 msg = await asyncio.wait_for(self.queue.get(), timeout=0.5)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 if not self.is_running:
                     return
                 continue
@@ -218,15 +221,10 @@ class BroadcastService:
                             asyncio.create_task(self._schedule_retry(msg))
                             self.pending_retries += 1
                         except Exception as e:
-                            logger.error(
-                                f"❌ Не удалось запланировать повтор для {msg.tg_id}: {e}"
-                            )
+                            logger.error(f"❌ Не удалось запланировать повтор для {msg.tg_id}: {e}")
                             self.results.append(False)
                     else:
-                        logger.error(
-                            f"❌ Достигнут лимит попыток для {msg.tg_id} "
-                            f"(после {msg.attempts} попыток)"
-                        )
+                        logger.error(f"❌ Достигнут лимит попыток для {msg.tg_id} (после {msg.attempts} попыток)")
                         self.results.append(False)
                 else:
                     self.results.append(False)
@@ -423,12 +421,16 @@ class BroadcastService:
                     for msg in messages:
                         tg_id = msg.get("tg_id")
                         if tg_id and tg_id not in self.blocked_users:
-                            await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data)
+                            await notify_web(
+                                session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data
+                            )
                     await session.commit()
             else:
                 for msg in messages:
                     tg_id = msg.get("tg_id")
                     if tg_id and tg_id not in self.blocked_users:
-                        await notify_web(session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data)
+                        await notify_web(
+                            session, tg_id=tg_id, type="broadcast", title=title, message=body, data=notif_data
+                        )
         except Exception as e:
             logger.warning(f"[Broadcast] Ошибка создания web-уведомлений: {e}")

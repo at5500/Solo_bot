@@ -158,9 +158,7 @@ def build_poll_preview_kb(is_anonymous: bool) -> InlineKeyboardMarkup:
 def build_poll_audience_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for code, label in POLL_AUDIENCES:
-        builder.row(
-            InlineKeyboardButton(text=label, callback_data=AdminPollCallback(action="aud", value=code).pack())
-        )
+        builder.row(InlineKeyboardButton(text=label, callback_data=AdminPollCallback(action="aud", value=code).pack()))
     builder.row(
         InlineKeyboardButton(text="◀️ Назад", callback_data=AdminPollCallback(action="back_preview").pack()),
     )
@@ -170,7 +168,9 @@ def build_poll_audience_kb() -> InlineKeyboardMarkup:
 def build_poll_detail_kb(poll_id: str, is_open: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="🔄 Обновить", callback_data=AdminPollCallback(action="view", poll_id=poll_id).pack()),
+        InlineKeyboardButton(
+            text="🔄 Обновить", callback_data=AdminPollCallback(action="view", poll_id=poll_id).pack()
+        ),
     )
     if is_open:
         builder.row(
@@ -246,7 +246,9 @@ def build_sources_kb(sources: list) -> InlineKeyboardMarkup:
 def build_channel_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📢 Везде (бот + сайт)", callback_data=AdminSenderChannelCallback(channel="both").pack()),
+        InlineKeyboardButton(
+            text="📢 Везде (бот + сайт)", callback_data=AdminSenderChannelCallback(channel="both").pack()
+        ),
     )
     builder.row(
         InlineKeyboardButton(text="📲 Только бот", callback_data=AdminSenderChannelCallback(channel="bot").pack()),

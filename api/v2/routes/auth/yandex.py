@@ -21,6 +21,7 @@ from api.depends import (
 )
 from api.v2.routes.auth._common import _client_ip, safe_return_path
 
+
 _YANDEX_NONCE_COOKIE = "y_oauth_nonce"
 from database import identities as idb
 from logger import logger

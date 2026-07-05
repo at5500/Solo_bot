@@ -79,7 +79,11 @@ WEB_ERROR_RETENTION_DAYS = 30
 
 async def cleanup_web_analytics_job() -> None:
     """Удаляет старую веб-аналитику, чтобы таблицы не росли бесконечно."""
-    from datetime import datetime, timedelta, timezone as _tz
+    from datetime import (
+        datetime,
+        timedelta,
+        timezone as _tz,
+    )
 
     from sqlalchemy import delete as sa_delete
 
@@ -101,11 +105,15 @@ async def cleanup_web_analytics_job() -> None:
                     WebErrorReport.last_seen_at < error_cutoff,
                 )
             )
-            th = await session.execute(sa_delete(KeyTrafficHistory).where(KeyTrafficHistory.snapshot_date < traffic_cutoff))
+            th = await session.execute(
+                sa_delete(KeyTrafficHistory).where(KeyTrafficHistory.snapshot_date < traffic_cutoff)
+            )
             from sqlalchemy import text as _sa_text
 
             rl_cutoff = int(now.timestamp()) - 3600
-            rl = await session.execute(_sa_text("DELETE FROM rate_limit_counters WHERE window_start < :c"), {"c": rl_cutoff})
+            rl = await session.execute(
+                _sa_text("DELETE FROM rate_limit_counters WHERE window_start < :c"), {"c": rl_cutoff}
+            )
             await session.commit()
             logger.info(
                 "[WebAnalyticsCleanup] удалено page_views={} flow_events={} error_reports={} traffic_history={} rate_limit={}",
@@ -210,29 +218,43 @@ async def anomaly_check_job() -> None:
     alerts: list[str] = []
     async with async_session_maker() as session:
         try:
-            row = (await session.execute(
-                select(
-                    func.count().filter(Payment.status == "success").label("ok"),
-                    func.count().filter(Payment.status.in_(["failed", "cancelled"])).label("bad"),
-                ).where(Payment.created_at >= y_start).where(Payment.created_at < y_end)
-            )).first()
+            row = (
+                await session.execute(
+                    select(
+                        func.count().filter(Payment.status == "success").label("ok"),
+                        func.count().filter(Payment.status.in_(["failed", "cancelled"])).label("bad"),
+                    )
+                    .where(Payment.created_at >= y_start)
+                    .where(Payment.created_at < y_end)
+                )
+            ).first()
             ok = int(row.ok or 0) if row else 0
             bad = int(row.bad or 0) if row else 0
             total = ok + bad
             if total >= 10 and bad / total > 0.3:
-                alerts.append(f"⚠️ Высокий процент отказов платежей за вчера: {bad}/{total} ({round(bad / total * 100)}%).")
+                alerts.append(
+                    f"⚠️ Высокий процент отказов платежей за вчера: {bad}/{total} ({round(bad / total * 100)}%)."
+                )
 
-            exp_y = (await session.scalar(
-                select(func.count()).select_from(SubscriptionEvent)
-                .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
-                .where(SubscriptionEvent.created_at >= y_start).where(SubscriptionEvent.created_at < y_end)
-            )) or 0
+            exp_y = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SubscriptionEvent)
+                    .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
+                    .where(SubscriptionEvent.created_at >= y_start)
+                    .where(SubscriptionEvent.created_at < y_end)
+                )
+            ) or 0
             week_start = y_start - timedelta(days=7)
-            exp_week = (await session.scalar(
-                select(func.count()).select_from(SubscriptionEvent)
-                .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
-                .where(SubscriptionEvent.created_at >= week_start).where(SubscriptionEvent.created_at < y_start)
-            )) or 0
+            exp_week = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SubscriptionEvent)
+                    .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
+                    .where(SubscriptionEvent.created_at >= week_start)
+                    .where(SubscriptionEvent.created_at < y_start)
+                )
+            ) or 0
             avg = exp_week / 7.0
             if avg >= 5 and exp_y > avg * 2:
                 alerts.append(f"⚠️ Всплеск оттока за вчера: истекло {exp_y} (среднее за неделю ~{round(avg)}).")

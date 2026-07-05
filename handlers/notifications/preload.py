@@ -64,9 +64,7 @@ async def preload_with_fallback(session: AsyncSession) -> tuple[list, dict | Non
     try:
         preload_data = await preload_notification_data(session)
         keys = [data["key"] for data in preload_data["keys_data"].values()]
-        logger.info(
-            f"Предзагружено: {len(keys)} ключей, {len(preload_data['tariffs_cache'])} тарифов"
-        )
+        logger.info(f"Предзагружено: {len(keys)} ключей, {len(preload_data['tariffs_cache'])} тарифов")
         return keys, preload_data
     except Exception as error:
         logger.error(f"Ошибка предзагрузки: {error}")

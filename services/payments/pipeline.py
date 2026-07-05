@@ -170,8 +170,10 @@ async def process_cancelled_payment(
         async with async_session_maker() as session:
             payment = await get_payment_by_payment_id(session, parsed.payment_id)
             cur = payment.get("status") if payment else None
-            tg_id = parsed.tg_id if parsed.tg_id is not None else (
-                int(payment["tg_id"]) if payment and payment.get("tg_id") is not None else None
+            tg_id = (
+                parsed.tg_id
+                if parsed.tg_id is not None
+                else (int(payment["tg_id"]) if payment and payment.get("tg_id") is not None else None)
             )
             reversal = new_status in _REVERSAL_STATUSES
 
@@ -200,7 +202,9 @@ async def process_cancelled_payment(
                 except Exception:
                     pass
                 await _invalidate_keys_cache(provider, tg_id)
-                logger.info(f"[{provider}] Возврат {parsed.payment_id}: статус {new_status}, баланс откачен на {amount}")
+                logger.info(
+                    f"[{provider}] Возврат {parsed.payment_id}: статус {new_status}, баланс откачен на {amount}"
+                )
                 return PipelineResult(ok=True)
 
             if cur in ("cancelled", "failed"):

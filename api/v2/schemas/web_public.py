@@ -60,6 +60,7 @@ class AccountKeyDetailsResponse(BaseModel):
     is_tariff_configurable: bool = False
     addons_devices_enabled: bool = False
     addons_traffic_enabled: bool = False
+    can_renew: bool = True
 
 
 class AccountKeyResponse(BaseModel):

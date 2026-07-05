@@ -1089,16 +1089,12 @@ async def drain_audit_redis_to_db(session_factory: Any) -> int:
                         [str(rec.get("request_id")) for rec in batch if rec.get("request_id")],
                     )
                     identity_ids_in_batch = {
-                        str(rec.get("actor_identity_id"))
-                        for rec in batch
-                        if rec.get("actor_identity_id")
+                        str(rec.get("actor_identity_id")) for rec in batch if rec.get("actor_identity_id")
                     }
                     if identity_ids_in_batch:
                         from database.models import Identity
 
-                        rows = await session.execute(
-                            select(Identity.id).where(Identity.id.in_(identity_ids_in_batch))
-                        )
+                        rows = await session.execute(select(Identity.id).where(Identity.id.in_(identity_ids_in_batch)))
                         existing_identity_ids = {row[0] for row in rows.all()}
                     else:
                         existing_identity_ids = set()

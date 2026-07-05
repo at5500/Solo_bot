@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -23,8 +24,38 @@ from panels.remnawave import RemnawaveAPI
 
 _remnawave_semaphore = asyncio.Semaphore(REMNAWAVE_MAX_CONCURRENCY)
 
+_PANEL_ERROR = object()
 
-async def _fetch_profile_http_only(api_url: str, client_id: str) -> dict[str, Any] | None:
+_BREAKER_FAILS = 5
+_BREAKER_COOLDOWN_SEC = 30
+_BREAKER_WINDOW_SEC = 60
+_breaker_fails: dict[str, tuple[int, float]] = {}
+_breaker_down_until: dict[str, float] = {}
+
+
+def _breaker_open(api_url: str, kind: str) -> bool:
+    return time.monotonic() < _breaker_down_until.get(f"{kind}:{api_url}", 0.0)
+
+
+def _breaker_record(api_url: str, kind: str, ok: bool) -> None:
+    key = f"{kind}:{api_url}"
+    if ok:
+        _breaker_fails.pop(key, None)
+        return
+    now = time.monotonic()
+    fails, last_ts = _breaker_fails.get(key, (0, now))
+    fails = fails + 1 if now - last_ts <= _BREAKER_WINDOW_SEC else 1
+    _breaker_fails[key] = (fails, now)
+    if fails >= _BREAKER_FAILS:
+        _breaker_down_until[key] = now + _BREAKER_COOLDOWN_SEC
+        _breaker_fails.pop(key, None)
+        logger.warning(
+            f"[Remnawave] Панель {api_url} не отвечает ({fails} фейлов {kind} за {_BREAKER_WINDOW_SEC} c) — "
+            f"пауза {kind}-запросов на {_BREAKER_COOLDOWN_SEC} c"
+        )
+
+
+async def _fetch_profile_http_only(api_url: str, client_id: str) -> dict[str, Any] | None | object:
     """Только HTTP к панели: логин + устройства + юзер. Без кэша и без resolve. Вызывается из потока."""
     api = RemnawaveAPI(api_url)
     try:
@@ -35,7 +66,7 @@ async def _fetch_profile_http_only(api_url: str, client_id: str) -> dict[str, An
                 timeout=REMNAWAVE_PROFILE_TIMEOUT_SEC,
             )
         if not logged_in:
-            return None
+            return _PANEL_ERROR
         devices = await asyncio.wait_for(
             api.get_user_hwid_devices(client_id),
             timeout=REMNAWAVE_PROFILE_TIMEOUT_SEC,
@@ -71,7 +102,7 @@ async def _fetch_profile_http_only(api_url: str, client_id: str) -> dict[str, An
             "last_connected_node": last_connected_node,
         }
     except (TimeoutError, Exception):
-        return None
+        return _PANEL_ERROR
     finally:
         if hasattr(api, "aclose"):
             try:
@@ -106,11 +137,11 @@ def _run_with_api_in_thread(
                 asyncio.wait_for(api.login(REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD), timeout=timeout_sec)
             )
         if not logged_in:
-            return None
+            return _PANEL_ERROR
         coro = operation(api)
         return loop.run_until_complete(asyncio.wait_for(coro, timeout=timeout_sec))
     except (TimeoutError, Exception):
-        return None
+        return _PANEL_ERROR
     finally:
         if hasattr(api, "aclose"):
             try:
@@ -189,10 +220,15 @@ async def get_remnawave_profile(
         if cached_profile is not None:
             return cached_profile
 
+    if _breaker_open(api_url, "profile"):
+        return None
+
     async with _remnawave_semaphore:
         profile = await run_io(_run_profile_http_in_thread, api_url, client_id)
-        if profile is None:
+        _breaker_record(api_url, "profile", profile is not _PANEL_ERROR)
+        if profile is _PANEL_ERROR:
             logger.warning(f"[Remnawave] Таймаут или ошибка профиля для client_id={client_id}")
+            profile = None
 
     ttl = REMNAWAVE_PROFILE_CACHE_TTL_SEC if profile else REMNAWAVE_PROFILE_ERROR_CACHE_TTL_SEC
     await cache_set(pkey, profile, ttl)
@@ -234,10 +270,16 @@ async def fetch_all_remnawave_traffic(
 
     api = RemnawaveAPI(api_url)
     try:
-        all_users = await api.get_all_users_time(
-            username=REMNAWAVE_LOGIN,
-            password=REMNAWAVE_PASSWORD,
+        all_users = await asyncio.wait_for(
+            api.get_all_users_time(
+                username=REMNAWAVE_LOGIN,
+                password=REMNAWAVE_PASSWORD,
+            ),
+            timeout=60,
         )
+    except TimeoutError:
+        logger.warning("[Bulk Traffic] Таймаут bulk-запроса к Remnawave")
+        return {}
     finally:
         await api.aclose()
 
@@ -270,8 +312,14 @@ async def with_remnawave_api(
     if not api_url:
         return None
 
+    if _breaker_open(api_url, "action"):
+        logger.warning(f"[Remnawave] Панель на паузе (breaker), операция для server_ref={server_ref} пропущена")
+        return None
+
     async with _remnawave_semaphore:
         result = await run_io(_run_with_api_in_thread, api_url, operation, timeout_sec)
-        if result is None:
+        _breaker_record(api_url, "action", result is not _PANEL_ERROR)
+        if result is _PANEL_ERROR:
             logger.warning(f"[Remnawave] Таймаут или ошибка операции для server_ref={server_ref}")
+            return None
         return result

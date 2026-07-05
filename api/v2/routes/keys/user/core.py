@@ -8,6 +8,7 @@ import time
 
 from .._common import *  # noqa: F401,F403 — подтягиваем все имена для endpoints
 from .._common import (
+    _is_renew_available,
     _key_actions_config,
     _normalize_expiry_ms,
     _resolve_available_location_servers,
@@ -44,6 +45,8 @@ async def user_keys(
         except Exception:
             key_actions = AccountKeyActionsAvailability()
         tariff_id_value = getattr(key, "tariff_id", None)
+        if key_actions.can_renew and not _is_renew_available(int(getattr(key, "expiry_time", 0) or 0)):
+            key_actions.can_renew = False
         result.append(
             AccountKeyResponse(
                 email=str(getattr(key, "email", "") or ""),
@@ -90,9 +93,7 @@ async def user_key_connection(
     panel_type = ""
     if server_name:
         srv = (
-            await session.execute(
-                select(Server).where(Server.server_name == server_name).limit(1)
-            )
+            await session.execute(select(Server).where(Server.server_name == server_name).limit(1))
         ).scalar_one_or_none()
         if srv is not None:
             cluster_name = str(getattr(srv, "cluster_name", "") or "")
@@ -255,6 +256,7 @@ async def user_key_details(
         is_tariff_configurable=bool(is_tariff_configurable),
         addons_devices_enabled=bool(addons_devices_enabled),
         addons_traffic_enabled=bool(addons_traffic_enabled),
+        can_renew=_is_renew_available(int(getattr(db_key, "expiry_time", 0) or 0)),
     )
 
 
@@ -267,6 +269,7 @@ async def user_key_qr(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     await enforce_rate_limit(request, session, bucket="key_qr", max_per_window=30, window_sec=60)
     actions = _key_actions_config()
     if not force_web and not actions.qr_enabled:
@@ -304,6 +307,7 @@ async def user_key_update_alias(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     await enforce_rate_limit(request, session, bucket="key_alias", max_per_window=20, window_sec=60)
     alias = str(body.alias or "").strip()
     if not alias:
@@ -355,6 +359,7 @@ async def user_key_delete(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     await enforce_rate_limit(request, session, bucket="key_delete", max_per_window=10, window_sec=60)
     actions = _key_actions_config()
     if not force_web and not actions.delete_enabled:

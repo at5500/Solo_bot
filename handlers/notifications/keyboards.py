@@ -1,7 +1,14 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from handlers.buttons import ADD_SUB, CHANGE_TARIFF, DISCOUNT_TARIFF, MAIN_MENU, MAX_DISCOUNT_TARIFF, RENEW_KEY_NOTIFICATION
+from handlers.buttons import (
+    ADD_SUB,
+    CHANGE_TARIFF,
+    DISCOUNT_TARIFF,
+    MAIN_MENU,
+    MAX_DISCOUNT_TARIFF,
+    RENEW_KEY_NOTIFICATION,
+)
 from handlers.keys.utils import build_key_callback
 
 
@@ -41,8 +48,19 @@ def build_hot_lead_kb(final: bool = False) -> InlineKeyboardMarkup:
 
 
 def build_cold_lead_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=ADD_SUB, callback_data="create_key")]])
+
+
+def build_cold_lead_discount_kb(final: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=ADD_SUB, callback_data="create_key")]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=DISCOUNT_TARIFF if not final else MAX_DISCOUNT_TARIFF,
+                    callback_data=("cold_lead_discount" if not final else "cold_lead_final_discount"),
+                )
+            ]
+        ]
     )
 
 

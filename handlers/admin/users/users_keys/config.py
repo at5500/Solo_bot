@@ -3,6 +3,7 @@
 from ._common import *  # noqa: F401,F403
 from .edit import handle_key_edit
 
+
 @router.callback_query(
     AdminUserEditorCallback.filter(F.action == "users_edit_config"),
     IsAdminFilter(),

@@ -41,7 +41,8 @@ from database import (
     sum_payments_since,
     sum_total_payments,
 )
-from filters.admin import IsAdminFilter
+from filters.admin import HasPermission, IsAdminFilter
+from filters.permissions import PERM_STATS
 from hooks.hooks import run_hooks
 from logger import logger
 from utils.csv_export import (
@@ -50,9 +51,6 @@ from utils.csv_export import (
     export_payments_csv,
     export_users_csv,
 )
-
-from filters.admin import HasPermission
-from filters.permissions import PERM_STATS
 
 from ..panel.keyboard import AdminPanelCallback, build_admin_back_kb
 from .keyboard import (
@@ -480,9 +478,7 @@ async def _build_audit_report(session: AsyncSession, source: str = "db") -> tupl
         connect_opened = success_by_step.get("connect", 0)
         pct_pay = round(100.0 * pay_ok / pay_start, 1) if pay_start else 0
         pct_connect = round(100.0 * connect_opened / key_created, 1) if key_created else 0
-        lines.append(
-            f"<b>Оплата:</b> начало {pay_start}, успешная {pay_ok}, % успешных от созданных: {pct_pay}%"
-        )
+        lines.append(f"<b>Оплата:</b> начало {pay_start}, успешная {pay_ok}, % успешных от созданных: {pct_pay}%")
         lines.append(
             f"<b>Подписка:</b> оформлена {key_created}, открыто подключение {connect_opened}, % от оформленных: {pct_connect}%"
         )
@@ -685,9 +681,7 @@ async def _collect_daily_series(session, moscow_tz, last_day: date, days: int):
 async def _send_report_to_admins(session: AsyncSession, text: str, chart) -> None:
     from database.models import Admin
 
-    moderator_ids = set(
-        (await session.execute(select(Admin.tg_id).where(Admin.role == "moderator"))).scalars().all()
-    )
+    moderator_ids = set((await session.execute(select(Admin.tg_id).where(Admin.role == "moderator"))).scalars().all())
     photo_bytes = chart.getvalue() if chart is not None else None
     for admin_id in ADMIN_ID:
         if admin_id in moderator_ids:
@@ -724,7 +718,11 @@ async def send_daily_stats_report(session: AsyncSession):
             labels,
             [
                 {"name": "Доход, руб/день", "color": (63, 185, 80), "values": revenue_series},
-                {"name": "Новые пользователи/день", "color": (88, 166, 255), "values": [float(v) for v in users_series]},
+                {
+                    "name": "Новые пользователи/день",
+                    "color": (88, 166, 255),
+                    "values": [float(v) for v in users_series],
+                },
             ],
         )
 
@@ -749,8 +747,18 @@ async def send_daily_stats_report(session: AsyncSession):
 
 
 _MONTH_NAMES_RU = {
-    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель", 5: "Май", 6: "Июнь",
-    7: "Июль", 8: "Август", 9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
 }
 
 
@@ -777,12 +785,16 @@ async def send_monthly_stats_report(session: AsyncSession):
         prev_start, prev_end = _month_window(prev_last_day.year, prev_last_day.month)
 
         def _to_utc_naive(d: date) -> datetime:
-            return moscow_tz.localize(datetime.combine(d, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+            return (
+                moscow_tz.localize(datetime.combine(d, datetime.min.time())).astimezone(pytz.UTC).replace(tzinfo=None)
+            )
 
         def _to_local_naive(d: date) -> datetime:
             return moscow_tz.localize(datetime.combine(d, datetime.min.time())).replace(tzinfo=None)
 
-        users_total = await count_users_registered_between(session, _to_utc_naive(month_start), _to_utc_naive(month_end))
+        users_total = await count_users_registered_between(
+            session, _to_utc_naive(month_start), _to_utc_naive(month_end)
+        )
         users_prev = await count_users_registered_between(session, _to_utc_naive(prev_start), _to_utc_naive(prev_end))
         revenue_total = await sum_payments_between(session, _to_local_naive(month_start), _to_local_naive(month_end))
         revenue_prev = await sum_payments_between(session, _to_local_naive(prev_start), _to_local_naive(prev_end))
@@ -793,7 +805,11 @@ async def send_monthly_stats_report(session: AsyncSession):
             labels,
             [
                 {"name": "Доход, руб/день", "color": (63, 185, 80), "values": revenue_series},
-                {"name": "Новые пользователи/день", "color": (88, 166, 255), "values": [float(v) for v in users_series]},
+                {
+                    "name": "Новые пользователи/день",
+                    "color": (88, 166, 255),
+                    "values": [float(v) for v in users_series],
+                },
             ],
         )
 

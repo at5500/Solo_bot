@@ -8,6 +8,7 @@ from database import filter_cluster_by_subgroup, get_key_details, get_tariff_by_
 from logger import logger
 from panels._3xui import get_vless_link_for_client, get_xui_instance
 from panels.remnawave_runtime import with_remnawave_api
+
 from .utils import is_plan_vless, split_by_panel
 
 
@@ -81,6 +82,7 @@ async def _try_build_3xui_vless(servers: list, email: str) -> str | None:
                 return None
             port = getattr(inbound, "port", None)
             from servers import extract_host
+
             host = extract_host(si.get("subscription_url") or si.get("api_url"))
             return await get_vless_link_for_client(
                 xui=xui,

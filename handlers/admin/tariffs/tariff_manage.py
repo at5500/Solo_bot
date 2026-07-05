@@ -57,8 +57,10 @@ async def start_tariff_creation(callback: CallbackQuery, state: FSMContext):
         "📁 Введите <b>код группы</b>, в которую вы хотите добавить тариф.\n\n"
         "Например: <code>basic</code>, <code>vip</code>, <code>business</code>\n\n"
         "<b>Специальные группы:</b>\n"
-        "• <code>discounts</code> — тарифы со скидкой\n"
-        "• <code>discounts_max</code> — тарифы с максимальной скидкой\n"
+        "• <code>discounts</code> — тарифы со скидкой (горячие лиды)\n"
+        "• <code>discounts_max</code> — тарифы с максимальной скидкой (горячие лиды)\n"
+        "• <code>cold_discounts</code> — тарифы со скидкой (холодные лиды)\n"
+        "• <code>cold_discounts_max</code> — тарифы с максимальной скидкой (холодные лиды)\n"
         "• <code>gifts</code> — тарифы для подарков\n"
         "• <code>trial</code> — тариф для пробного периода",
         reply_markup=build_cancel_kb(),
@@ -258,8 +260,10 @@ async def show_tariff_groups(callback: CallbackQuery, session: AsyncSession):
         return
 
     special_groups = {
-        "discounts": "🔻 Скидки",
-        "discounts_max": "🔻 Макс. скидки",
+        "discounts": "🔻 Скидки (горячие)",
+        "discounts_max": "🔻 Макс. скидки (горячие)",
+        "cold_discounts": "🧊 Скидки (холодные)",
+        "cold_discounts_max": "🧊 Макс. скидки (холодные)",
         "gifts": "🎁 Подарки",
         "trial": "🚀 Пробный период",
     }
@@ -722,7 +726,6 @@ async def toggle_tariff_configurable(callback: CallbackQuery, session: AsyncSess
     current = bool(tariff.configurable)
     tariff.configurable = not current
     tariff.updated_at = datetime.utcnow()
-
 
     text, markup = render_tariff_card(tariff)
     await callback.message.edit_text(text=text, reply_markup=markup)

@@ -40,10 +40,10 @@ from handlers.buttons import (
     MAIN_MENU,
     MY_DEVICES,
     QR,
-    UNBIND_DEVICE,
     RENEW_KEY,
     ROUTER_BUTTON,
     TV_BUTTON,
+    UNBIND_DEVICE,
 )
 from handlers.keys.utils import build_key_callback, build_key_ref, key_owned_by_user, resolve_key
 from handlers.texts import (
@@ -101,27 +101,23 @@ async def process_callback_or_message_view_keys(
 
     tg_id = callback_query_or_message.from_user.id
 
-    try:
-        records = await get_keys(session, tg_id)
+    records = await get_keys(session, tg_id)
 
-        if records and len(records) == 1:
-            key_ref = build_key_ref(records[0].client_id, records[0].email)
-            image_path = os.path.join("img", "pic_view.jpg")
-            await render_key_info(target_message, session, key_ref, image_path)
-            return
+    if records and len(records) == 1:
+        key_ref = build_key_ref(records[0].client_id, records[0].email)
+        image_path = os.path.join("img", "pic_view.jpg")
+        await render_key_info(target_message, session, key_ref, image_path)
+        return
 
-        inline_keyboard, response_message = await build_keys_response(records, session, page=page)
-        image_path = os.path.join("img", "pic_keys.jpg")
+    inline_keyboard, response_message = await build_keys_response(records, session, page=page)
+    image_path = os.path.join("img", "pic_keys.jpg")
 
-        await edit_or_send_message(
-            target_message=target_message,
-            text=response_message,
-            reply_markup=inline_keyboard,
-            media_path=image_path,
-        )
-    except Exception as error:
-        error_message = f"Ошибка при получении ключей: {error}"
-        await target_message.answer(text=error_message)
+    await edit_or_send_message(
+        target_message=target_message,
+        text=response_message,
+        reply_markup=inline_keyboard,
+        media_path=image_path,
+    )
 
 
 @router.callback_query(F.data.startswith("view_keys|"))
@@ -568,9 +564,7 @@ def _build_devices_keyboard(
         )
     nav_buttons: list[InlineKeyboardButton] = []
     if page > 0:
-        nav_buttons.append(
-            InlineKeyboardButton(text="◀️", callback_data=f"my_devices|{key_ref}|{page - 1}")
-        )
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"my_devices|{key_ref}|{page - 1}"))
     if total_pages > 0:
         nav_buttons.append(
             InlineKeyboardButton(
@@ -579,9 +573,7 @@ def _build_devices_keyboard(
             )
         )
     if page + 1 < total_pages:
-        nav_buttons.append(
-            InlineKeyboardButton(text="▶️", callback_data=f"my_devices|{key_ref}|{page + 1}")
-        )
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"my_devices|{key_ref}|{page + 1}"))
     if nav_buttons:
         builder.row(*nav_buttons)
     builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}"))
@@ -621,9 +613,7 @@ async def _render_my_devices(
     if total == 0:
         text = "💻 <b>Мои устройства</b>\n\n🔌 Нет привязанных устройств."
         builder = InlineKeyboardBuilder()
-        builder.row(
-            InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}")
-        )
+        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}"))
         await edit_or_send_message(
             target_message=callback_query.message,
             text=text,
@@ -637,10 +627,7 @@ async def _render_my_devices(
     start = page * DEVICES_PER_PAGE
     page_devices = devices[start : start + DEVICES_PER_PAGE]
 
-    header = (
-        f"💻 <b>Мои устройства</b>\n"
-        f"🔗 Привязано: <b>{total}</b>\n\n"
-    )
+    header = f"💻 <b>Мои устройства</b>\n🔗 Привязано: <b>{total}</b>\n\n"
     if notice:
         header += f"{notice}\n\n"
     body = "\n".join(_format_device_block(start + i + 1, dev) for i, dev in enumerate(page_devices))
@@ -695,6 +682,17 @@ async def handle_unbind_device(callback_query: CallbackQuery, session: AsyncSess
         await safe_answer_callback(callback_query, "❌ У ключа отсутствует client_id.", show_alert=True)
         return
 
+    from services.hwid_cooldown import check_delete_allowed, format_wait_time, register_deletion
+
+    allowed, wait_days = await check_delete_allowed(client_id)
+    if not allowed:
+        await safe_answer_callback(
+            callback_query,
+            f"⏳ Слишком частое удаление устройств.\nПопробуйте через {format_wait_time(wait_days)}.",
+            show_alert=True,
+        )
+        return
+
     server_id = str(record.get("server_id") or "")
 
     async def _delete(api):
@@ -714,6 +712,7 @@ async def handle_unbind_device(callback_query: CallbackQuery, session: AsyncSess
         await safe_answer_callback(callback_query, "❌ Не удалось отвязать устройство.", show_alert=True)
     else:
         await invalidate_remnawave_profile(session, server_id, str(client_id), fallback_any=True)
+        await register_deletion(client_id)
         await safe_answer_callback(callback_query, "✅ Устройство отвязано.")
 
     await _render_my_devices(callback_query, session, key_ref, page)

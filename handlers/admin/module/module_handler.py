@@ -7,10 +7,9 @@ from aiogram.types import CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.executor import run_io
-from filters.admin import IsAdminFilter
-from handlers.admin.panel.keyboard import AdminPanelCallback
-from filters.admin import HasPermission
+from filters.admin import HasPermission, IsAdminFilter
 from filters.permissions import PERM_MODULES
+from handlers.admin.panel.keyboard import AdminPanelCallback
 from utils.modules_manager import manager
 
 from .keyboard import build_module_menu_kb, build_modules_kb

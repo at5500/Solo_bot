@@ -23,9 +23,7 @@ def _get_cached_admin(user_id: int) -> tuple[bool, bool, frozenset[str]] | None:
     return None
 
 
-def _set_cached_admin(
-    user_id: int, is_admin: bool, is_superadmin: bool, permissions: frozenset[str]
-) -> None:
+def _set_cached_admin(user_id: int, is_admin: bool, is_superadmin: bool, permissions: frozenset[str]) -> None:
     _ADMIN_CACHE[user_id] = (time.time() + _ADMIN_CACHE_TTL, is_admin, is_superadmin, permissions)
 
 
@@ -43,9 +41,7 @@ async def _resolve_admin(user_id: int) -> tuple[bool, bool, frozenset[str]]:
 
     try:
         async with async_session_maker() as session:
-            admin = (
-                await session.execute(select(Admin).where(Admin.tg_id == user_id))
-            ).scalar_one_or_none()
+            admin = (await session.execute(select(Admin).where(Admin.tg_id == user_id))).scalar_one_or_none()
             admin_ids = (ADMIN_ID,) if isinstance(ADMIN_ID, int) else ADMIN_ID
             is_admin = admin is not None or user_id in admin_ids
             if admin:

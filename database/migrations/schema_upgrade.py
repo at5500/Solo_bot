@@ -729,8 +729,7 @@ async def _run_tg_mirror_backfill(conn: AsyncConnection, *, nulls_only: bool) ->
         (
             "scheduled_broadcasts",
             "UPDATE scheduled_broadcasts s SET created_by_tg_id = u.tg_id FROM users u "
-            "WHERE s.created_by_user_id = u.id"
-            + (" AND s.created_by_tg_id IS NULL" if nulls_only else ""),
+            "WHERE s.created_by_user_id = u.id" + (" AND s.created_by_tg_id IS NULL" if nulls_only else ""),
         ),
         (
             "coupon_usages",
@@ -1570,9 +1569,16 @@ async def _migration_v38_subscription_events(conn: AsyncConnection) -> None:
         )
         """,
     )
-    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_type_created ON subscription_events (event_type, created_at)")
-    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_created ON subscription_events (created_at)")
-    await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_client ON subscription_events (client_id)")
+    await _exec_ignore(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_subscription_events_type_created ON subscription_events (event_type, created_at)",
+    )
+    await _exec_ignore(
+        conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_created ON subscription_events (created_at)"
+    )
+    await _exec_ignore(
+        conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_client ON subscription_events (client_id)"
+    )
     await _exec_ignore(conn, "CREATE INDEX IF NOT EXISTS ix_subscription_events_user ON subscription_events (user_id)")
 
 
@@ -1736,4 +1742,3 @@ async def apply_all_migrations(conn: AsyncConnection) -> None:
 
 async def apply_account_schema_if_needed(conn: AsyncConnection) -> None:
     await apply_all_migrations(conn)
-

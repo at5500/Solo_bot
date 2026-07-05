@@ -38,9 +38,7 @@ async def _map_legacy_refs_to_user_ids(session: AsyncSession, refs: list[int]) -
     m: dict[int, int] = {}
     for i in range(0, len(uniq), _LEGACY_REF_MAP_BATCH_SIZE):
         chunk = uniq[i : i + _LEGACY_REF_MAP_BATCH_SIZE]
-        r = await session.execute(
-            select(User.id, User.tg_id).where(or_(User.tg_id.in_(chunk), User.id.in_(chunk)))
-        )
+        r = await session.execute(select(User.id, User.tg_id).where(or_(User.tg_id.in_(chunk), User.id.in_(chunk))))
         for uid, tgid in r.all():
             m[int(uid)] = int(uid)
             if tgid is not None:
@@ -317,9 +315,7 @@ _COLD_LEAD_NOTIFICATION_TYPES = (
 )
 
 
-async def get_hot_lead_notification_flags(
-    session: AsyncSession, legacy_user_refs: list[int]
-) -> dict[int, set[str]]:
+async def get_hot_lead_notification_flags(session: AsyncSession, legacy_user_refs: list[int]) -> dict[int, set[str]]:
     """
     Один запрос: для каждого legacy_user_ref (tg_id или user_id) возвращает множество
     типов уведомлений hot_lead_*, которые у пользователя уже есть.
@@ -342,9 +338,7 @@ async def get_hot_lead_notification_flags(
     return dict(out)
 
 
-async def get_cold_lead_notification_flags(
-    session: AsyncSession, legacy_user_refs: list[int]
-) -> dict[int, set[str]]:
+async def get_cold_lead_notification_flags(session: AsyncSession, legacy_user_refs: list[int]) -> dict[int, set[str]]:
     if not legacy_user_refs:
         return {}
     id_map = await _map_legacy_refs_to_user_ids(session, legacy_user_refs)
@@ -390,6 +384,42 @@ async def check_hot_lead_discount(session: AsyncSession, legacy_user_ref: int) -
         return {"available": False}
 
     tariff_group = "discounts" if notification_type == "hot_lead_step_2" else "discounts_max"
+
+    return {
+        "available": True,
+        "type": notification_type,
+        "tariff_group": tariff_group,
+        "expires_at": expires_at,
+    }
+
+
+async def check_cold_lead_discount(session: AsyncSession, legacy_user_ref: int) -> dict:
+    u = await resolve_user_optional(session, legacy_user_ref)
+    if u is None:
+        return {"available": False}
+    result = await session.execute(
+        select(Notification.notification_type, Notification.last_notification_time)
+        .where(Notification.user_id == u.id)
+        .where(Notification.notification_type.in_(["cold_lead_step_2", "cold_lead_step_3"]))
+        .order_by(Notification.last_notification_time.desc())
+        .limit(1)
+    )
+
+    row = result.first()
+    if not row:
+        return {"available": False}
+
+    notification_type, last_time = row
+
+    hours = int(NOTIFICATIONS_CONFIG.get("DISCOUNT_ACTIVE_HOURS", DISCOUNT_ACTIVE_HOURS))
+
+    expires_at = last_time + timedelta(hours=hours)
+    current_time = _utc_now()
+
+    if current_time > expires_at:
+        return {"available": False}
+
+    tariff_group = "cold_discounts" if notification_type == "cold_lead_step_2" else "cold_discounts_max"
 
     return {
         "available": True,

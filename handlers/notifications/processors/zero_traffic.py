@@ -24,6 +24,7 @@ from hooks.hooks import run_hooks
 from logger import logger
 from panels.remnawave_runtime import fetch_all_remnawave_traffic
 
+
 moscow_tz = pytz.timezone("Europe/Moscow")
 
 _ZERO_TRAFFIC_UPDATE_BATCH_SIZE = 5000
@@ -99,23 +100,31 @@ async def process_zero_traffic(
                 else:
                     builder.row(InlineKeyboardButton(text=CONNECT_DEVICE, web_app=WebAppInfo(url=final_link)))
             else:
-                builder.row(InlineKeyboardButton(
-                    text=CONNECT_DEVICE,
-                    callback_data=build_key_callback("connect_device", client_id, email),
-                ))
+                builder.row(
+                    InlineKeyboardButton(
+                        text=CONNECT_DEVICE,
+                        callback_data=build_key_callback("connect_device", client_id, email),
+                    )
+                )
         except Exception as e:
             logger.error(f"Ошибка типа панели для {email}: {e}")
-            builder.row(InlineKeyboardButton(
-                text=CONNECT_DEVICE,
-                callback_data=build_key_callback("connect_device", client_id, email),
-            ))
+            builder.row(
+                InlineKeyboardButton(
+                    text=CONNECT_DEVICE,
+                    callback_data=build_key_callback("connect_device", client_id, email),
+                )
+            )
 
         builder.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
         builder.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))
 
         try:
             hook_commands = await run_hooks(
-                "zero_traffic_notification", chat_id=tg_id, admin=False, session=session, email=email,
+                "zero_traffic_notification",
+                chat_id=tg_id,
+                admin=False,
+                session=session,
+                email=email,
             )
             if hook_commands:
                 builder = insert_hook_buttons(builder, hook_commands)

@@ -344,7 +344,7 @@ def _cleanup_s3_backups(s3, prefix: str) -> None:
     if len(all_objects) <= BACKUP_S3_KEEP:
         return
 
-    to_delete = all_objects[: -BACKUP_S3_KEEP]
+    to_delete = all_objects[:-BACKUP_S3_KEEP]
     for i in range(0, len(to_delete), 1000):
         batch = [{"Key": obj["Key"]} for obj in to_delete[i : i + 1000]]
         s3.delete_objects(Bucket=BACKUP_S3_BUCKET, Delete={"Objects": batch, "Quiet": True})

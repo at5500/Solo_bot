@@ -68,9 +68,7 @@ async def handle_unhandled_messages(message: Message, session: Any, state: FSMCo
 
     keyboard = InlineKeyboardBuilder()
     if bool((MODES_CONFIG or {}).get("SUPPORT_TRIAGE_ENABLED", False)):
-        keyboard.row(
-            InlineKeyboardButton(text=HAVE_PROBLEM, callback_data=TriageCallback(action="root").pack())
-        )
+        keyboard.row(InlineKeyboardButton(text=HAVE_PROBLEM, callback_data=TriageCallback(action="root").pack()))
     else:
         keyboard.row(InlineKeyboardButton(text=SUPPORT, url=SUPPORT_CHAT_URL))
     keyboard.row(InlineKeyboardButton(text=MAIN_MENU, callback_data="profile"))

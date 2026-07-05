@@ -112,11 +112,7 @@ def _compute_user_fields(
 
     expire_iso: str | None = None
     if key.get("expiry_time"):
-        expire_iso = (
-            datetime.utcfromtimestamp(key["expiry_time"] / 1000)
-            .replace(tzinfo=timezone.utc)
-            .isoformat()
-        )
+        expire_iso = datetime.utcfromtimestamp(key["expiry_time"] / 1000).replace(tzinfo=timezone.utc).isoformat()
 
     if use_country_selection:
         user_server = None
@@ -124,9 +120,7 @@ def _compute_user_fields(
             if s.get("server_name") == key["server_id"]:
                 user_server = s
                 break
-        inbound_ids = (
-            [user_server["inbound_id"]] if user_server and user_server.get("inbound_id") else []
-        )
+        inbound_ids = [user_server["inbound_id"]] if user_server and user_server.get("inbound_id") else []
     else:
         filtered_servers = cluster_servers
         if subgroup_title or (tariff and tariff.get("id")):
@@ -143,9 +137,7 @@ def _compute_user_fields(
         if tariff and tariff.get("group_code"):
             group_code = tariff.get("group_code").lower()
             if group_code in ALLOWED_GROUP_CODES:
-                special_filtered = [
-                    s for s in filtered_servers if group_code in (s.get("special_groups") or [])
-                ]
+                special_filtered = [s for s in filtered_servers if group_code in (s.get("special_groups") or [])]
                 if special_filtered:
                     filtered_servers = special_filtered
 
@@ -665,9 +657,7 @@ async def handle_sync_cluster(
                     else:
                         to_create.append(key)
 
-                logger.info(
-                    f"[Sync] {cluster_name}: к update={len(to_update)}, к create={len(to_create)}"
-                )
+                logger.info(f"[Sync] {cluster_name}: к update={len(to_update)}, к create={len(to_create)}")
 
                 semaphore = asyncio.Semaphore(SYNC_CONCURRENCY)
                 pending_db_updates: list[dict] = []
@@ -677,20 +667,14 @@ async def handle_sync_cluster(
                 async def process_update(key):
                     async with semaphore:
                         try:
-                            tariff = (
-                                tariffs_cache.get(key["tariff_id"]) if key["tariff_id"] else None
-                            )
-                            traffic_limit_bytes, hwid_limit, expire_iso, inbound_ids = (
-                                _compute_user_fields(
-                                    key, tariff, cluster_servers, use_country_selection
-                                )
+                            tariff = tariffs_cache.get(key["tariff_id"]) if key["tariff_id"] else None
+                            traffic_limit_bytes, hwid_limit, expire_iso, inbound_ids = _compute_user_fields(
+                                key, tariff, cluster_servers, use_country_selection
                             )
 
                             if use_country_selection and not inbound_ids:
                                 stats["failed"] += 1
-                                logger.warning(
-                                    f"[Sync] update {key.get('email')}: server not found"
-                                )
+                                logger.warning(f"[Sync] update {key.get('email')}: server not found")
                                 return
 
                             success = await remna.update_user(
@@ -728,20 +712,14 @@ async def handle_sync_cluster(
                 async def process_create(key):
                     async with semaphore:
                         try:
-                            tariff = (
-                                tariffs_cache.get(key["tariff_id"]) if key["tariff_id"] else None
-                            )
-                            traffic_limit_bytes, hwid_limit, expire_iso, inbound_ids = (
-                                _compute_user_fields(
-                                    key, tariff, cluster_servers, use_country_selection
-                                )
+                            tariff = tariffs_cache.get(key["tariff_id"]) if key["tariff_id"] else None
+                            traffic_limit_bytes, hwid_limit, expire_iso, inbound_ids = _compute_user_fields(
+                                key, tariff, cluster_servers, use_country_selection
                             )
 
                             if not expire_iso:
                                 stats["failed"] += 1
-                                logger.warning(
-                                    f"[Sync] create {key.get('email')}: no expiry_time"
-                                )
+                                logger.warning(f"[Sync] create {key.get('email')}: no expiry_time")
                                 return
 
                             payload = {
@@ -767,8 +745,7 @@ async def handle_sync_cluster(
                             if r.status_code not in (200, 201):
                                 stats["failed"] += 1
                                 logger.warning(
-                                    f"[Sync] create failed for {key.get('email')}: "
-                                    f"{r.status_code} {r.text[:200]}"
+                                    f"[Sync] create failed for {key.get('email')}: {r.status_code} {r.text[:200]}"
                                 )
                                 return
 
@@ -815,9 +792,7 @@ async def handle_sync_cluster(
 
                 progress_task = asyncio.create_task(progress_loop())
                 try:
-                    tasks = [process_update(k) for k in to_update] + [
-                        process_create(k) for k in to_create
-                    ]
+                    tasks = [process_update(k) for k in to_update] + [process_create(k) for k in to_create]
                     await asyncio.gather(*tasks, return_exceptions=True)
                 finally:
                     progress_task.cancel()
@@ -872,14 +847,10 @@ async def handle_sync_cluster(
                                         Key.user_id == upd["user_id"],
                                         Key.client_id == upd["client_id"],
                                     )
-                                    .values(
-                                        remnawave_link=upd["remnawave_link"], key=upd["key"]
-                                    )
+                                    .values(remnawave_link=upd["remnawave_link"], key=upd["key"])
                                 )
                             except Exception as e:
-                                logger.error(
-                                    f"[Sync] Fallback ошибка {upd['client_id']}: {e}"
-                                )
+                                logger.error(f"[Sync] Fallback ошибка {upd['client_id']}: {e}")
                                 await session.rollback()
             finally:
                 await remna.aclose()

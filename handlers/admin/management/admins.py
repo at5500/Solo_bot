@@ -144,16 +144,13 @@ async def set_admin_role(callback: CallbackQuery, callback_data: AdminPanelCallb
     invalidate_admin_cache(tg_id)
 
     await callback.message.edit_text(
-        f"✅ Роль админа <code>{tg_id}</code> изменена на <b>{role}</b>.", reply_markup=build_single_admin_menu(tg_id, role)
+        f"✅ Роль админа <code>{tg_id}</code> изменена на <b>{role}</b>.",
+        reply_markup=build_single_admin_menu(tg_id, role),
     )
 
 
-@router.callback_query(
-    AdminPanelCallback.filter(F.action.startswith("edit_perms|")), HasPermission(PERM_ADMINS)
-)
-async def edit_admin_permissions(
-    callback: CallbackQuery, callback_data: AdminPanelCallback, session: AsyncSession
-):
+@router.callback_query(AdminPanelCallback.filter(F.action.startswith("edit_perms|")), HasPermission(PERM_ADMINS))
+async def edit_admin_permissions(callback: CallbackQuery, callback_data: AdminPanelCallback, session: AsyncSession):
     tg_id = int(callback_data.action.split("|")[1])
 
     admin = (await session.execute(select(Admin).where(Admin.tg_id == tg_id))).scalar_one_or_none()
@@ -169,12 +166,8 @@ async def edit_admin_permissions(
     )
 
 
-@router.callback_query(
-    AdminPanelCallback.filter(F.action.startswith("toggle_perm|")), HasPermission(PERM_ADMINS)
-)
-async def toggle_admin_permission(
-    callback: CallbackQuery, callback_data: AdminPanelCallback, session: AsyncSession
-):
+@router.callback_query(AdminPanelCallback.filter(F.action.startswith("toggle_perm|")), HasPermission(PERM_ADMINS))
+async def toggle_admin_permission(callback: CallbackQuery, callback_data: AdminPanelCallback, session: AsyncSession):
     try:
         _, tg_id_str, perm_id = callback_data.action.split("|", 2)
         tg_id = int(tg_id_str)
@@ -199,9 +192,7 @@ async def toggle_admin_permission(
     admin.permissions = [p for p in ALL_PERMISSIONS if p in current]
     invalidate_admin_cache(tg_id)
 
-    await callback.message.edit_reply_markup(
-        reply_markup=build_admin_permissions_kb(tg_id, current)
-    )
+    await callback.message.edit_reply_markup(reply_markup=build_admin_permissions_kb(tg_id, current))
     await callback.answer()
 
 

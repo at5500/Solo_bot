@@ -83,8 +83,9 @@ async def enforce_rate_limit(
 
 
 def rate_limit_dependency(*, bucket: str, max_per_window: int, window_sec: int):
-    from api.depends import get_session
     from fastapi import Depends
+
+    from api.depends import get_session
 
     async def _dep(request: Request, session: AsyncSession = Depends(get_session)) -> None:
         await enforce_rate_limit(

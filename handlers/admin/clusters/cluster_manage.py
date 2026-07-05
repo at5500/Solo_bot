@@ -24,6 +24,7 @@ from .keyboard import (
     build_manage_cluster_kb,
 )
 
+
 _KEY_EXPIRY_UPDATE_BATCH = 5000
 
 
@@ -209,9 +210,7 @@ async def handle_days_input(message: Message, state: FSMContext, session: AsyncS
 
             remna = RemnawaveAPI(api_url)
             try:
-                affected = await remna.bulk_set_expiry(
-                    items, username=REMNAWAVE_LOGIN, password=REMNAWAVE_PASSWORD
-                )
+                affected = await remna.bulk_set_expiry(items, username=REMNAWAVE_LOGIN, password=REMNAWAVE_PASSWORD)
             finally:
                 await remna.aclose()
 
@@ -363,7 +362,6 @@ async def handle_new_cluster_name_input(message: Message, state: FSMContext, ses
                 update(Key).where(Key.server_id == old_cluster_name).values(server_id=new_cluster_name)
             )
 
-
         await message.answer(
             text=f"✅ Название кластера успешно изменено с '{old_cluster_name}' на '{new_cluster_name}'!",
             reply_markup=build_admin_back_kb("clusters"),
@@ -476,7 +474,6 @@ async def handle_new_server_name_input(message: Message, state: FSMContext, sess
 
         if keys_count > 0:
             await session.execute(update(Key).where(Key.server_id == old_server_name).values(server_id=new_server_name))
-
 
         await message.answer(
             text=(

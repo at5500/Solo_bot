@@ -52,9 +52,7 @@ async def set_sent_count(session: AsyncSession, poll_id: str, sent_count: int) -
 
 
 async def resolve_poll_id(session: AsyncSession, telegram_poll_id: str) -> str | None:
-    return await session.scalar(
-        select(PollMessage.poll_id).where(PollMessage.telegram_poll_id == telegram_poll_id)
-    )
+    return await session.scalar(select(PollMessage.poll_id).where(PollMessage.telegram_poll_id == telegram_poll_id))
 
 
 async def record_vote(
@@ -73,9 +71,7 @@ async def record_vote(
         return poll_id
 
     if not option_ids:
-        await session.execute(
-            delete(PollVote).where(PollVote.poll_id == poll_id, PollVote.tg_id == tg_id)
-        )
+        await session.execute(delete(PollVote).where(PollVote.poll_id == poll_id, PollVote.tg_id == tg_id))
         return poll_id
 
     stmt = (
@@ -95,9 +91,7 @@ async def get_poll(session: AsyncSession, poll_id: str) -> Poll | None:
 
 
 async def list_polls(session: AsyncSession, *, limit: int = 10, offset: int = 0) -> list[Poll]:
-    result = await session.execute(
-        select(Poll).order_by(Poll.created_at.desc()).limit(limit).offset(offset)
-    )
+    result = await session.execute(select(Poll).order_by(Poll.created_at.desc()).limit(limit).offset(offset))
     return list(result.scalars().all())
 
 
@@ -111,9 +105,7 @@ async def delete_poll(session: AsyncSession, poll_id: str) -> None:
 
 async def close_poll(session: AsyncSession, poll_id: str) -> None:
     await session.execute(
-        update(Poll)
-        .where(Poll.id == poll_id)
-        .values(status=POLL_STATUS_CLOSED, closed_at=datetime.now(UTC))
+        update(Poll).where(Poll.id == poll_id).values(status=POLL_STATUS_CLOSED, closed_at=datetime.now(UTC))
     )
 
 

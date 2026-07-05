@@ -1,4 +1,5 @@
 import asyncio
+
 from html import escape as html_escape
 from typing import Any
 
@@ -13,6 +14,7 @@ from core.settings.remnawave_config import (
     is_node_health_enabled,
     update_remnawave_config,
 )
+from core.settings.web_config import get_web_node_status_interval_min, is_web_enabled
 from database import async_session_maker, get_servers
 from logger import logger
 from panels.remnawave import RemnawaveAPI
@@ -151,7 +153,7 @@ def _is_node_alive(node: dict[str, Any]) -> bool:
     return bool(node.get("isConnected"))
 
 
-async def _node_health_tick(bot) -> None:
+async def _node_health_tick(bot, alerts_enabled: bool = True) -> None:
     panels = await _collect_remnawave_panels()
     if not panels:
         return
@@ -189,7 +191,9 @@ async def _node_health_tick(bot) -> None:
             if hosts:
                 next_targets.extend(_build_connection_targets(api_url, nodes, hosts))
             else:
-                logger.warning("[Remnawave-Monitor] {}: список хостов пуст/неизвестной формы — targets не построены", api_url)
+                logger.warning(
+                    "[Remnawave-Monitor] {}: список хостов пуст/неизвестной формы — targets не построены", api_url
+                )
         except Exception as exc:
             logger.error("[Remnawave-Monitor] {}: ошибка сборки connection targets: {}", api_url, exc)
 
@@ -214,7 +218,7 @@ async def _node_health_tick(bot) -> None:
             if alive != previously_alive:
                 alerts.append((state_key, next_states[state_key], alive))
 
-    if alerts:
+    if alerts and alerts_enabled:
         lines: list[str] = ["<b>🌀 Remnawave: изменение состояния нод</b>"]
         for _, info, alive in alerts:
             name = html_escape(info.get("name") or "—")
@@ -411,9 +415,7 @@ async def run_host_rotation() -> dict[str, Any]:
                     api_url,
                     len(movable),
                 )
-                result["details"].append(
-                    f"{api_url}: в ротации меньше 2 хостов ({len(movable)})"
-                )
+                result["details"].append(f"{api_url}: в ротации меньше 2 хостов ({len(movable)})")
                 continue
 
             def host_load(host: dict[str, Any]) -> int:
@@ -424,7 +426,7 @@ async def run_host_rotation() -> dict[str, Any]:
 
             movable_sorted = sorted(movable, key=host_load)
 
-            for slot_idx, host in zip(movable_positions, movable_sorted):
+            for slot_idx, host in zip(movable_positions, movable_sorted, strict=False):
                 new_layout[slot_idx] = host
 
             reorder_payload: list[dict[str, Any]] = []
@@ -455,9 +457,7 @@ async def run_host_rotation() -> dict[str, Any]:
             ok = await api.reorder_hosts(reorder_payload)
             if ok:
                 result["moved_total"] += len(moves)
-                result["details"].append(
-                    f"{api_url}: переставлено {len(moves)} хостов"
-                )
+                result["details"].append(f"{api_url}: переставлено {len(moves)} хостов")
                 logger.info(
                     "[Remnawave-Monitor] {}: переставлено {} хостов. Изменения: {}",
                     api_url,
@@ -621,13 +621,24 @@ async def remnawave_monitor_loop(bot, _sessionmaker) -> None:
     while True:
         try:
             now = loop.time()
-            node_interval = max(1, int(REMNAWAVE_CONFIG.get("NODE_HEALTH_INTERVAL_MIN") or NODE_HEALTH_DEFAULT_INTERVAL_MIN)) * 60
-            rotation_interval = max(5, int(REMNAWAVE_CONFIG.get("HOST_ROTATION_INTERVAL_MIN") or HOST_ROTATION_DEFAULT_INTERVAL_MIN)) * 60
+            node_interval = (
+                max(1, int(REMNAWAVE_CONFIG.get("NODE_HEALTH_INTERVAL_MIN") or NODE_HEALTH_DEFAULT_INTERVAL_MIN)) * 60
+            )
+            rotation_interval = (
+                max(5, int(REMNAWAVE_CONFIG.get("HOST_ROTATION_INTERVAL_MIN") or HOST_ROTATION_DEFAULT_INTERVAL_MIN))
+                * 60
+            )
 
-            if is_node_health_enabled() and (now - last_node_tick) >= node_interval:
+            node_health_on = is_node_health_enabled()
+            tick_intervals = []
+            if node_health_on:
+                tick_intervals.append(node_interval)
+            if is_web_enabled():
+                tick_intervals.append(get_web_node_status_interval_min() * 60)
+            if tick_intervals and (now - last_node_tick) >= min(tick_intervals):
                 last_node_tick = now
                 try:
-                    await _node_health_tick(bot)
+                    await _node_health_tick(bot, alerts_enabled=node_health_on)
                 except Exception as exc:
                     logger.error("[Remnawave-Monitor] Ошибка node health tick: {}", exc)
 

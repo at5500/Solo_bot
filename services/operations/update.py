@@ -136,7 +136,9 @@ async def update_key_on_cluster(
                         if hwid and await api.delete_user_hwid_device(reset_uuid, hwid):
                             removed += 1
                     if removed:
-                        logger.info(f"{PANEL_REMNA} HWID сброшены при перевыпуске: {removed} устройств, uuid={reset_uuid}")
+                        logger.info(
+                            f"{PANEL_REMNA} HWID сброшены при перевыпуске: {removed} устройств, uuid={reset_uuid}"
+                        )
                 except Exception as hwid_err:
                     logger.warning(f"{PANEL_REMNA} не удалось сбросить HWID при перевыпуске: {hwid_err}")
                 return created

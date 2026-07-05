@@ -33,6 +33,7 @@ from .operations import (
 from .query import fetch_matching_keys
 from .states import BulkStates
 
+
 router = Router()
 
 ACTION_LABELS = {
@@ -171,9 +172,16 @@ async def back_tgroups(callback: CallbackQuery, session: AsyncSession):
 async def choose_tariff_group(callback: CallbackQuery, callback_data: BulkCallback, session: AsyncSession):
     tariffs = await get_tariffs(session, group_code=callback_data.value)
     if not tariffs:
-        await _respond(callback.message, "🚫 В этой группе нет тарифов.", build_tariff_groups_kb(await get_tariff_group_codes(session)), True)
+        await _respond(
+            callback.message,
+            "🚫 В этой группе нет тарифов.",
+            build_tariff_groups_kb(await get_tariff_group_codes(session)),
+            True,
+        )
         return
-    await _respond(callback.message, f"Группа «{callback_data.value}». Выберите тариф:", build_tariffs_kb(tariffs), True)
+    await _respond(
+        callback.message, f"Группа «{callback_data.value}». Выберите тариф:", build_tariffs_kb(tariffs), True
+    )
 
 
 @router.callback_query(BulkCallback.filter(F.step == "tariff"), HasPermission(PERM_KEYS))
@@ -183,7 +191,9 @@ async def choose_tariff(callback: CallbackQuery, callback_data: BulkCallback, st
 
 
 @router.callback_query(BulkCallback.filter(F.step == "cluster"), HasPermission(PERM_KEYS))
-async def choose_cluster(callback: CallbackQuery, callback_data: BulkCallback, state: FSMContext, session: AsyncSession):
+async def choose_cluster(
+    callback: CallbackQuery, callback_data: BulkCallback, state: FSMContext, session: AsyncSession
+):
     await state.update_data(cluster_name=callback_data.value)
     await _after_filter_set(callback.message, True, state, session)
 
@@ -279,7 +289,13 @@ async def do_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncS
     await state.clear()
     summary = f"✅ Готово.\n\n{_describe(data)}\n\nОбработано: <b>{ok}</b>"
     if skipped:
-        note = " (безлимитные)" if action == "gb" else " (без Telegram ID)" if action in ("reissue", "reissue_link") else ""
+        note = (
+            " (безлимитные)"
+            if action == "gb"
+            else " (без Telegram ID)"
+            if action in ("reissue", "reissue_link")
+            else ""
+        )
         summary += f"\nПропущено: <b>{skipped}</b>{note}"
     if action == "reissue_link" and notified:
         summary += f"\nУведомлено клиентов: <b>{notified}</b>"

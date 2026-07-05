@@ -802,7 +802,6 @@ async def reject_partner_payout(
             {"balance": current_balance + float(req[2] or 0.0), "tg_id": req[1]},
         )
 
-
     return ORJSONResponse(content={"success": True, "message": "Заявка отклонена"}, status_code=200)
 
 

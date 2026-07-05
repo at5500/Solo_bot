@@ -7,9 +7,7 @@ from database.access.resolution import resolve_user_optional
 from database.models import SubscriptionEvent
 
 
-async def get_tariff_cooldown_remaining(
-    session: AsyncSession, tg_id: int, tariff_id: int, cooldown_days: int
-) -> int:
+async def get_tariff_cooldown_remaining(session: AsyncSession, tg_id: int, tariff_id: int, cooldown_days: int) -> int:
     cooldown_days = int(cooldown_days or 0)
     if cooldown_days <= 0 or not tariff_id:
         return 0

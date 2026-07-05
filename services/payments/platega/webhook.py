@@ -109,8 +109,7 @@ async def platega_webhook(request: web.Request):
                         rub_amount = 0.0
                 if rub_amount <= 0:
                     logger.error(
-                        f"[Platega] Не удалось определить RUB-сумму для зачисления: "
-                        f"transaction={transaction_id}"
+                        f"[Platega] Не удалось определить RUB-сумму для зачисления: transaction={transaction_id}"
                     )
                     return web.Response(status=400, text="invalid amount")
 
@@ -119,9 +118,7 @@ async def platega_webhook(request: web.Request):
             if webhook_currency != "RUB":
                 update_currency = webhook_currency
                 try:
-                    update_original_amount = (
-                        float(webhook_amount) if webhook_amount is not None else None
-                    )
+                    update_original_amount = float(webhook_amount) if webhook_amount is not None else None
                 except (TypeError, ValueError):
                     update_original_amount = None
 
@@ -141,10 +138,7 @@ async def platega_webhook(request: web.Request):
                 update_original_amount=update_original_amount,
             )
             if not result.ok:
-                logger.error(
-                    f"[Platega] Pipeline вернул ошибку: {result.error}, "
-                    f"transaction={transaction_id}"
-                )
+                logger.error(f"[Platega] Pipeline вернул ошибку: {result.error}, transaction={transaction_id}")
                 return web.Response(status=500, text="pipeline error")
 
             logger.info(
@@ -192,8 +186,7 @@ async def platega_webhook(request: web.Request):
             await process_cancelled_payment(_PROVIDER, parsed, new_status="chargebacked")
 
             logger.warning(
-                f"[Platega] CHARGEBACK: transaction={transaction_id}, "
-                f"amount={webhook_amount} {webhook_currency}"
+                f"[Platega] CHARGEBACK: transaction={transaction_id}, amount={webhook_amount} {webhook_currency}"
             )
             return web.Response(status=200, text="OK")
 

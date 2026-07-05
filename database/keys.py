@@ -515,7 +515,7 @@ async def _log_key_deletions(session: AsyncSession, rows, client_ids) -> None:
         from database.subscription_events import record_subscription_event
 
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        for r, cid in zip(rows, client_ids):
+        for r, cid in zip(rows, client_ids, strict=False):
             exp = getattr(r, "expiry_time", None)
             was_expired = bool(exp is not None and exp < now_ms)
             await record_subscription_event(
@@ -539,8 +539,9 @@ async def delete_key(session: AsyncSession, identifier: int | str):
     email_for_cache = None
     if isinstance(identifier, str):
         res = await session.execute(
-            select(Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time)
-            .where(Key.client_id == identifier)
+            select(Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time).where(
+                Key.client_id == identifier
+            )
         )
         deleted_rows = res.all()
         if deleted_rows:
@@ -555,8 +556,9 @@ async def delete_key(session: AsyncSession, identifier: int | str):
             return
         legacy_for_cache = u.id
         res = await session.execute(
-            select(Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time, Key.client_id)
-            .where(Key.user_id == u.id)
+            select(
+                Key.user_id, Key.tg_id, Key.email, Key.tariff_id, Key.server_id, Key.expiry_time, Key.client_id
+            ).where(Key.user_id == u.id)
         )
         deleted_rows = res.all()
         await _log_key_deletions(session, deleted_rows, [getattr(r, "client_id", None) for r in deleted_rows])
@@ -571,9 +573,11 @@ async def delete_key(session: AsyncSession, identifier: int | str):
 
 async def update_key_expiry(session: AsyncSession, client_id: str, new_expiry_time: int, record_event: bool = True):
     try:
-        ctx = (await session.execute(
-            select(Key.user_id, Key.tg_id, Key.tariff_id, Key.server_id).where(Key.client_id == client_id).limit(1)
-        )).first()
+        ctx = (
+            await session.execute(
+                select(Key.user_id, Key.tg_id, Key.tariff_id, Key.server_id).where(Key.client_id == client_id).limit(1)
+            )
+        ).first()
     except Exception:
         ctx = None
     await session.execute(update(Key).where(Key.client_id == client_id).values(expiry_time=new_expiry_time))
@@ -758,12 +762,7 @@ async def update_key_subscription_links(session: AsyncSession, email: str, link:
 async def update_key_email_and_link(
     session: AsyncSession, old_email: str, new_email: str, link: str, client_id: str
 ) -> bool:
-    stmt = (
-        update(Key)
-        .where(Key.email == old_email)
-        .values(email=new_email, key=link)
-        .returning(Key.client_id)
-    )
+    stmt = update(Key).where(Key.email == old_email).values(email=new_email, key=link).returning(Key.client_id)
     res = await session.execute(stmt)
     ok = res.scalar_one_or_none() is not None
     if ok:

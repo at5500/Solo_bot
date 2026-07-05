@@ -42,6 +42,9 @@ NOTIFICATION_TIME_FIELDS: Final[dict[str, str]] = {
     "RETURNING_MAX_DAYS": "Давно ушли до (дн)",
     "DISCOUNT_ACTIVE_HOURS": "Скидка (ч)",
     "RENEW_BUTTON_BEFORE_DAYS": "Кнопка продл. за (дн)",
+    "HWID_DELETE_PENALTY": "HWID штраф",
+    "HWID_DAILY_RECOVERY": "HWID восст/сут",
+    "HWID_MIN_TRUST_TO_DELETE": "HWID порог",
 }
 
 PAYMENT_PROVIDER_TITLES: Final[dict[str, str]] = {
@@ -81,6 +84,7 @@ MODES_TITLES: Final[dict[str, str]] = {
     "SUPPORT_TRIAGE_ENABLED": "Опросник поддержки",
     "PROTECT_CONTENT_ENABLED": "Защита контента",
     "TARIFF_OPTIONS_PAGINATION": "Слайдер опций",
+    "HWID_DELETE_COOLDOWN_ENABLED": "Кулдаун HWID",
 }
 
 MONEY_FIELDS: Final[dict[str, str]] = {

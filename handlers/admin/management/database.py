@@ -264,7 +264,7 @@ def sync_restore_from_path(
         dump_path: str | None = None
         media_note = ""
 
-        if name.endswith(".tar.gz") or name.endswith(".tgz"):
+        if name.endswith((".tar.gz", ".tgz")):
             try:
                 with tarfile.open(src, "r:gz") as tar:
                     tar.extractall(tmpdir, filter="data")
@@ -285,7 +285,7 @@ def sync_restore_from_path(
             media_count = _restore_media_from_dir(base)
             if media_count:
                 media_note = f" Восстановлено медиа-файлов: {media_count}."
-        elif name.endswith(".sql.gz") or name.endswith(".gz"):
+        elif name.endswith((".sql.gz", ".gz")):
             dump_path = os.path.join(tmpdir, "database.sql")
             try:
                 with gzip.open(src, "rb") as gz, open(dump_path, "wb") as out:
@@ -403,8 +403,7 @@ async def prompt_restore_db_local(callback: CallbackQuery):
     backups = list_local_backups()
     if not backups:
         await callback.message.edit_text(
-            "📂 На сервере нет резервных копий.\n"
-            f"Они появляются здесь: <code>{BACK_DIR}</code>",
+            f"📂 На сервере нет резервных копий.\nОни появляются здесь: <code>{BACK_DIR}</code>",
             reply_markup=build_back_to_db_menu(),
         )
         return

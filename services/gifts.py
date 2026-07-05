@@ -225,10 +225,7 @@ async def mark_gift_redeemed_if_complete(
 
     usage_count = await count_gift_usages(session, gift.gift_id)
     max_usages = gift.max_usages
-    should_mark = (
-        (max_usages is not None and usage_count >= max_usages)
-        or (max_usages is None and usage_count >= 1)
-    )
+    should_mark = (max_usages is not None and usage_count >= max_usages) or (max_usages is None and usage_count >= 1)
     if should_mark:
         await mark_gift_fully_redeemed(session, gift.gift_id, recipient_user_id, recipient_tg_id)
 
@@ -372,15 +369,14 @@ async def create_gift(
 
     price_to_charge = int(selected_price_rub) if selected_price_rub is not None else int(tariff["price_rub"])
 
-    balance = await get_balance(session, sender_user_ref)
-    if balance < price_to_charge:
-        raise InsufficientFundsError(
-            "Недостаточно средств для создания подарка",
-            required=price_to_charge,
-            balance=balance,
-        )
-
-    await update_balance(session, sender_user_ref, -price_to_charge)
+    if price_to_charge > 0:
+        debited = await update_balance(session, sender_user_ref, -price_to_charge)
+        if debited is None:
+            raise InsufficientFundsError(
+                "Недостаточно средств для создания подарка",
+                required=price_to_charge,
+                balance=await get_balance(session, sender_user_ref),
+            )
 
     duration_days = int(tariff["duration_days"] or 0)
     expiry_time = datetime.utcnow() + timedelta(days=duration_days)

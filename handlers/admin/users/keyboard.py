@@ -388,6 +388,7 @@ def build_key_edit_kb(
     email: str,
     is_configurable: bool = False,
     key_ref: str | None = None,
+    show_subscription_keys: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     resolved_key_ref = key_ref or build_admin_key_ref(key_details.get("client_id"), email)
@@ -427,6 +428,15 @@ def build_key_edit_kb(
             action="users_delete_key", data=resolved_key_ref, tg_id=key_details["tg_id"]
         ).pack(),
     )
+
+    if show_subscription_keys:
+        builder.button(
+            text="🔑 Ключи",
+            callback_data=AdminUserEditorCallback(
+                action="users_keys_list", data=resolved_key_ref, tg_id=key_details["tg_id"]
+            ).pack(),
+        )
+
     builder.button(
         text="📊 Трафик",
         callback_data=AdminUserEditorCallback(

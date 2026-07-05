@@ -1,5 +1,8 @@
-from ._common import *  # noqa: F401,F403
 from database.subscription_events import get_recent_renewals
+from services.subscription_keys import resolve_remnawave_server_ref
+
+from ._common import *  # noqa: F401,F403
+
 
 _RENEWAL_SOURCE_LABELS = {"bot": "бот", "web": "сайт", "webapp": "WebApp", "admin": "админ", "balance": "баланс"}
 
@@ -152,7 +155,14 @@ async def handle_key_edit(
     if not update or not getattr(callback_data, "edit", False):
         kb_key_details = dict(key_obj.__dict__)
         kb_key_details["is_frozen"] = is_frozen
-        kb_markup = build_key_edit_kb(kb_key_details, email, is_configurable=is_configurable, key_ref=str(key_ref))
+        show_subscription_keys = bool(await resolve_remnawave_server_ref(session, key_obj.server_id or ""))
+        kb_markup = build_key_edit_kb(
+            kb_key_details,
+            email,
+            is_configurable=is_configurable,
+            key_ref=str(key_ref),
+            show_subscription_keys=show_subscription_keys,
+        )
         kb_builder = InlineKeyboardBuilder.from_markup(kb_markup)
         hook_buttons = await process_admin_key_edit_menu(
             email=email,

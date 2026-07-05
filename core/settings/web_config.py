@@ -4,8 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Setting
-
 from database.settings_cache import settings_cache
+
 from ..defaults import DEFAULT_WEB_CONFIG
 from .runtime_sync import publish_runtime_config, register_runtime_config
 
@@ -71,6 +71,7 @@ def get_site_url() -> str:
     if url:
         return url.rstrip("/")
     from config import SITE_URL
+
     return SITE_URL.rstrip("/") if SITE_URL else ""
 
 
@@ -80,3 +81,14 @@ def is_web_enabled() -> bool:
 
 def is_email_binding_enabled() -> bool:
     return bool(WEB_CONFIG.get("EMAIL_BINDING_ENABLED", False))
+
+
+def is_web_open_in_browser() -> bool:
+    return bool(WEB_CONFIG.get("WEB_OPEN_IN_BROWSER", False))
+
+
+def get_web_node_status_interval_min() -> int:
+    try:
+        return max(1, int(WEB_CONFIG.get("WEB_NODE_STATUS_INTERVAL_MIN") or 1))
+    except (TypeError, ValueError):
+        return 1

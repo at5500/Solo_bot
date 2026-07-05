@@ -6,8 +6,10 @@
 
 from .._common import *  # noqa: F401,F403 — подтягиваем все имена для endpoints
 from .._common import (
+    _is_renew_available,
     _key_actions_config,
     _normalize_expiry_ms,
+    _renew_available_from_ms,
     _resolve_available_location_servers,
     _resolve_billing_user_id,
     _resolve_default_web_payment_provider,
@@ -49,6 +51,15 @@ async def user_key_renew(
         raise HTTPException(status_code=404, detail="Подписка не найдена")
     if bool(getattr(db_key, "is_frozen", False)):
         raise HTTPException(status_code=400, detail="Продление для замороженной подписки недоступно")
+    key_expiry_ms = _svc_normalize_expiry(getattr(db_key, "expiry_time", None))
+    if key_expiry_ms and not _is_renew_available(int(key_expiry_ms)):
+        available_msk = datetime.fromtimestamp(
+            _renew_available_from_ms(int(key_expiry_ms)) / 1000, tz=timezone(timedelta(hours=3))
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Продление доступно с {available_msk.strftime('%d.%m.%Y %H:%M')}",
+        )
     tariff_id = getattr(db_key, "tariff_id", None)
     if not tariff_id:
         raise HTTPException(status_code=400, detail="Для подписки не назначен тариф")

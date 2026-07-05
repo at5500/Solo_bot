@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.models import Key, KeyTrafficHistory, KeyTrafficHourly
 from logger import logger
 
+
 _GB = 1073741824
 _BULK_TIMEOUT_SEC = 60
 
@@ -93,7 +94,7 @@ async def get_traffic_history(session: AsyncSession, client_id: str, days: int =
         pad_day += _dt.timedelta(days=1)
 
     prev = float(baseline) if baseline is not None else None
-    for (d, u, lim) in rows:
+    for d, u, lim in rows:
         cur = float(u) if u is not None else None
         delta = None if cur is None else (0.0 if prev is None else round(max(0.0, cur - prev), 3))
         if cur is not None:
@@ -172,7 +173,7 @@ async def get_traffic_history_hourly(session: AsyncSession, client_id: str, hour
     ).all()
     out: list[dict] = []
     prev = float(baseline) if baseline is not None else None
-    for (h, u) in rows:
+    for h, u in rows:
         cur = float(u) if u is not None else None
         delta = None if cur is None else (0.0 if prev is None else round(max(0.0, cur - prev), 3))
         if cur is not None:

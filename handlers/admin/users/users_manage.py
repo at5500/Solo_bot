@@ -20,7 +20,6 @@ from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import USERNAME_BOT
-
 from database import (
     get_key_details,
     update_trial,
@@ -661,8 +660,7 @@ async def handle_users_site_tab(callback: CallbackQuery, callback_data: AdminUse
         "🌐 Вкладка: ",
         Bold(label),
         "\n\n",
-        f"Нажмите «Отправить» — клиент получит в чате с ботом кнопку, "
-        f"открывающую личный кабинет на вкладке «{label}».",
+        f"Нажмите «Отправить» — клиент получит в чате с ботом кнопку, открывающую личный кабинет на вкладке «{label}».",
     ).as_html()
     try:
         await callback.message.edit_text(
@@ -686,7 +684,7 @@ async def handle_users_site_send(callback: CallbackQuery, callback_data: AdminUs
         await callback.answer("Неизвестная вкладка", show_alert=True)
         return
 
-    from core.settings.web_config import get_site_url, is_web_enabled
+    from core.settings.web_config import get_site_url, is_web_enabled, is_web_open_in_browser
 
     if not is_web_enabled():
         await callback.answer("Веб-кабинет отключён", show_alert=True)
@@ -697,12 +695,14 @@ async def handle_users_site_send(callback: CallbackQuery, callback_data: AdminUs
         return
 
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
+    if is_web_open_in_browser():
+        button = InlineKeyboardButton(text=f"🌐 {label}", url=f"{site_url}/dashboard?tab={tab}")
+    else:
+        button = InlineKeyboardButton(
             text=f"🌐 {label}",
             web_app=WebAppInfo(url=f"{site_url}/dashboard?tab={tab}&webapp=1"),
         )
-    )
+    builder.row(button)
 
     from bot import bot
 
@@ -739,12 +739,16 @@ async def handle_user_sub_history(
     history = await get_user_subscription_history(session, user_id=u.id, tg_id=u.tg_id)
 
     back_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="◀️ Назад",
-                callback_data=AdminUserEditorCallback(action="users_editor", tg_id=callback_data.tg_id, edit=True).pack(),
-            )
-        ]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=AdminUserEditorCallback(
+                        action="users_editor", tg_id=callback_data.tg_id, edit=True
+                    ).pack(),
+                )
+            ]
+        ]
     )
 
     if not history:

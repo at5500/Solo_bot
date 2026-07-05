@@ -33,7 +33,6 @@ async def handle_server_transfer(callback_query: CallbackQuery, state: FSMContex
             )
         )
 
-
         use_country_selection = bool(MODES_CONFIG.get("COUNTRY_SELECTION_ENABLED", USE_COUNTRY_SELECTION))
 
         base_text = f"✅ Ключи успешно перенесены на сервер '{new_server_name}', сервер '{old_server_name}' удален!"
@@ -75,7 +74,6 @@ async def handle_cluster_transfer(callback_query: CallbackQuery, state: FSMConte
                 Server.server_name == old_server_name,
             )
         )
-
 
         await callback_query.message.edit_text(
             text=(

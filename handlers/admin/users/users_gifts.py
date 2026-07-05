@@ -96,7 +96,7 @@ async def show_gifts_list(message: types.Message, session: AsyncSession, tg_id: 
             f"   📅 Создан: {created_str}\n"
             f"   {status}\n"
             f"   📱 Лимиты: {limits}\n"
-            f"   🌐 <a href=\"{site_link}\">Сайт</a> • 🤖 <a href=\"{tg_link}\">Telegram</a>"
+            f'   🌐 <a href="{site_link}">Сайт</a> • 🤖 <a href="{tg_link}">Telegram</a>'
         )
 
     lines.append("\n\n<i>Нажмите кнопку для удаления:</i>")

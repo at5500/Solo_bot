@@ -85,30 +85,33 @@ async def update_balance(
     session: AsyncSession,
     legacy_user_ref: int,
     amount: float,
-) -> None:
+) -> float | None:
     u = await resolve_user_optional(session, legacy_user_ref)
     if u is None:
         logger.info(f"[DB] Баланс не изменён: пользователь {legacy_user_ref} не найден")
-        return
+        return None
     uid = u.id
     amount = float(amount)
-    res = await session.execute(
-        update(User)
-        .where(User.id == uid)
-        .values(balance=func.coalesce(User.balance, 0) + amount)
-        .returning(User.balance)
-    )
-    new_balance = res.scalar_one_or_none()
-    if new_balance is not None:
-        old_balance = new_balance - amount
-        logger.info(f"[DB] Баланс пользователя id={uid} обновлён: {old_balance} → {new_balance}")
+    stmt = update(User).values(balance=func.coalesce(User.balance, 0) + amount).returning(User.balance)
+    if amount < 0:
+        stmt = stmt.where(User.id == uid, func.coalesce(User.balance, 0) >= -amount)
     else:
-        logger.info(f"[DB] Баланс пользователя id={uid} не изменён: пользователь не найден")
+        stmt = stmt.where(User.id == uid)
+    res = await session.execute(stmt)
+    new_balance = res.scalar_one_or_none()
+    if new_balance is None:
+        if amount < 0:
+            logger.info(f"[DB] Списание {-amount} у id={uid} отклонено: недостаточно средств")
+        else:
+            logger.info(f"[DB] Баланс пользователя id={uid} не изменён: пользователь не найден")
+        return None
+    logger.info(f"[DB] Баланс пользователя id={uid} обновлён: {new_balance - amount} → {new_balance}")
     await invalidate_balance_cache(uid)
     await invalidate_profile_cache(uid)
     if u.tg_id is not None:
         await invalidate_balance_cache(u.tg_id)
         await invalidate_profile_cache(u.tg_id)
+    return float(new_balance)
 
 
 async def check_user_exists(session: AsyncSession, legacy_user_ref: int) -> bool:
@@ -327,15 +330,9 @@ async def delete_user_data(session: AsyncSession, legacy_user_ref: int):
         update(Gift).where(Gift.recipient_user_id == uid).values(recipient_user_id=None, recipient_tg_id=None)
     )
     if u.tg_id is not None:
-        await session.execute(
-            update(Gift).where(Gift.recipient_tg_id == u.tg_id).values(recipient_tg_id=None)
-        )
-        await session.execute(
-            update(Gift).where(Gift.sender_tg_id == u.tg_id).values(sender_tg_id=None)
-        )
-        await session.execute(
-            update(Payment).where(Payment.tg_id == u.tg_id).values(tg_id=None)
-        )
+        await session.execute(update(Gift).where(Gift.recipient_tg_id == u.tg_id).values(recipient_tg_id=None))
+        await session.execute(update(Gift).where(Gift.sender_tg_id == u.tg_id).values(sender_tg_id=None))
+        await session.execute(update(Payment).where(Payment.tg_id == u.tg_id).values(tg_id=None))
     await session.execute(delete(Payment).where(Payment.user_id == uid))
     await session.execute(
         delete(Referral).where(or_(Referral.referrer_user_id == uid, Referral.referred_user_id == uid))

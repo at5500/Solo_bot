@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.depends import get_session
-
 from config import (
     BALANCE_BUTTON,
     CAPTCHA_ENABLE,
@@ -43,7 +42,11 @@ from config import (
 from core.bootstrap import BUTTONS_CONFIG, MODES_CONFIG, MONEY_CONFIG, PAYMENTS_CONFIG
 from core.settings.money_config import get_currency_mode
 from core.settings.web_config import WEB_CONFIG
-from services.payments.providers import PROVIDERS_BASE, TELEGRAM_ONLY_PROVIDER_IDS, WEB_LINK_PROVIDER_IDS
+from services.payments.providers import (
+    TELEGRAM_ONLY_PROVIDER_IDS,
+    get_providers_with_hooks,
+    get_web_link_provider_ids,
+)
 
 
 router = APIRouter(tags=["Root"])
@@ -102,6 +105,7 @@ async def telegram_widget_bot():
     telegram_client_id = ""
     try:
         from config import TELEGRAM_CLIENT_ID
+
         telegram_client_id = str(TELEGRAM_CLIENT_ID).strip()
     except ImportError:
         pass
@@ -135,12 +139,13 @@ async def site_revision(session: AsyncSession = Depends(get_session)):
 async def site_config(session: AsyncSession = Depends(get_session)):
     """Настройки витрины и кабинета для веб-клиента (флаги из runtime-конфигов бота)."""
     bot_username = USERNAME_BOT.replace("@", "").strip()
-    pay_flags = {name: bool(PAYMENTS_CONFIG.get(name)) for name in PROVIDERS_BASE}
+    providers_map = await get_providers_with_hooks(dict(PAYMENTS_CONFIG or {}))
+    pay_flags = {name: bool(cfg.get("enabled")) for name, cfg in providers_map.items()}
     any_pay = any(pay_flags.values())
-    web_link_provider_ids = [provider_id for provider_id in WEB_LINK_PROVIDER_IDS if pay_flags.get(provider_id, False)]
-    telegram_only_provider_ids = [
-        provider_id for provider_id in TELEGRAM_ONLY_PROVIDER_IDS if pay_flags.get(provider_id, False)
-    ]
+    web_link_set = set(get_web_link_provider_ids())
+    tg_only_set = set(TELEGRAM_ONLY_PROVIDER_IDS)
+    web_link_provider_ids = [name for name in providers_map if name in web_link_set and pay_flags.get(name)]
+    telegram_only_provider_ids = [name for name in providers_map if name in tg_only_set and pay_flags.get(name)]
     currency_mode, currency_one_screen = get_currency_mode()
     try:
         cb_raw = MONEY_CONFIG.get("CASHBACK", 0)

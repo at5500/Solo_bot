@@ -5,24 +5,23 @@ import os
 import time
 
 from collections import OrderedDict, deque
+from datetime import datetime
 
 import aiofiles
+import pytz
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
 
-from datetime import datetime
-
-import pytz
-
 from database import async_session_maker
 from database.bans import save_blocked_user_ids
-from handlers.utils import format_hours, format_minutes, get_russian_month
 from handlers.admin.sender.sender_utils import is_telegram_chat_id
+from handlers.utils import format_hours, format_minutes, get_russian_month
 from logger import logger
 from services.tariffs.tariff_display import get_key_tariff_display
 from utils.custom_emojis import _process_text
+
 
 moscow_tz = pytz.timezone("Europe/Moscow")
 
@@ -97,6 +96,7 @@ def rate_limited_send(func):
                 tg_id = kwargs.get("tg_id") or (args[1] if len(args) > 1 else "?")
                 logger.error(f"Ошибка отправки пользователю {tg_id}: {e}")
                 return False
+
     return wrapper
 
 
@@ -209,9 +209,12 @@ class FastNotificationSender:
 
                 if cached_id:
                     await self.bot.send_photo(
-                        chat_id=tg_id, photo=cached_id,
-                        caption=processed_text, reply_markup=msg.get("keyboard"),
-                        **emoji_kwargs, **caption_kwargs,
+                        chat_id=tg_id,
+                        photo=cached_id,
+                        caption=processed_text,
+                        reply_markup=msg.get("keyboard"),
+                        **emoji_kwargs,
+                        **caption_kwargs,
                     )
                 else:
                     actual_path = _find_photo_file(photo_path)
@@ -220,23 +223,32 @@ class FastNotificationSender:
                             image_data = await f.read()
                         buffered = BufferedInputFile(image_data, filename=os.path.basename(actual_path))
                         result = await self.bot.send_photo(
-                            chat_id=tg_id, photo=buffered,
-                            caption=processed_text, reply_markup=msg.get("keyboard"),
-                            **emoji_kwargs, **caption_kwargs,
+                            chat_id=tg_id,
+                            photo=buffered,
+                            caption=processed_text,
+                            reply_markup=msg.get("keyboard"),
+                            **emoji_kwargs,
+                            **caption_kwargs,
                         )
                         if result and hasattr(result, "photo") and result.photo:
                             await _set_cached_file_id(photo_path, result.photo[-1].file_id)
                     else:
                         text_kwargs = {"entities": entities} if entities else {}
                         await self.bot.send_message(
-                            chat_id=tg_id, text=processed_text, reply_markup=msg.get("keyboard"),
-                            **emoji_kwargs, **text_kwargs,
+                            chat_id=tg_id,
+                            text=processed_text,
+                            reply_markup=msg.get("keyboard"),
+                            **emoji_kwargs,
+                            **text_kwargs,
                         )
             else:
                 text_kwargs = {"entities": entities} if entities else {}
                 await self.bot.send_message(
-                    chat_id=tg_id, text=processed_text, reply_markup=msg.get("keyboard"),
-                    **emoji_kwargs, **text_kwargs,
+                    chat_id=tg_id,
+                    text=processed_text,
+                    reply_markup=msg.get("keyboard"),
+                    **emoji_kwargs,
+                    **text_kwargs,
                 )
             return "ok"
 
@@ -274,7 +286,7 @@ class FastNotificationSender:
         while True:
             try:
                 msg = await asyncio.wait_for(self.queue.get(), timeout=0.5)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 if not self.is_running:
                     return
                 continue
@@ -290,9 +302,7 @@ class FastNotificationSender:
                             asyncio.create_task(self._schedule_retry(msg))
                             self.pending_retries += 1
                         except Exception as e:
-                            logger.error(
-                                f"Не удалось запланировать повтор для {msg.get('tg_id')}: {e}"
-                            )
+                            logger.error(f"Не удалось запланировать повтор для {msg.get('tg_id')}: {e}")
                             self.results.append(False)
                     else:
                         self.results.append(False)

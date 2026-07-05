@@ -49,6 +49,7 @@ async def apply_coupon(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     await enforce_rate_limit(request, session, bucket="coupon_apply", max_per_window=10, window_sec=60)
     user_id, tg_id = await _resolve_coupon_user_id(session, request, identity)
     try:

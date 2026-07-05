@@ -296,7 +296,7 @@ async def cache_publish(channel: str, payload: Any) -> int:
     if client is None:
         return 0
     try:
-        raw = json.dumps(payload, ensure_ascii=False) if not isinstance(payload, (str, bytes)) else payload
+        raw = json.dumps(payload, ensure_ascii=False) if not isinstance(payload, str | bytes) else payload
         return int(await client.publish(channel, raw))
     except Exception as exc:
         logger.warning(f"[Redis] publish({channel}) не удался: {exc}")

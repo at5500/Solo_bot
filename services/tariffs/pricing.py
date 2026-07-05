@@ -62,12 +62,12 @@ def filter_config_options(tariff: dict[str, Any]) -> tuple[list[int], list[int]]
     device_values = _parse_int_options(tariff.get("device_options"))
     traffic_values = _parse_int_options(tariff.get("traffic_options_gb"))
     devices = [
-        v for v in device_values
+        v
+        for v in device_values
         if v <= 0 or base_device_limit is None or base_device_limit <= 0 or v >= base_device_limit
     ]
     traffic = [
-        v for v in traffic_values
-        if v <= 0 or base_traffic_gb is None or base_traffic_gb <= 0 or v >= base_traffic_gb
+        v for v in traffic_values if v <= 0 or base_traffic_gb is None or base_traffic_gb <= 0 or v >= base_traffic_gb
     ]
     return devices, traffic
 

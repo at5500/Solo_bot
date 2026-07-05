@@ -3,7 +3,6 @@ from typing import Any
 
 from aiogram.fsm.state import State, StatesGroup
 
-from handlers.utils import get_plural_form
 from handlers.texts import (
     ADDONS_CURRENT_HEADER_TEXT,
     ADDONS_HINT_BOTH_OPTIONS_TEXT,
@@ -28,6 +27,7 @@ from handlers.texts import (
     UNLIMITED_DEVICES_LABEL,
     UNLIMITED_TRAFFIC_LABEL,
 )
+from handlers.utils import get_plural_form
 
 
 class KeyAddonConfigState(StatesGroup):

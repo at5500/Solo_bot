@@ -59,7 +59,7 @@ async def show_tariffs_arrangement(callback: CallbackQuery, callback_data: Admin
 
     tariffs_data = await get_tariffs(session, group_code=group_code, with_subgroup_weights=True)
     tariffs = [t for t in tariffs_data["tariffs"] if t.get("is_active")]
-    subgroup_weights = tariffs_data["subgroup_weights"]
+    tariffs_data["subgroup_weights"]
 
     if not tariffs:
         await callback.message.edit_text("❌ В этой группе пока нет активных тарифов.")

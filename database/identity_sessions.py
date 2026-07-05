@@ -95,33 +95,23 @@ async def create_identity_session(
     return obj
 
 
-async def get_session_by_token_hash(
-    session: AsyncSession, token_hash: str
-) -> IdentitySession | None:
-    result = await session.execute(
-        select(IdentitySession).where(IdentitySession.token_hash == token_hash)
-    )
+async def get_session_by_token_hash(session: AsyncSession, token_hash: str) -> IdentitySession | None:
+    result = await session.execute(select(IdentitySession).where(IdentitySession.token_hash == token_hash))
     return result.scalar_one_or_none()
 
 
-async def list_sessions_for_identity(
-    session: AsyncSession, identity_id: str
-) -> list[IdentitySession]:
+async def list_sessions_for_identity(session: AsyncSession, identity_id: str) -> list[IdentitySession]:
     now = datetime.utcnow()
     result = await session.execute(
         select(IdentitySession)
         .where(IdentitySession.identity_id == identity_id)
-        .where(
-            (IdentitySession.expires_at.is_(None)) | (IdentitySession.expires_at > now)
-        )
+        .where((IdentitySession.expires_at.is_(None)) | (IdentitySession.expires_at > now))
         .order_by(IdentitySession.last_seen_at.desc())
     )
     return list(result.scalars().all())
 
 
-async def delete_session_by_id(
-    session: AsyncSession, *, session_id: str, identity_id: str
-) -> bool:
+async def delete_session_by_id(session: AsyncSession, *, session_id: str, identity_id: str) -> bool:
     """Удаляет сессию по id при условии, что она принадлежит identity_id."""
     result = await session.execute(
         delete(IdentitySession)
@@ -132,15 +122,11 @@ async def delete_session_by_id(
 
 
 async def delete_session_by_token_hash(session: AsyncSession, token_hash: str) -> bool:
-    result = await session.execute(
-        delete(IdentitySession).where(IdentitySession.token_hash == token_hash)
-    )
+    result = await session.execute(delete(IdentitySession).where(IdentitySession.token_hash == token_hash))
     return (result.rowcount or 0) > 0
 
 
-async def delete_other_sessions(
-    session: AsyncSession, *, identity_id: str, keep_token_hash: str
-) -> int:
+async def delete_other_sessions(session: AsyncSession, *, identity_id: str, keep_token_hash: str) -> int:
     """Удаляет все сессии identity кроме той, которая соответствует keep_token_hash."""
     result = await session.execute(
         delete(IdentitySession)
@@ -150,18 +136,12 @@ async def delete_other_sessions(
     return int(result.rowcount or 0)
 
 
-async def touch_session_last_seen(
-    session: AsyncSession, sess: IdentitySession
-) -> None:
+async def touch_session_last_seen(session: AsyncSession, sess: IdentitySession) -> None:
     """Обновляет last_seen_at, но только если прошло ≥60 секунд — чтобы не писать в БД на каждый запрос."""
     now = datetime.utcnow()
     if (now - sess.last_seen_at).total_seconds() < _LAST_SEEN_TOUCH_SECONDS:
         return
-    await session.execute(
-        update(IdentitySession)
-        .where(IdentitySession.id == sess.id)
-        .values(last_seen_at=now)
-    )
+    await session.execute(update(IdentitySession).where(IdentitySession.id == sess.id).values(last_seen_at=now))
     sess.last_seen_at = now
 
 
@@ -169,8 +149,6 @@ async def cleanup_expired_sessions(session: AsyncSession) -> int:
     """Удаляет все сессии с expires_at в прошлом. Возвращает количество удалённых."""
     now = datetime.utcnow()
     result = await session.execute(
-        delete(IdentitySession)
-        .where(IdentitySession.expires_at.is_not(None))
-        .where(IdentitySession.expires_at <= now)
+        delete(IdentitySession).where(IdentitySession.expires_at.is_not(None)).where(IdentitySession.expires_at <= now)
     )
     return int(result.rowcount or 0)

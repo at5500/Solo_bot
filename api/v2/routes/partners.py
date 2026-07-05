@@ -551,14 +551,26 @@ def _enabled_payout_methods() -> set[str]:
 
 def _payout_method_options() -> list[PartnerPayoutMethodOption]:
     try:
-        from modules.partner_program import buttons as B
-        from modules.partner_program import settings as S
+        from modules.partner_program import (
+            buttons as B,
+            settings as S,
+        )
     except Exception:
         return []
     defs = [
         (B.METHOD_CARD, B.BTN_METHOD_CARD, bool(getattr(S, "ENABLE_PAYOUT_CARD", False)), "16 цифр номера карты"),
-        (B.METHOD_SBP, B.BTN_METHOD_SBP, bool(getattr(S, "ENABLE_PAYOUT_SBP", False)), "Номер телефона и название банка"),
-        (B.METHOD_USDT, B.BTN_METHOD_USDT, bool(getattr(S, "ENABLE_PAYOUT_USDT", False)), "USDT-адрес сети TRC20 (начинается с T)"),
+        (
+            B.METHOD_SBP,
+            B.BTN_METHOD_SBP,
+            bool(getattr(S, "ENABLE_PAYOUT_SBP", False)),
+            "Номер телефона и название банка",
+        ),
+        (
+            B.METHOD_USDT,
+            B.BTN_METHOD_USDT,
+            bool(getattr(S, "ENABLE_PAYOUT_USDT", False)),
+            "USDT-адрес сети TRC20 (начинается с T)",
+        ),
         (B.METHOD_TON, B.BTN_METHOD_TON, bool(getattr(S, "ENABLE_PAYOUT_TON", False)), "Адрес TON-кошелька"),
     ]
     return [PartnerPayoutMethodOption(key=key, label=label, hint=hint) for key, label, enabled, hint in defs if enabled]
@@ -688,6 +700,7 @@ async def partner_payout_method_me(
     card = (row[1] if row else None) or None
     configured = bool(card and str(card).strip())
     from modules.partner_program.handlers.utils import mask_requisites, method_label
+
     return PartnerPayoutMethodState(
         configured=configured,
         method=method if configured else None,
@@ -711,6 +724,7 @@ async def partner_set_payout_method(
         method_label,
         validate_requisites,
     )
+
     method = body.method.strip()
     if not _method_enabled(method):
         raise HTTPException(status_code=400, detail="Способ вывода недоступен")
@@ -848,6 +862,19 @@ async def partner_create_payout_request(
     destination = (row[2] if row else None) or None
     if not (destination and str(destination).strip()):
         raise HTTPException(status_code=400, detail="Сначала укажите способ вывода и реквизиты")
+    debited = (
+        await session.execute(
+            text(
+                "UPDATE users SET partner_balance = COALESCE(partner_balance, 0) - :amount "
+                "WHERE id = :id AND COALESCE(partner_balance, 0) >= :amount "
+                "RETURNING COALESCE(partner_balance, 0)"
+            ),
+            {"amount": float(requested), "id": int(user_id)},
+        )
+    ).scalar()
+    if debited is None:
+        raise HTTPException(status_code=400, detail="Недостаточно партнерского баланса")
+    new_balance = float(debited)
     inserted = (
         await session.execute(
             text(
@@ -865,11 +892,6 @@ async def partner_create_payout_request(
             },
         )
     ).scalar()
-    new_balance = balance - requested
-    await session.execute(
-        text("UPDATE users SET partner_balance = :balance WHERE id = :id"),
-        {"balance": new_balance, "id": int(user_id)},
-    )
     await _notify_admins_new_payout(int(tg_id), float(requested), payout_method, destination or "")
     return PartnerPayoutRequestResponse(
         ok=True,
@@ -1233,7 +1255,9 @@ async def update_partner_balance(
     except (TypeError, ValueError):
         return ORJSONResponse(content={"success": False, "message": "Неверная сумма"}, status_code=400)
     if amount_val < 0:
-        return ORJSONResponse(content={"success": False, "message": "Сумма не может быть отрицательной"}, status_code=400)
+        return ORJSONResponse(
+            content={"success": False, "message": "Сумма не может быть отрицательной"}, status_code=400
+        )
     if amount_val > 100_000_000:
         return ORJSONResponse(content={"success": False, "message": "Слишком большая сумма"}, status_code=400)
     try:

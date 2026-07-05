@@ -2,7 +2,7 @@ import asyncio
 import re
 
 from base64 import b64encode
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from math import ceil
 from typing import Any
@@ -55,9 +55,10 @@ from config import (
     QRCODE,
     REMNAWAVE_LOGIN,
     REMNAWAVE_PASSWORD,
+    RENEW_BUTTON_BEFORE_DAYS,
     USE_COUNTRY_SELECTION,
 )
-from core.bootstrap import BUTTONS_CONFIG, MODES_CONFIG, PAYMENTS_CONFIG, TARIFFS_CONFIG
+from core.bootstrap import BUTTONS_CONFIG, MODES_CONFIG, NOTIFICATIONS_CONFIG, PAYMENTS_CONFIG, TARIFFS_CONFIG
 from core.settings.tariffs_config import normalize_tariff_config
 from database import (
     check_server_name_by_cluster,
@@ -71,9 +72,9 @@ from database import (
     update_balance,
 )
 from database.access.resolution import resolve_user_optional
-from database.servers import cluster_name_exists, get_cluster_name_for_server_name
 from database.coupons import mark_coupon_used
 from database.models import Key, Server, ServerSpecialgroup, Tariff
+from database.servers import cluster_name_exists, get_cluster_name_for_server_name
 from database.temporary_data import create_temporary_data
 from handlers.buttons import CONNECT_DEVICE, ROUTER_BUTTON, TV_BUTTON
 from handlers.keys.key_view import build_key_view_payload
@@ -92,7 +93,7 @@ from services.operations import (
 )
 from services.operations.aggregated_links import make_aggregated_link
 from services.payments.payment_links import PaymentLinkRequest, create_payment_link
-from services.payments.providers import WEB_LINK_PROVIDER_IDS
+from services.payments.providers import get_web_link_provider_ids
 from services.tariffs import calculate_config_price
 from services.tariffs.tariff_display import GB, get_effective_limits_for_key, get_key_tariff_addons_state
 
@@ -107,6 +108,18 @@ router = generate_crud_router(
     enabled_methods=["get_all", "get_one", "get_by_email", "get_all_by_field"],
 )
 user_router = APIRouter()
+
+
+def _renew_available_from_ms(expiry_time_ms: int) -> int:
+    renew_before_days = int(NOTIFICATIONS_CONFIG.get("RENEW_BUTTON_BEFORE_DAYS", RENEW_BUTTON_BEFORE_DAYS))
+    return int(expiry_time_ms) - renew_before_days * 86_400_000
+
+
+def _is_renew_available(expiry_time_ms: int) -> bool:
+    if not expiry_time_ms:
+        return True
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    return now_ms >= _renew_available_from_ms(expiry_time_ms)
 
 
 def _key_actions_config() -> AccountKeyActionsConfigResponse:
@@ -237,9 +250,7 @@ async def resolve_user_squad_uuids(session: AsyncSession, billing_user_id: int) 
     Key.server_id может быть как именем сервера, так и именем кластера.
     Используется блоком «Статус серверов», чтобы показывать только серверы тарифа юзера.
     """
-    keys = (
-        await session.execute(select(Key).where(Key.user_id == billing_user_id))
-    ).scalars().all()
+    keys = (await session.execute(select(Key).where(Key.user_id == billing_user_id))).scalars().all()
     if not keys:
         return set()
     cluster_names: set[str] = set()
@@ -256,9 +267,7 @@ async def resolve_user_squad_uuids(session: AsyncSession, billing_user_id: int) 
         return set()
     rows = (
         await session.execute(
-            select(Server.inbound_id, Server.panel_type, Server.enabled).where(
-                Server.cluster_name.in_(cluster_names)
-            )
+            select(Server.inbound_id, Server.panel_type, Server.enabled).where(Server.cluster_name.in_(cluster_names))
         )
     ).all()
     squads: set[str] = set()
@@ -297,10 +306,11 @@ def _resolve_public_base_url(request: Request) -> str:
 
 
 def _resolve_default_web_payment_provider() -> str | None:
-    for provider_id in WEB_LINK_PROVIDER_IDS:
+    ids = get_web_link_provider_ids()
+    for provider_id in ids:
         if bool(PAYMENTS_CONFIG.get(provider_id)):
             return provider_id
-    return WEB_LINK_PROVIDER_IDS[0] if WEB_LINK_PROVIDER_IDS else None
+    return ids[0] if ids else None
 
 
 def _normalize_expiry_ms(raw_value: int | float | None) -> int:

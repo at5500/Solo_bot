@@ -15,7 +15,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import INLINE_MODE, USERNAME_BOT
 from database import create_coupon, delete_coupon, get_all_coupons
-from filters.admin import IsAdminFilter
+from filters.admin import HasPermission, IsAdminFilter
+from filters.permissions import PERM_COUPONS
 from handlers.buttons import BACK
 from handlers.utils import format_days, safe_answer_inline_query
 from logger import logger
@@ -27,10 +28,6 @@ from .keyboard import (
     build_coupons_list_kb,
     format_coupons_list,
 )
-
-
-from filters.admin import HasPermission
-from filters.permissions import PERM_COUPONS
 
 
 router = Router()

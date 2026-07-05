@@ -236,7 +236,9 @@ async def open_remnawave_settings(callback: CallbackQuery) -> None:
 async def open_node_menu(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         text=_node_text(),
-        reply_markup=build_settings_remnawave_node_kb(_node_health_enabled(), _node_interval(), _auto_disable_enabled()),
+        reply_markup=build_settings_remnawave_node_kb(
+            _node_health_enabled(), _node_interval(), _auto_disable_enabled()
+        ),
     )
     await callback.answer()
 
@@ -253,7 +255,9 @@ async def toggle_node_health(callback: CallbackQuery) -> None:
     )
     await callback.message.edit_text(
         text=_node_text(),
-        reply_markup=build_settings_remnawave_node_kb(_node_health_enabled(), _node_interval(), _auto_disable_enabled()),
+        reply_markup=build_settings_remnawave_node_kb(
+            _node_health_enabled(), _node_interval(), _auto_disable_enabled()
+        ),
     )
 
 
@@ -288,7 +292,9 @@ async def set_node_interval(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         text=_node_text(),
-        reply_markup=build_settings_remnawave_node_kb(_node_health_enabled(), _node_interval(), _auto_disable_enabled()),
+        reply_markup=build_settings_remnawave_node_kb(
+            _node_health_enabled(), _node_interval(), _auto_disable_enabled()
+        ),
     )
 
 
@@ -299,12 +305,16 @@ async def toggle_auto_disable(callback: CallbackQuery) -> None:
     async with async_session_maker() as session:
         await update_remnawave_config(session, new_cfg)
     await callback.answer(
-        "✅ Авто-отключение хостов включено" if new_cfg["HOST_AUTO_DISABLE_ON_NODE_DOWN"] else "❌ Авто-отключение хостов выключено",
+        "✅ Авто-отключение хостов включено"
+        if new_cfg["HOST_AUTO_DISABLE_ON_NODE_DOWN"]
+        else "❌ Авто-отключение хостов выключено",
         show_alert=True,
     )
     await callback.message.edit_text(
         text=_node_text(),
-        reply_markup=build_settings_remnawave_node_kb(_node_health_enabled(), _node_interval(), _auto_disable_enabled()),
+        reply_markup=build_settings_remnawave_node_kb(
+            _node_health_enabled(), _node_interval(), _auto_disable_enabled()
+        ),
     )
 
 

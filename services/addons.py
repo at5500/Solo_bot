@@ -238,7 +238,9 @@ async def apply_addons(
     )
 
     if extra_price_rub > 0:
-        await update_balance(session, billing_user_id, -extra_price_rub)
+        debited = await update_balance(session, billing_user_id, -extra_price_rub)
+        if debited is None:
+            raise InsufficientFundsError("Недостаточно средств на балансе")
 
     normalize_tariff_config(tariff)
     has_device, has_traffic, _ = get_pack_flags()

@@ -45,7 +45,7 @@ def _nice_max(value: float) -> float:
     import math
 
     exp = math.floor(math.log10(value))
-    base = 10 ** exp
+    base = 10**exp
     for mult in (1, 2, 2.5, 5, 10):
         candidate = mult * base
         if candidate >= value:

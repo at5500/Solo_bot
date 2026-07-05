@@ -27,7 +27,7 @@ from database import (
 )
 from database.access.resolution import notify_telegram_chat_id
 from database.models import Admin
-from database.notifications import check_hot_lead_discount
+from database.notifications import check_cold_lead_discount, check_hot_lead_discount
 from database.tariffs import create_subgroup_hash, find_subgroup_by_hash, get_subgroup_description, get_tariffs
 from database.users import get_balance
 from handlers.admin.panel.keyboard import AdminPanelCallback
@@ -51,7 +51,12 @@ from services.tariffs.visibility import filter_visible_tariffs
 
 from .key_mode.key_cluster_mode import key_cluster_mode
 from .key_mode.key_country_mode import key_country_mode
-from .utils import add_tariff_button_generic, format_subgroup_description, format_tariff_descriptions, order_tariff_items
+from .utils import (
+    add_tariff_button_generic,
+    format_subgroup_description,
+    format_tariff_descriptions,
+    order_tariff_items,
+)
 
 
 router = Router()
@@ -200,13 +205,16 @@ async def handle_key_creation(
         tariffs = await get_tariffs_for_cluster(session, cluster_name)
 
         discount_info: dict[str, Any] | None = None
-        subgroup_weights: dict[str, int] = {}
 
         if tariffs:
             group_code = tariffs[0].get("group_code")
             original_group_code = group_code
             if group_code:
                 discount_info = await check_hot_lead_discount(session, tg_id)
+                if not (discount_info and discount_info.get("available")):
+                    cold_discount_info = await check_cold_lead_discount(session, tg_id)
+                    if cold_discount_info and cold_discount_info.get("available"):
+                        discount_info = cold_discount_info
 
                 if discount_info and discount_info.get("available"):
                     group_code = discount_info["tariff_group"]
@@ -234,7 +242,7 @@ async def handle_key_creation(
                 tariffs = await filter_visible_tariffs(
                     session, tg_id, [t for t in tariffs_data["tariffs"] if t.get("is_active")]
                 )
-                subgroup_weights = tariffs_data["subgroup_weights"]
+                tariffs_data["subgroup_weights"]
 
                 if not tariffs and discount_info and discount_info.get("available"):
                     logger.warning(f"[PURCHASE] Нет тарифов со скидкой {group_code}, fallback на {original_group_code}")
@@ -247,7 +255,7 @@ async def handle_key_creation(
                     tariffs = await filter_visible_tariffs(
                         session, tg_id, [t for t in tariffs_data["tariffs"] if t.get("is_active")]
                     )
-                    subgroup_weights = tariffs_data["subgroup_weights"]
+                    tariffs_data["subgroup_weights"]
                     discount_info = None
                     await state.update_data(discount_info=None)
 
@@ -420,7 +428,10 @@ async def show_tariffs_in_subgroup_user(callback: CallbackQuery, state: FSMConte
     sub_desc = await get_subgroup_description(session, group_code, subgroup)
     await edit_or_send_message(
         target_message=callback.message,
-        text=f"<b>{subgroup}</b>\n\n" + format_subgroup_description(sub_desc) + "Выберите тариф:" + format_tariff_descriptions(filtered),
+        text=f"<b>{subgroup}</b>\n\n"
+        + format_subgroup_description(sub_desc)
+        + "Выберите тариф:"
+        + format_tariff_descriptions(filtered),
         reply_markup=builder.as_markup(),
     )
 
@@ -486,7 +497,10 @@ async def back_to_subgroup_tariffs(callback: CallbackQuery, state: FSMContext, s
     sub_desc = await get_subgroup_description(session, group_code, subgroup)
     await edit_or_send_message(
         target_message=callback.message,
-        text=f"<b>{subgroup}</b>\n\n" + format_subgroup_description(sub_desc) + "Выберите тариф:" + format_tariff_descriptions(filtered),
+        text=f"<b>{subgroup}</b>\n\n"
+        + format_subgroup_description(sub_desc)
+        + "Выберите тариф:"
+        + format_tariff_descriptions(filtered),
         reply_markup=builder.as_markup(),
     )
     await callback.answer()

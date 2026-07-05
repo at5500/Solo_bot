@@ -38,6 +38,7 @@ from hooks.hooks import run_hooks
 from logger import logger
 from middlewares.session import wrap_session
 
+
 moscow_tz = pytz.timezone("Europe/Moscow")
 notification_lock = asyncio.Lock()
 
@@ -106,7 +107,8 @@ async def _run_cycle(bot: Bot, sessionmaker: async_sessionmaker):
         if notify_24_enabled:
             try:
                 await process_expiring_keys(
-                    ctx, keys,
+                    ctx,
+                    keys,
                     min_hours=notify_10_hours if notify_10_enabled else 0,
                     max_hours=notify_24_hours,
                     notify_type="key_24h",
@@ -120,7 +122,8 @@ async def _run_cycle(bot: Bot, sessionmaker: async_sessionmaker):
         if notify_10_enabled:
             try:
                 await process_expiring_keys(
-                    ctx, keys,
+                    ctx,
+                    keys,
                     min_hours=0,
                     max_hours=notify_10_hours,
                     notify_type="key_10h",
@@ -133,7 +136,8 @@ async def _run_cycle(bot: Bot, sessionmaker: async_sessionmaker):
 
         try:
             await process_expired_keys(
-                ctx, keys,
+                ctx,
+                keys,
                 notify_renew_expired=renew_expired_enabled,
                 notify_delete_key=delete_key_enabled,
                 delete_delay_minutes=delete_delay,

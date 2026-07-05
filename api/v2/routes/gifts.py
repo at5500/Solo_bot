@@ -3,6 +3,7 @@ from io import BytesIO
 from math import ceil
 
 import qrcode
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +66,7 @@ async def create_gift_for_user(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     if not preview:
         await enforce_rate_limit(request, session, bucket="gift_create", max_per_window=10, window_sec=60)
     _check_gifts_enabled()
@@ -304,6 +306,7 @@ async def redeem_gift(
     identity=Depends(verify_identity_token),
 ):
     from api.ratelimit import enforce_rate_limit
+
     await enforce_rate_limit(request, session, bucket="gift_redeem", max_per_window=10, window_sec=60)
     _check_gifts_enabled()
     actor = get_request_actor(request)

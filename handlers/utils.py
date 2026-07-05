@@ -31,7 +31,7 @@ from hooks.processors import process_cluster_balancer
 from logger import logger
 
 
-ALLOWED_GROUP_CODES = ["trial", "discounts", "discounts_max", "gifts"]
+ALLOWED_GROUP_CODES = ["trial", "discounts", "discounts_max", "cold_discounts", "cold_discounts_max", "gifts"]
 
 
 _CALLBACK_ANSWER_IGNORE = (

@@ -67,6 +67,7 @@ from hooks.processors import (
 from logger import logger
 from panels._3xui import delete_client, get_xui_instance
 from panels.remnawave import RemnawaveAPI, get_vless_link_for_remnawave_by_username
+from services.errors import InsufficientFundsError
 from services.operations import create_client_on_server
 from services.operations.aggregated_links import make_aggregated_link
 from services.tariffs.tariff_display import (

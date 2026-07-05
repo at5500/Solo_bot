@@ -1,4 +1,4 @@
-from typing import Iterable
+from collections.abc import Iterable
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -157,9 +157,7 @@ def build_admin_permissions_kb(tg_id: int, current: set[str]) -> InlineKeyboardM
             text=f"{mark} {label}",
             callback_data=AdminPanelCallback(action=f"toggle_perm|{tg_id}|{perm_id}").pack(),
         )
-    builder.button(
-        text=BACK, callback_data=AdminPanelCallback(action=f"admin_menu|{tg_id}").pack()
-    )
+    builder.button(text=BACK, callback_data=AdminPanelCallback(action=f"admin_menu|{tg_id}").pack())
     builder.adjust(1)
     return builder.as_markup()
 

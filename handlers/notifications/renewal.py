@@ -38,7 +38,7 @@ class RenewalResult(NamedTuple):
     new_expiry_time: int | None = None
 
 
-FORBIDDEN_GROUPS = ["discounts", "discounts_max", "gifts", "trial"]
+FORBIDDEN_GROUPS = ["discounts", "discounts_max", "cold_discounts", "cold_discounts_max", "gifts", "trial"]
 
 
 async def try_auto_renew(ctx: NotificationContext, key) -> RenewalResult:
@@ -65,6 +65,9 @@ async def try_auto_renew(ctx: NotificationContext, key) -> RenewalResult:
 
     if not current_tariff:
         return RenewalResult(RenewalStatus.NO_TARIFF)
+
+    if current_tariff.get("is_active") is False:
+        return RenewalResult(RenewalStatus.FORBIDDEN_TARIFF)
 
     forbidden = list(FORBIDDEN_GROUPS)
     try:
@@ -115,9 +118,7 @@ async def try_auto_renew(ctx: NotificationContext, key) -> RenewalResult:
     base_expiry = current_expiry if current_expiry > now_ms else now_ms
     new_expiry_time = int(base_expiry + duration_days * 24 * 60 * 60 * 1000)
 
-    logger.info(
-        f"Продление {email} на {duration_days}д для {tg_id}. Баланс: {balance}, списываем: {renewal_cost}"
-    )
+    logger.info(f"Продление {email} на {duration_days}д для {tg_id}. Баланс: {balance}, списываем: {renewal_cost}")
 
     key_subgroup = current_tariff.get("subgroup_title")
 
@@ -136,7 +137,9 @@ async def try_auto_renew(ctx: NotificationContext, key) -> RenewalResult:
     )
 
     await ctx.session.execute(
-        update(Key).where(Key.client_id == client_id).values(
+        update(Key)
+        .where(Key.client_id == client_id)
+        .values(
             current_device_limit=selected_device_limit,
             current_traffic_limit=selected_traffic_limit,
             selected_price_rub=renewal_cost,
@@ -150,7 +153,9 @@ async def try_auto_renew(ctx: NotificationContext, key) -> RenewalResult:
         ctx.bulk_updates["key_tariff_updates"].append((client_id, current_tariff["id"]))
         ctx.bulk_updates["notifications_to_add"].append((tg_id, renew_notification_id))
     else:
-        await update_balance(ctx.session, tg_id, -renewal_cost)
+        debited = await update_balance(ctx.session, tg_id, -renewal_cost)
+        if debited is None:
+            return RenewalResult(RenewalStatus.NO_BALANCE)
         await update_key_expiry(ctx.session, client_id, new_expiry_time)
         await update_key_tariff(ctx.session, client_id, current_tariff["id"])
         await add_notification(ctx.session, tg_id, renew_notification_id)

@@ -159,7 +159,7 @@ def build_tariff_list_kb(tariffs: list[dict]) -> InlineKeyboardMarkup:
 
     grouped = defaultdict(list)
     for t in tariffs:
-        subgroup = t.get("subgroup_title")
+        subgroup = t.get("subgroup_title") or None
         grouped[subgroup].append(t)
 
     sorted_subgroups = sorted(
@@ -267,12 +267,28 @@ def build_tariff_visibility_kb(tariff_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👁 Показывать всем", callback_data=f"tvisset|{tariff_id}|all|none")],
-            [InlineKeyboardButton(text="✅ Только: есть активная подписка", callback_data=f"tvisset|{tariff_id}|only|has_active")],
-            [InlineKeyboardButton(text="🚫 Кроме: есть активная подписка", callback_data=f"tvisset|{tariff_id}|except|has_active")],
+            [
+                InlineKeyboardButton(
+                    text="✅ Только: есть активная подписка", callback_data=f"tvisset|{tariff_id}|only|has_active"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Кроме: есть активная подписка", callback_data=f"tvisset|{tariff_id}|except|has_active"
+                )
+            ],
             [InlineKeyboardButton(text="✅ Только: горячий лид", callback_data=f"tvisset|{tariff_id}|only|hot_lead")],
             [InlineKeyboardButton(text="🚫 Кроме: горячий лид", callback_data=f"tvisset|{tariff_id}|except|hot_lead")],
-            [InlineKeyboardButton(text="✅ Только: активных ≥ N", callback_data=f"tvisset|{tariff_id}|only|active_count")],
-            [InlineKeyboardButton(text="🚫 Кроме: активных ≥ N", callback_data=f"tvisset|{tariff_id}|except|active_count")],
+            [
+                InlineKeyboardButton(
+                    text="✅ Только: активных ≥ N", callback_data=f"tvisset|{tariff_id}|only|active_count"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Кроме: активных ≥ N", callback_data=f"tvisset|{tariff_id}|except|active_count"
+                )
+            ],
             [InlineKeyboardButton(text=BACK, callback_data=AdminTariffCallback(action=f"view|{tariff_id}").pack())],
         ]
     )

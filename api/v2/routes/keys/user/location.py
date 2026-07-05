@@ -95,8 +95,11 @@ async def user_key_change_location(
                 remna_del = RemnawaveAPI(str(getattr(old_server_info, "api_url", "") or ""))
                 if await remna_del.login(REMNAWAVE_LOGIN, REMNAWAVE_PASSWORD):
                     await remna_del.delete_user(str(getattr(db_key, "client_id", "") or ""))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                f"[location] не удалось удалить клиента {getattr(db_key, 'client_id', '')} "
+                f"со старой панели {old_panel_type}: {exc}"
+            )
     target_server_info = (
         await session.execute(select(Server).where(Server.server_name == target_server).limit(1))
     ).scalar_one_or_none()

@@ -292,7 +292,9 @@ async def move_subgroup(session: AsyncSession, group_code: str, subgroup_title: 
             await session.execute(
                 select(Tariff).where(Tariff.group_code == group_code).order_by(Tariff.sort_order, Tariff.id)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     if not rows:
         return False

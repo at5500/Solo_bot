@@ -16,6 +16,7 @@ from services.operations import (
     update_subscription,
 )
 
+
 DAY_MS = 86400 * 1000
 
 
@@ -53,9 +54,7 @@ async def bulk_reissue_link(session: AsyncSession, keys: list[Key], bot) -> tupl
     for tg_id, email, client_id, server_id in targets:
         try:
             cluster_servers = _find_cluster_servers(servers, server_id)
-            remnawave_servers = [
-                s for s in cluster_servers if s.get("panel_type", "3x-ui").lower() == "remnawave"
-            ]
+            remnawave_servers = [s for s in cluster_servers if s.get("panel_type", "3x-ui").lower() == "remnawave"]
 
             if remnawave_servers and client_id:
                 api_url = remnawave_servers[0].get("api_url")
@@ -231,7 +230,8 @@ async def bulk_unfreeze(session: AsyncSession, keys: list[Key]) -> tuple[int, in
                 fail += 1
                 continue
             traffic, device = await _key_limits(session, key)
-            new_expiry = now_ms + max(0, key.expiry_time)
+            stored_left = max(0, key.expiry_time)
+            new_expiry = stored_left if stored_left > now_ms else now_ms + stored_left
             await renew_key_in_cluster(
                 key.server_id,
                 email=key.email,

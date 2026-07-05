@@ -15,6 +15,7 @@ from database.models import (
 )
 from logger import logger
 
+
 _INTERNAL_PAYMENT_SYSTEMS = ("referral", "cashback", "coupon", "admin")
 
 
@@ -66,9 +67,7 @@ async def resolve_user_ref_by_client_id(session: AsyncSession, client_id: str) -
         return None, None
 
     row = (
-        await session.execute(
-            select(Key.tg_id, Key.user_id).where(func.lower(Key.client_id) == needle).limit(1)
-        )
+        await session.execute(select(Key.tg_id, Key.user_id).where(func.lower(Key.client_id) == needle).limit(1))
     ).first()
     if row and (row.tg_id is not None or row.user_id is not None):
         return (row.tg_id if row.tg_id is not None else row.user_id), "active"
@@ -231,9 +230,7 @@ async def snapshot_daily_metrics(session: AsyncSession) -> None:
     day_start = datetime(target_date.year, target_date.month, target_date.day)
     day_end = day_start + timedelta(days=1)
 
-    active = (await session.scalar(
-        select(func.count()).select_from(Key).where(Key.expiry_time > now_ms)
-    )) or 0
+    active = (await session.scalar(select(func.count()).select_from(Key).where(Key.expiry_time > now_ms))) or 0
 
     ev_rows = (
         await session.execute(
@@ -245,40 +242,40 @@ async def snapshot_daily_metrics(session: AsyncSession) -> None:
     ).all()
     ev = {r.event_type: int(r.cnt) for r in ev_rows}
 
-    revenue = (await session.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0))
-        .where(Payment.status == "success")
-        .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
-        .where(Payment.created_at >= day_start)
-        .where(Payment.created_at < day_end)
-    )) or 0
+    revenue = (
+        await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.status == "success")
+            .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
+            .where(Payment.created_at >= day_start)
+            .where(Payment.created_at < day_end)
+        )
+    ) or 0
 
     tariff_rows = (
         await session.execute(
-            select(Key.tariff_id, func.count().label("cnt"))
-            .where(Key.expiry_time > now_ms).group_by(Key.tariff_id)
+            select(Key.tariff_id, func.count().label("cnt")).where(Key.expiry_time > now_ms).group_by(Key.tariff_id)
         )
     ).all()
     server_rows = (
         await session.execute(
-            select(Key.server_id, func.count().label("cnt"))
-            .where(Key.expiry_time > now_ms).group_by(Key.server_id)
+            select(Key.server_id, func.count().label("cnt")).where(Key.expiry_time > now_ms).group_by(Key.server_id)
         )
     ).all()
     by_tariff = {str(r.tariff_id): int(r.cnt) for r in tariff_rows}
     by_server = {str(r.server_id): int(r.cnt) for r in server_rows}
 
-    values = dict(
-        snapshot_date=target_date,
-        active=int(active),
-        created=ev.get("created", 0),
-        renewed=ev.get("renewed", 0),
-        expired=ev.get("expired", 0),
-        deleted=ev.get("deleted", 0),
-        revenue_rub=float(revenue),
-        by_tariff=by_tariff,
-        by_server=by_server,
-    )
+    values = {
+        "snapshot_date": target_date,
+        "active": int(active),
+        "created": ev.get("created", 0),
+        "renewed": ev.get("renewed", 0),
+        "expired": ev.get("expired", 0),
+        "deleted": ev.get("deleted", 0),
+        "revenue_rub": float(revenue),
+        "by_tariff": by_tariff,
+        "by_server": by_server,
+    }
     stmt = pg_insert(DailySubscriptionMetric).values(**values)
     stmt = stmt.on_conflict_do_update(
         index_elements=[DailySubscriptionMetric.snapshot_date],
@@ -327,10 +324,7 @@ async def get_subscription_dynamics(session: AsyncSession, days: int) -> dict:
             }
             for d, v in sorted(daily_map.items())
         ],
-        "activeTrend": [
-            {"date": r.snapshot_date.strftime("%Y-%m-%d"), "active": int(r.active)}
-            for r in snap_rows
-        ],
+        "activeTrend": [{"date": r.snapshot_date.strftime("%Y-%m-%d"), "active": int(r.active)} for r in snap_rows],
     }
 
 
@@ -342,40 +336,52 @@ async def get_retention_metrics(session: AsyncSession, days: int) -> dict:
     since = now - timedelta(days=days)
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    expired = (await session.scalar(
-        select(func.count()).select_from(SubscriptionEvent)
-        .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
-        .where(SubscriptionEvent.created_at >= since)
-    )) or 0
-    active = (await session.scalar(
-        select(func.count()).select_from(Key).where(Key.expiry_time > now_ms)
-    )) or 0
+    expired = (
+        await session.scalar(
+            select(func.count())
+            .select_from(SubscriptionEvent)
+            .where(SubscriptionEvent.event_type.in_(["expired", "deleted"]))
+            .where(SubscriptionEvent.created_at >= since)
+        )
+    ) or 0
+    active = (await session.scalar(select(func.count()).select_from(Key).where(Key.expiry_time > now_ms))) or 0
     churn_rate = (expired / (active + expired) * 100.0) if (active + expired) else 0.0
 
-    total_rev = (await session.scalar(
-        select(func.coalesce(func.sum(Payment.amount), 0))
-        .where(Payment.status == "success")
-        .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
-    )) or 0
-    payers = (await session.scalar(
-        select(func.count(func.distinct(Payment.user_id)))
-        .where(Payment.status == "success")
-        .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
-    )) or 0
+    total_rev = (
+        await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.status == "success")
+            .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
+        )
+    ) or 0
+    payers = (
+        await session.scalar(
+            select(func.count(func.distinct(Payment.user_id)))
+            .where(Payment.status == "success")
+            .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
+        )
+    ) or 0
     ltv = (float(total_rev) / payers) if payers else 0.0
 
-    trial_users = (await session.scalar(
-        select(func.count()).select_from(User).where(User.created_at >= since).where(User.trial > 0)
-    )) or 0
+    trial_users = (
+        await session.scalar(
+            select(func.count()).select_from(User).where(User.created_at >= since).where(User.trial > 0)
+        )
+    ) or 0
     paid_uids = (
         select(Payment.user_id)
         .where(Payment.status == "success")
         .where(Payment.payment_system.notin_(_INTERNAL_PAYMENT_SYSTEMS))
     )
-    trial_converted = (await session.scalar(
-        select(func.count()).select_from(User)
-        .where(User.created_at >= since).where(User.trial > 0).where(User.id.in_(paid_uids))
-    )) or 0
+    trial_converted = (
+        await session.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.created_at >= since)
+            .where(User.trial > 0)
+            .where(User.id.in_(paid_uids))
+        )
+    ) or 0
     trial_rate = (trial_converted / trial_users * 100.0) if trial_users else 0.0
 
     cohort_rows = (

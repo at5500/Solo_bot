@@ -18,6 +18,7 @@ from handlers.texts import (
 )
 from logger import logger
 
+
 _WAITING_STATES = (
     "waiting_for_payment",
     "waiting_for_renewal_payment",
@@ -44,17 +45,21 @@ async def send_abandoned_checkout_reminders(session: AsyncSession) -> int:
     oldest = now - timedelta(hours=_MAX_AGE_HOURS)
     newest = now - timedelta(minutes=_MIN_AGE_MINUTES)
     rows = (
-        await session.execute(
-            select(TemporaryData).where(
-                and_(
-                    TemporaryData.state.in_(_WAITING_STATES),
-                    TemporaryData.updated_at >= oldest,
-                    TemporaryData.updated_at <= newest,
-                    TemporaryData.tg_id.isnot(None),
+        (
+            await session.execute(
+                select(TemporaryData).where(
+                    and_(
+                        TemporaryData.state.in_(_WAITING_STATES),
+                        TemporaryData.updated_at >= oldest,
+                        TemporaryData.updated_at <= newest,
+                        TemporaryData.tg_id.isnot(None),
+                    )
                 )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not rows:
         return 0
 

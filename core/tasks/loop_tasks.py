@@ -43,7 +43,10 @@ def backup_thread_loop(stop_event, _bot, _sessionmaker) -> None:
         return
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    backup_bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()))
+    backup_bot = Bot(
+        token=API_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML, protect_content=resolve_protect_content()),
+    )
     try:
         while not stop_event.is_set():
             error = loop.run_until_complete(backup_database(bot_instance=backup_bot))
@@ -89,9 +92,7 @@ async def blocked_drain_loop(_bot, sessionmaker) -> None:
                         if to_remove:
                             await remove_blocked_user_ids(session, to_remove)
                         await session.commit()
-                    logger.info(
-                        "[BlockedDrain] add={}, remove={}", len(to_add), len(to_remove)
-                    )
+                    logger.info("[BlockedDrain] add={}, remove={}", len(to_add), len(to_remove))
         except Exception as e:
             logger.error("[BlockedDrain] Ошибка: {}", e)
         await asyncio.sleep(BLOCKED_DRAIN_INTERVAL_SEC)

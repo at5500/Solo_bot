@@ -28,7 +28,7 @@ from database.servers import cluster_name_exists, get_cluster_name_for_server_na
 from database.users import get_trial
 from logger import logger
 
-from .errors import NotFoundError, ServiceError, ValidationError
+from .errors import InsufficientFundsError, NotFoundError, ServiceError, ValidationError
 
 
 if TYPE_CHECKING:
@@ -187,9 +187,7 @@ async def calculate_renewal_pricing(
 
         if selected_device_limit is not None:
             if device_options and int(selected_device_limit) not in device_options:
-                raise ValidationError(
-                    f"Недопустимое количество устройств. Доступно: {sorted(device_options)}"
-                )
+                raise ValidationError(f"Недопустимое количество устройств. Доступно: {sorted(device_options)}")
             sel_dev_int = int(selected_device_limit)
         else:
             existing = key_details.get("selected_device_limit") if same_tariff else None
@@ -197,9 +195,7 @@ async def calculate_renewal_pricing(
 
         if selected_traffic_limit is not None:
             if traffic_options and int(selected_traffic_limit) not in traffic_options:
-                raise ValidationError(
-                    f"Недопустимый объём трафика. Доступно (ГБ): {sorted(traffic_options)}"
-                )
+                raise ValidationError(f"Недопустимый объём трафика. Доступно (ГБ): {sorted(traffic_options)}")
             sel_trf_int = int(selected_traffic_limit)
         else:
             existing = key_details.get("selected_traffic_limit") if same_tariff else None
@@ -325,9 +321,8 @@ def _is_same_subscription(
     def _opt(value: Any) -> int | None:
         return int(value) if value is not None else None
 
-    return (
-        _opt(current_selected_device) == _opt(new_selected_device)
-        and _opt(current_selected_traffic) == _opt(new_selected_traffic)
+    return _opt(current_selected_device) == _opt(new_selected_device) and _opt(current_selected_traffic) == _opt(
+        new_selected_traffic
     )
 
 
@@ -354,9 +349,7 @@ async def compute_renewal_expiry(
     current_expiry_ms = int(current_expiry_ms)
     new_tariff = await get_tariff_by_id(session, int(new_tariff_id))
     new_duration = (
-        int(new_duration_days)
-        if new_duration_days is not None
-        else int((new_tariff or {}).get("duration_days") or 0)
+        int(new_duration_days) if new_duration_days is not None else int((new_tariff or {}).get("duration_days") or 0)
     )
     new_dur_ms = new_duration * _DAY_MS
     remaining_ms = max(0, current_expiry_ms - now_ms)
@@ -594,7 +587,10 @@ async def execute_renewal(
             current_traffic_limit=None if new_trf is None else final_traffic,
             apply_limits=True,
         )
-    await update_balance(session, billing_user_id, -cost)
+    if cost:
+        debited = await update_balance(session, billing_user_id, -cost)
+        if cost > 0 and debited is None:
+            raise InsufficientFundsError("Недостаточно средств для продления. Средства не списаны.")
 
     if tariff.get("configurable"):
         cfg = normalize_tariff_config(tariff)
@@ -751,7 +747,9 @@ async def create_vpn_key_headless(
 
     if price_to_charge and not skip_balance_charge:
         logger.info(f"[Key Creation] Списание с баланса user={tg_id}: -{price_to_charge} ₽")
-        await update_balance(session, tg_id, -int(price_to_charge))
+        debited = await update_balance(session, tg_id, -int(price_to_charge))
+        if debited is None:
+            raise InsufficientFundsError("Недостаточно средств на балансе")
     elif skip_balance_charge:
         logger.info(f"[Key Creation] Пропуск списания (skip_balance_charge) user={tg_id}")
     else:

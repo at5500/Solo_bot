@@ -283,11 +283,12 @@ async def finalize_key_creation(
                 if trial_status in [0, -1]:
                     await update_trial(session, tg_id, 1)
             if not is_trial and price_to_charge and not skip_balance_charge:
-                await update_balance(session, tg_id, -int(price_to_charge))
+                debited = await update_balance(session, tg_id, -int(price_to_charge))
+                if debited is None:
+                    raise InsufficientFundsError("Недостаточно средств на балансе")
 
             if state:
                 await state.update_data(skip_balance_charge=False)
-
 
     except Exception as e:
         logger.error(f"[Key Finalize] Ошибка при создании ключа для пользователя {tg_id}: {e}")

@@ -2,9 +2,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Setting
-
 from database.settings_cache import settings_cache
+
 from .runtime_sync import publish_runtime_config, register_runtime_config
+
 
 PROVIDERS_ORDER: dict[str, int] = {}
 register_runtime_config("PROVIDERS_ORDER", PROVIDERS_ORDER)

@@ -18,8 +18,11 @@ from database import (
     identities as idb,
 )
 from database.payments import update_payment_status
+from database.tariffs import get_tariff_by_id
 from database.temporary_data import create_temporary_data
 from logger import logger
+from services.tariffs.cooldown import get_tariff_cooldown_remaining
+from services.tariffs.visibility import is_tariff_visible_for
 
 
 _PAYMENT_LINK_TTL_MIN = 60
@@ -35,11 +38,39 @@ def _payment_link_expired(created_at) -> bool:
         return age > _PAYMENT_LINK_TTL_MIN * 60
     except Exception:
         return False
+
+
 from services.payments.payment_events import payment_events_channel
 from services.payments.payment_links import PaymentLinkRequest, create_payment_link
 
 
 router = APIRouter(tags=["PaymentLinks"])
+
+
+async def _validate_payment_intent(
+    session: AsyncSession,
+    billing_user_ref: int,
+    metadata: dict | None,
+) -> None:
+    if not isinstance(metadata, dict):
+        return
+    if str(metadata.get("payment_flow") or "").strip().lower() != "tariff_purchase":
+        return
+    tariff_id = metadata.get("tariff_id")
+    if tariff_id in (None, ""):
+        return
+    try:
+        tariff_id_int = int(tariff_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректный тариф")
+    tariff = await get_tariff_by_id(session, tariff_id_int)
+    if not tariff or not await is_tariff_visible_for(session, int(billing_user_ref), tariff):
+        raise HTTPException(status_code=404, detail="Тариф недоступен")
+    cooldown_left = await get_tariff_cooldown_remaining(
+        session, int(billing_user_ref), tariff_id_int, int(tariff.get("cooldown_days") or 0)
+    )
+    if cooldown_left > 0:
+        raise HTTPException(status_code=429, detail="Тариф временно недоступен для повторной покупки")
 
 
 async def _store_payment_intent(
@@ -168,6 +199,9 @@ async def create_link(
 ):
     """Создаёт платёжную ссылку для текущего авторизованного пользователя."""
     billing_user_ref = await idb.ensure_billing_user_for_identity(session, identity)
+    web_metadata = dict(body.metadata or {})
+    web_metadata.setdefault("payment_flow", "balance_topup")
+    await _validate_payment_intent(session, billing_user_ref, web_metadata)
     payment_request = PaymentLinkRequest(
         legacy_user_ref=billing_user_ref,
         amount=body.amount,
@@ -175,16 +209,19 @@ async def create_link(
         provider_id=body.provider_id,
         success_url=body.success_url,
         failure_url=body.failure_url,
-        metadata=body.metadata,
+        metadata=web_metadata,
     )
     result = await create_payment_link(session, payment_request)
     if result.success:
-        await _store_payment_intent(
-            session=session,
-            billing_user_ref=billing_user_ref,
-            metadata=body.metadata,
-            amount=body.amount,
-        )
+        try:
+            await _store_payment_intent(
+                session=session,
+                billing_user_ref=billing_user_ref,
+                metadata=web_metadata,
+                amount=body.amount,
+            )
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Некорректные данные платежа") from None
     return PaymentLinkCreateResponse(
         success=result.success,
         payment_id=result.payment_id,
