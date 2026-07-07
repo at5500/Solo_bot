@@ -85,3 +85,6 @@ api-*.json
 
 # личные черновики новостей (не коммитить)
 новость_*.md
+
+# Per-deployment paid-gate allowlist (see paid_gate_domains.txt.example)
+/paid_gate_domains.txt

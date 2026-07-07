@@ -1,0 +1,14 @@
+# Landing domains allowed to open the paid payment form (pay.*).
+#
+# Copy this file to `paid_gate_domains.txt` next to the bot and list one
+# domain per line. A listed domain also admits all of its subdomains.
+# Lines starting with `#` and blank lines are ignored. The file is re-read
+# automatically when it changes — no restart needed.
+#
+# IMPORTANT: while `paid_gate_domains.txt` is missing OR has no domains, the
+# gate is OFF and the payment form is open to everyone. Emptying, deleting or
+# renaming the file is the emergency kill switch.
+#
+# Example:
+# dino-vpn-landing.ru
+# promo.example.com

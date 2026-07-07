@@ -12,6 +12,7 @@ from api.v2.routes import (
     misc,
     modules,
     notifications,
+    paid_gate,
     partners,
     payment_links,
     referrals,
@@ -40,6 +41,7 @@ router.include_router(gifts.router, prefix="/api/gifts", tags=["Gifts"])
 router.include_router(referrals.router, prefix="/api/referrals", tags=["Referrals"])
 router.include_router(partners.router, prefix="/api/partners", tags=["Partners"])
 router.include_router(payment_links.router, prefix="/api/payment-links", tags=["PaymentLinks"])
+router.include_router(paid_gate.router, prefix="/api/paid-gate", tags=["PaidGate"])
 router.include_router(devices.router, prefix="/api/devices", tags=["Devices"])
 router.include_router(identities.router, prefix="/api/identities", tags=["Identities"])
 router.include_router(misc.router, prefix="/api")
