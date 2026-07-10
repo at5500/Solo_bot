@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit import set_api_actor
+from core.settings.runtime_sync import maybe_sync_runtime_configs
 from database import (
     async_session_maker,
     identities as idb,
@@ -16,9 +17,14 @@ from database import (
 )
 from database.access.resolution import ResolvedActor, resolve_actor_from_identity
 from database.models import Admin, Identity
+from logger import logger
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    try:
+        await maybe_sync_runtime_configs()
+    except Exception as exc:
+        logger.debug("[Depends] runtime config sync failed: {}", exc)
     async with async_session_maker() as session:
         try:
             yield session

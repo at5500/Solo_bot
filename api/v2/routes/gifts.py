@@ -295,7 +295,6 @@ gift_router = generate_crud_router(
     parameter_name="gift_id",
     enabled_methods=["get_all", "get_one", "create", "update"],
 )
-router.include_router(gift_router, prefix="", tags=["Gifts"])
 
 
 @router.post("/redeem", response_model=GiftRedeemResponse, tags=["Gifts"])

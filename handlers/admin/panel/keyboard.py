@@ -47,23 +47,13 @@ async def build_panel_kb(
     def can(perm: str) -> bool:
         return is_super or perm in perm_set
 
-    row: list[InlineKeyboardButton] = []
-    if can(PERM_USERS):
-        row.append(
+    if can(PERM_USERS) or can(PERM_KEYS):
+        builder.row(
             InlineKeyboardButton(
-                text="👤 Поиск пользователя",
+                text="🔍 Поиск",
                 callback_data=AdminPanelCallback(action="search_user").pack(),
             )
         )
-    if can(PERM_KEYS):
-        row.append(
-            InlineKeyboardButton(
-                text="🔑 Поиск подписок",
-                callback_data=AdminPanelCallback(action="search_key").pack(),
-            )
-        )
-    if row:
-        builder.row(*row)
 
     if can(PERM_KEYS):
         builder.row(

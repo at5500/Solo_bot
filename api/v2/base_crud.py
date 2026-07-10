@@ -40,12 +40,18 @@ def generate_crud_router(
 
     if "get_all" in enabled_methods:
 
-        @router.get("/", response_model=list[schema_response])
+        @router.get("", response_model=list[schema_response])
         async def get_all(
+            limit: int | None = Query(None, ge=1, le=1000),
+            offset: int = Query(0, ge=0),
             identity=Depends(verify_identity_admin),
             session: AsyncSession = Depends(get_session),
         ):
-            result = await session.execute(_apply_user_relationship_loader(model, select(model)))
+            stmt = _apply_user_relationship_loader(model, select(model))
+            if limit is not None:
+                pk = model.__mapper__.primary_key[0]
+                stmt = stmt.order_by(pk.desc()).limit(limit).offset(offset)
+            result = await session.execute(stmt)
             items = result.scalars().all()
             for item in items:
                 normalize_outgoing_object(item)
@@ -105,7 +111,7 @@ def generate_crud_router(
 
     if "create" in enabled_methods:
 
-        @router.post("/", response_model=schema_response)
+        @router.post("", response_model=schema_response)
         async def create(
             payload: Any = Body(...),
             identity=Depends(verify_identity_admin),

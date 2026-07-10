@@ -168,6 +168,196 @@ async def _restart_bot() -> None:
         os._exit(1)
 
 
+class BulkFilterPayload(BaseModel):
+    filter_type: Literal["tariff", "cluster", "created", "expiry"]
+    tariff_id: int | None = None
+    cluster_name: str | None = None
+    created_days: int | None = None
+    created_dir: Literal["older", "newer"] | None = None
+    expiry_kind: Literal["expired", "active", "soon"] | None = None
+    expiry_days: int | None = None
+
+
+class BulkApplyPayload(BulkFilterPayload):
+    action: Literal["add_days", "add_gb", "freeze", "unfreeze", "delete"]
+    value: int = 0
+
+
+@router.post("/bulk/preview")
+async def bulk_preview(
+    payload: BulkFilterPayload,
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Сколько ключей попадает под фильтр (без действия)."""
+    from handlers.admin.bulk.query import fetch_matching_keys
+
+    keys = await fetch_matching_keys(session, payload.model_dump(exclude_none=True))
+    return {"count": len(keys)}
+
+
+@router.post("/bulk/apply")
+async def bulk_apply(
+    payload: BulkApplyPayload,
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Массовое действие над ключами по фильтру."""
+    from handlers.admin.bulk.operations import (
+        bulk_add_days,
+        bulk_add_gb,
+        bulk_delete,
+        bulk_freeze,
+        bulk_unfreeze,
+    )
+    from handlers.admin.bulk.query import fetch_matching_keys
+
+    data = payload.model_dump(exclude_none=True)
+    keys = await fetch_matching_keys(session, data)
+    if not keys:
+        return {"matched": 0, "ok": 0, "failed": 0}
+
+    if payload.action == "add_days":
+        ok, failed, _ = await bulk_add_days(session, keys, int(payload.value))
+    elif payload.action == "add_gb":
+        ok, failed, _ = await bulk_add_gb(session, keys, int(payload.value))
+    elif payload.action == "freeze":
+        ok, failed, _ = await bulk_freeze(session, keys)
+    elif payload.action == "unfreeze":
+        ok, failed, _ = await bulk_unfreeze(session, keys)
+    elif payload.action == "delete":
+        ok, failed, _ = await bulk_delete(session, keys)
+    else:
+        raise HTTPException(status_code=400, detail="Unknown action")
+
+    return {"matched": len(keys), "ok": int(ok), "failed": int(failed)}
+
+
+@router.get("/dashboard")
+async def get_dashboard(
+    days: int = Query(30, ge=1, le=365),
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Сводка для дашборда: юзеры, ключи, активные подписки, выручка, новые за период."""
+    from database.models import Coupon, Gift, Payment
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    since = datetime.utcnow() - timedelta(days=days)
+    since_ms = int(since.timestamp() * 1000)
+    soon_ms = now_ms + 7 * 86_400_000
+
+    total_users = (await session.execute(select(func.count()).select_from(User))).scalar() or 0
+    total_keys = (await session.execute(select(func.count()).select_from(Key))).scalar() or 0
+    active_keys = (
+        await session.execute(
+            select(func.count()).select_from(Key).where(Key.expiry_time > now_ms, Key.is_frozen.is_(False))
+        )
+    ).scalar() or 0
+    new_users = (
+        await session.execute(select(func.count()).select_from(User).where(User.created_at >= since))
+    ).scalar() or 0
+    revenue = (
+        await session.execute(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(
+                Payment.status == "success", Payment.created_at >= since
+            )
+        )
+    ).scalar() or 0
+    revenue_total = (
+        await session.execute(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "success")
+        )
+    ).scalar() or 0
+
+    daily_rows = (
+        await session.execute(
+            select(func.date(Payment.created_at).label("d"), func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.status == "success", Payment.created_at >= since)
+            .group_by(func.date(Payment.created_at))
+            .order_by(func.date(Payment.created_at))
+        )
+    ).all()
+    revenue_series = [{"date": str(d), "amount": float(a or 0)} for d, a in daily_rows]
+
+    frozen_keys = (
+        await session.execute(select(func.count()).select_from(Key).where(Key.is_frozen.is_(True)))
+    ).scalar() or 0
+    trial_users = (
+        await session.execute(select(func.count()).select_from(User).where(User.trial > 0))
+    ).scalar() or 0
+    new_keys = (
+        await session.execute(select(func.count()).select_from(Key).where(Key.created_at >= since_ms))
+    ).scalar() or 0
+    expiring_soon = (
+        await session.execute(
+            select(func.count())
+            .select_from(Key)
+            .where(Key.expiry_time > now_ms, Key.expiry_time <= soon_ms, Key.is_frozen.is_(False))
+        )
+    ).scalar() or 0
+    payments_count = (
+        await session.execute(
+            select(func.count()).select_from(Payment).where(Payment.status == "success", Payment.created_at >= since)
+        )
+    ).scalar() or 0
+    gifts_total = (await session.execute(select(func.count()).select_from(Gift))).scalar() or 0
+    coupons_total = (await session.execute(select(func.count()).select_from(Coupon))).scalar() or 0
+    try:
+        from database.models import WebErrorReport
+
+        errors_open = (
+            await session.execute(
+                select(func.count()).select_from(WebErrorReport).where(WebErrorReport.resolved.is_(False))
+            )
+        ).scalar() or 0
+    except Exception:
+        errors_open = 0
+    avg_check = float(revenue) / int(payments_count) if payments_count else 0.0
+
+    sys_rows = (
+        await session.execute(
+            select(Payment.payment_system, func.coalesce(func.sum(Payment.amount), 0))
+            .where(Payment.status == "success", Payment.created_at >= since)
+            .group_by(Payment.payment_system)
+            .order_by(func.coalesce(func.sum(Payment.amount), 0).desc())
+        )
+    ).all()
+    revenue_by_system = [{"name": (s or "—"), "amount": float(a or 0)} for s, a in sys_rows]
+
+    user_rows = (
+        await session.execute(
+            select(func.date(User.created_at).label("d"), func.count())
+            .where(User.created_at >= since)
+            .group_by(func.date(User.created_at))
+            .order_by(func.date(User.created_at))
+        )
+    ).all()
+    users_series = [{"date": str(d), "count": int(c or 0)} for d, c in user_rows]
+
+    return {
+        "period_days": days,
+        "total_users": int(total_users),
+        "new_users": int(new_users),
+        "total_keys": int(total_keys),
+        "active_keys": int(active_keys),
+        "frozen_keys": int(frozen_keys),
+        "trial_users": int(trial_users),
+        "new_keys": int(new_keys),
+        "expiring_soon": int(expiring_soon),
+        "payments_count": int(payments_count),
+        "gifts_total": int(gifts_total),
+        "coupons_total": int(coupons_total),
+        "errors_open": int(errors_open),
+        "avg_check": float(avg_check),
+        "revenue_period": float(revenue),
+        "revenue_total": float(revenue_total),
+        "revenue_series": revenue_series,
+        "revenue_by_system": revenue_by_system,
+        "users_series": users_series,
+    }
+
+
 @router.get("/status")
 async def get_status(identity=Depends(verify_identity_admin)):
     """Текущий статус: maintenance и management config."""

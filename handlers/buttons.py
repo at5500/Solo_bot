@@ -55,6 +55,8 @@ MY_GIFTS = "🎁 Мои подарки"
 GIFTS_MENU = "В меню подарков"
 SHARE_GIFT = "🎁 Поделиться подарком"
 GET_GIFT = "🎁 Получить подарок"
+GIFT_CLAIM_NEW = "🆕 Новая подписка"
+GIFT_CLAIM_EXTEND = "➕ Продлить: {label}"
 
 PC_PC = "💻 Windows"
 PC_MACOS = "🍏 macOS"

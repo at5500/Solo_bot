@@ -85,10 +85,55 @@ MODES_TITLES: Final[dict[str, str]] = {
     "PROTECT_CONTENT_ENABLED": "Защита контента",
     "TARIFF_OPTIONS_PAGINATION": "Слайдер опций",
     "HWID_DELETE_COOLDOWN_ENABLED": "Кулдаун HWID",
+    "SINGLE_SUBSCRIPTION_MODE": "Одна подписка",
+    "RENEWAL_CREDIT_AS_DAYS": "Перерасчет дни",
+    "GIFT_EXTEND_ENABLED": "Подарок продлить",
 }
 
 MONEY_FIELDS: Final[dict[str, str]] = {
     "FX_MARKUP": "Наценка FX (%)",
     "RUB_TO_USD": "Курс USD/RUB",
     "CASHBACK": "Кэшбэк (%)",
+}
+
+TARIFFS_TITLES: Final[dict[str, str]] = {
+    "ALLOW_DOWNGRADE": "Разрешить даунгрейд",
+    "KEY_ADDONS_PACK_MODE": "Режим докупки опций",
+    "KEY_ADDONS_PRICE_BASE_MODE": "База цены докупки",
+    "KEY_ADDONS_RECALC_PRICE": "Перерасчёт цены докупки",
+}
+
+WEB_TITLES: Final[dict[str, str]] = {
+    "WEB_ENABLED": "Сайт включён",
+    "SITE_URL": "URL сайта",
+    "SITE_MODE": "Режим сайта",
+    "WEB_OPEN_IN_BROWSER": "Открывать в браузере",
+    "WEB_NODE_STATUS_INTERVAL_MIN": "Статус серверов (мин)",
+    "EMAIL_BINDING_ENABLED": "Привязка почты",
+    "WEB_NOTIFY_PAYMENT_TITLE": "Уведомление об оплате — заголовок",
+    "WEB_NOTIFY_PAYMENT_MESSAGE": "Уведомление об оплате — текст",
+    "WEB_NOTIFY_KEY_CREATED_TITLE": "Подписка создана — заголовок",
+    "WEB_NOTIFY_KEY_CREATED_MESSAGE": "Подписка создана — текст",
+    "WEB_NOTIFY_KEY_EXPIRY_TITLE": "Подписка истекает — заголовок",
+    "WEB_NOTIFY_KEY_EXPIRY_MESSAGE": "Подписка истекает — текст",
+    "WEB_NOTIFY_GIFT_TITLE": "Подарок получен — заголовок",
+    "WEB_NOTIFY_GIFT_MESSAGE": "Подарок получен — текст",
+    "EMAIL_LOGIN_SUBJECT": "Письмо входа — тема",
+    "EMAIL_LOGIN_BODY": "Письмо входа — текст",
+    "EMAIL_RESET_SUBJECT": "Сброс пароля — тема",
+    "EMAIL_RESET_BODY": "Сброс пароля — текст",
+    "EMAIL_LINK_SUBJECT": "Привязка email — тема",
+    "EMAIL_LINK_BODY": "Привязка email — текст",
+}
+
+REMNAWAVE_TITLES: Final[dict[str, str]] = {
+    "NODE_HEALTH_ENABLED": "Мониторинг нод",
+    "NODE_HEALTH_INTERVAL_MIN": "Интервал проверки (мин)",
+    "HOST_AUTO_DISABLE_ON_NODE_DOWN": "Авто-отключение хостов",
+    "HOST_ROTATION_ENABLED": "Ротация хостов",
+    "HOST_ROTATION_INTERVAL_MIN": "Интервал ротации (мин)",
+}
+
+MANAGEMENT_TITLES: Final[dict[str, str]] = {
+    "MAINTENANCE_ENABLED": "Режим обслуживания",
 }

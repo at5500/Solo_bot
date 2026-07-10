@@ -1,7 +1,8 @@
-from fastapi import Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.depends import get_request_actor, get_session, verify_identity_token
+from api.depends import get_request_actor, get_session, verify_identity_admin, verify_identity_token
 from api.v2.base_crud import generate_crud_router
 from api.v2.schemas import CouponBase, CouponResponse, CouponUpdate
 from api.v2.schemas.web_public import CouponApplyRequest, CouponApplyResponse
@@ -9,6 +10,36 @@ from database import identities as idb
 from database.models import Coupon
 from services.coupons import apply_fixed_coupon
 from services.errors import LimitExceededError, NotFoundError, ServiceError, ValidationError
+
+
+admin_list_router = APIRouter()
+
+
+@admin_list_router.get("")
+async def list_coupons_admin(
+    identity=Depends(verify_identity_admin),
+    session: AsyncSession = Depends(get_session),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Список купонов для админки без строгой валидации (показывает и битые купоны)."""
+    rows = (
+        await session.execute(select(Coupon).order_by(Coupon.id.desc()).limit(limit).offset(offset))
+    ).scalars().all()
+    return [
+        {
+            "id": c.id,
+            "code": c.code,
+            "amount": c.amount,
+            "percent": c.percent,
+            "days": c.days,
+            "usage_limit": c.usage_limit,
+            "usage_count": c.usage_count,
+            "is_used": c.is_used,
+            "new_users_only": c.new_users_only,
+        }
+        for c in rows
+    ]
 
 
 router = generate_crud_router(

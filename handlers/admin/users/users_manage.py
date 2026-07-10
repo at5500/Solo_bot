@@ -1,3 +1,4 @@
+import html
 import re
 
 from datetime import datetime, timezone
@@ -16,12 +17,11 @@ from aiogram.types import (
 )
 from aiogram.utils.formatting import BlockQuote, Bold, Code, Text
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import USERNAME_BOT
 from database import (
-    get_key_details,
     update_trial,
 )
 from database.keys import count_all_keys, get_keys_page
@@ -29,7 +29,6 @@ from database.access.resolution import resolve_user_optional
 from database.models import Admin, Identity, Key, ManualBan, Payment, Referral, Tariff, User
 from database.subscription_events import get_user_subscription_history, resolve_user_ref_by_client_id
 from filters.admin import IsAdminFilter
-from handlers.utils import sanitize_key_name
 from logger import logger
 from utils.csv_export import export_referrals_csv
 
@@ -55,6 +54,200 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 router = Router()
 
+SEARCH_PAGE_SIZE = 8
+SEARCH_LIMIT_PER_SOURCE = 60
+
+
+async def _fetch_search_candidates(session: AsyncSession, uid_reasons: dict[int, set[str]]) -> list[dict]:
+    if not uid_reasons:
+        return []
+    uids = list(uid_reasons.keys())
+    rows = (
+        await session.execute(
+            select(User.id, User.tg_id, User.username, User.first_name, User.last_name, Identity.email)
+            .join(Identity, User.identity_id == Identity.id, isouter=True)
+            .where(User.id.in_(uids))
+        )
+    ).all()
+    key_owners = {
+        r[0] for r in (await session.execute(select(Key.user_id).where(Key.user_id.in_(uids)).distinct())).all()
+    }
+    results = []
+    for uid, tg, username, first, last, email in rows:
+        bits = []
+        display_name = " ".join(p for p in (first, last) if p)
+        if display_name:
+            bits.append(display_name)
+        if username:
+            bits.append(f"@{username}")
+        bits.append(f"tg {tg}" if tg is not None else f"id {uid}")
+        if email:
+            bits.append(email)
+        prefix = "👤🔑" if uid in key_owners else "👤"
+        label = (f"{prefix} " + " · ".join(bits))[:64]
+        ref = tg if tg is not None else uid
+        results.append({"ref": int(ref), "label": label})
+    results.sort(key=lambda c: c["label"].lower())
+    return results
+
+
+async def smart_user_search(session: AsyncSession, raw: str) -> list[dict]:
+    """Ярусный поиск клиента по любым данным."""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if raw.startswith("@") and len(raw) > 1:
+        raw = raw[1:].strip()
+    like = f"%{raw}%"
+    lowered = raw.lower()
+    is_digit = raw.isdigit()
+    is_uuid = bool(UUID_RE.match(raw))
+
+    uid_reasons: dict[int, set[str]] = {}
+
+    def note(uid, reason: str) -> None:
+        if uid is None:
+            return
+        uid_reasons.setdefault(int(uid), set()).add(reason)
+
+    user_conds = [User.username.ilike(like), User.first_name.ilike(like), User.last_name.ilike(like)]
+    if is_digit:
+        user_conds += [User.tg_id == int(raw), User.id == int(raw)]
+    for (uid,) in (
+        await session.execute(select(User.id).where(or_(*user_conds)).limit(SEARCH_LIMIT_PER_SOURCE))
+    ).all():
+        note(uid, "профиль")
+
+    key_conds = [
+        Key.email.ilike(like),
+        Key.alias.ilike(like),
+        Key.remnawave_link.ilike(like),
+        func.lower(Key.client_id) == lowered,
+    ]
+    for (uid,) in (
+        await session.execute(select(Key.user_id).where(or_(*key_conds)).limit(SEARCH_LIMIT_PER_SOURCE))
+    ).all():
+        note(uid, "подписка")
+
+    pay_conds = [Payment.payment_id == raw]
+    if is_digit and int(raw) <= 2_147_483_647:
+        pay_conds.append(Payment.id == int(raw))
+    pay_rows = (
+        await session.execute(select(Payment.user_id, Payment.tg_id).where(or_(*pay_conds)).limit(SEARCH_LIMIT_PER_SOURCE))
+    ).all()
+    pending_tg: set[int] = set()
+    for u_id, tg in pay_rows:
+        if u_id is not None:
+            note(u_id, "платеж")
+        elif tg is not None:
+            pending_tg.add(int(tg))
+    if pending_tg:
+        for (uid,) in (await session.execute(select(User.id).where(User.tg_id.in_(pending_tg)))).all():
+            note(uid, "платеж")
+
+    if uid_reasons:
+        return await _fetch_search_candidates(session, uid_reasons)
+
+    id_conds = [Identity.email.ilike(like), Identity.google_sub == raw, Identity.yandex_sub == raw]
+    if is_uuid:
+        id_conds.append(func.lower(Identity.id) == lowered)
+    ident_rows = (
+        await session.execute(select(Identity.id, Identity.tg_id).where(or_(*id_conds)).limit(SEARCH_LIMIT_PER_SOURCE))
+    ).all()
+    ident_ids = [iid for iid, _ in ident_rows]
+    ident_tgs = {int(tg) for _, tg in ident_rows if tg is not None}
+    if ident_ids:
+        for (uid,) in (await session.execute(select(User.id).where(User.identity_id.in_(ident_ids)))).all():
+            note(uid, "веб-аккаунт")
+    if ident_tgs:
+        for (uid,) in (await session.execute(select(User.id).where(User.tg_id.in_(ident_tgs)))).all():
+            note(uid, "веб-аккаунт")
+
+    if is_uuid:
+        ref, _src = await resolve_user_ref_by_client_id(session, raw)
+        if ref is not None:
+            u = await resolve_user_optional(session, ref)
+            if u is not None:
+                note(u.id, "история")
+
+    return await _fetch_search_candidates(session, uid_reasons)
+
+
+async def search_from_forward(session: AsyncSession, fwd) -> list[dict]:
+    """Поиск по пересланному сообщению: tg_id (приоритет) + username + имя/фамилия."""
+    uid_reasons: dict[int, set[str]] = {}
+
+    def note(uid, reason: str) -> None:
+        if uid is None:
+            return
+        uid_reasons.setdefault(int(uid), set()).add(reason)
+
+    for (uid,) in (await session.execute(select(User.id).where(User.tg_id == int(fwd.id)))).all():
+        note(uid, "профиль")
+
+    username = getattr(fwd, "username", None)
+    if username:
+        for (uid,) in (
+            await session.execute(
+                select(User.id).where(func.lower(User.username) == username.lower()).limit(SEARCH_LIMIT_PER_SOURCE)
+            )
+        ).all():
+            note(uid, "username")
+
+    first, last = getattr(fwd, "first_name", None), getattr(fwd, "last_name", None)
+    name_conds = []
+    if first and last:
+        name_conds.append(and_(User.first_name.ilike(f"%{first}%"), User.last_name.ilike(f"%{last}%")))
+    elif first:
+        name_conds.append(User.first_name.ilike(f"%{first}%"))
+    elif last:
+        name_conds.append(User.last_name.ilike(f"%{last}%"))
+    if name_conds:
+        for (uid,) in (
+            await session.execute(select(User.id).where(or_(*name_conds)).limit(SEARCH_LIMIT_PER_SOURCE))
+        ).all():
+            note(uid, "имя")
+
+    return await _fetch_search_candidates(session, uid_reasons)
+
+
+async def _render_search_results(
+    target: types.Message, results: list[dict], query: str, page: int, edit: bool
+) -> None:
+    pages = max(1, (len(results) + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    start = (page - 1) * SEARCH_PAGE_SIZE
+    chunk = results[start : start + SEARCH_PAGE_SIZE]
+
+    text = (
+        f"🔍 Найдено: <b>{len(results)}</b> по запросу «<code>{html.escape(query)}</code>»\n"
+        "Выберите нужного:"
+    )
+    builder = InlineKeyboardBuilder()
+    for c in chunk:
+        builder.row(
+            InlineKeyboardButton(
+                text=c["label"],
+                callback_data=AdminUserEditorCallback(action="users_editor", tg_id=int(c["ref"]), edit=True).pack(),
+            )
+        )
+    nav: list[InlineKeyboardButton] = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=AdminPanelCallback(action="search_page", page=page - 1).pack()))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(text=f"{page}/{pages}", callback_data=AdminPanelCallback(action="search_page", page=page).pack()))
+    if page < pages:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=AdminPanelCallback(action="search_page", page=page + 1).pack()))
+    if nav:
+        builder.row(*nav)
+    builder.row(build_admin_back_btn())
+
+    markup = builder.as_markup()
+    if edit:
+        await target.edit_text(text=text, reply_markup=markup)
+    else:
+        await target.answer(text=text, reply_markup=markup)
+
 
 @router.callback_query(
     AdminPanelCallback.filter(F.action == "search_user"),
@@ -62,30 +255,18 @@ router = Router()
 )
 async def handle_search_user(callback_query: CallbackQuery, state: FSMContext):
     text = (
-        "<b>🔍 Поиск пользователя</b>"
-        "\n\n📌 Введите ID, Username, Email, UUID веб-аккаунта, ID подписки или перешлите сообщение пользователя."
-        "\n\n🆔 ID - числовой айди"
-        "\n📝 Username - юзернейм пользователя"
-        "\n📧 Email - почта веб-кабинета"
-        "\n🧬 UUID - идентификатор веб-аккаунта (identity_id)"
-        "\n🔗 ID подписки - текущий или прошлый client_id (ищется и в истории)"
-        "\n\n<i>✉️ Для поиска, вы можете просто переслать сообщение от пользователя.</i>"
+        "<b>🔍 Поиск</b>\n\n"
+        "Введите любые данные клиента — бот сам найдет подходящие карточки:\n"
+        "🆔 ID / Username / имя\n"
+        "📧 Email веб-кабинета\n"
+        "🧬 UUID веб-аккаунта\n"
+        "🔗 ID или ссылка подписки, имя подписки\n"
+        "💳 ID платежа\n\n"
+        "<i>✉️ Либо просто перешлите сообщение пользователя.</i>"
     )
 
     await state.set_state(UserEditorState.waiting_for_user_data)
     await callback_query.message.edit_text(text=text, reply_markup=build_admin_back_kb())
-
-
-@router.callback_query(
-    AdminPanelCallback.filter(F.action == "search_key"),
-    IsAdminFilter(),
-)
-async def handle_search_key(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(UserEditorState.waiting_for_key_name)
-    await callback_query.message.edit_text(
-        text="🔑 Введите имя ключа для поиска:",
-        reply_markup=build_admin_back_kb(),
-    )
 
 
 _ALL_KEYS_PER_PAGE = 10
@@ -119,124 +300,57 @@ async def handle_show_all_keys(
     )
 
 
-@router.message(UserEditorState.waiting_for_key_name, IsAdminFilter())
-async def handle_key_name_input(message: Message, state: FSMContext, session: AsyncSession):
-    kb = build_admin_back_kb()
-
-    if not message.text:
-        await message.answer(text="🚫 Пожалуйста, отправьте текстовое сообщение.", reply_markup=kb)
-        return
-
-    key_name = sanitize_key_name(message.text)
-    key_details = await get_key_details(session, key_name)
-
-    if not key_details:
-        await message.answer(
-            text="🚫 Пользователь с указанным именем ключа не найден.",
-            reply_markup=kb,
-        )
-        return
-
-    await process_user_search(message, state, session, key_details["tg_id"], actor_tg_id=message.from_user.id)
-
-
 @router.message(UserEditorState.waiting_for_user_data, IsAdminFilter())
 async def handle_user_data_input(message: Message, state: FSMContext, session: AsyncSession):
     kb = build_admin_back_kb()
 
     if message.forward_from:
-        tg_id = message.forward_from.id
-        await process_user_search(message, state, session, tg_id, actor_tg_id=message.from_user.id)
-        return
-
-    if not message.text:
-        await message.answer(text="🚫 Пожалуйста, отправьте текстовое сообщение.", reply_markup=kb)
-        return
-
-    raw = message.text.strip()
-
-    if raw.isdigit():
-        tg_id = int(raw)
-    elif UUID_RE.match(raw):
-        identity_id = raw.lower()
-        ident = (
-            await session.execute(select(Identity).where(func.lower(Identity.id) == identity_id).limit(1))
-        ).scalar_one_or_none()
-
-        if ident is None:
-            ref, src = await resolve_user_ref_by_client_id(session, raw)
-            if ref is None:
-                await message.answer(
-                    text="🚫 По этому UUID не найдено ни веб-аккаунта, ни подписки.",
-                    reply_markup=kb,
-                )
-                return
-            if src == "history":
-                await message.answer("🗂 ID найден в истории подписок (сейчас не активен).")
-            else:
-                await message.answer("🔑 Найдена активная подписка с этим ID.")
-            await process_user_search(message, state, session, ref, actor_tg_id=message.from_user.id)
-            return
-
-        if ident.tg_id is not None:
-            tg_id = ident.tg_id
-        else:
-            user_id = (
-                await session.execute(select(User.id).where(User.identity_id == ident.id).limit(1))
-            ).scalar_one_or_none()
-            if user_id is None:
-                label = ident.email or ident.id
-                await message.answer(
-                    text=f"🚫 Веб-аккаунт <code>{label}</code> не имеет биллинг-профиля.",
-                    reply_markup=kb,
-                )
-                return
-            tg_id = user_id
-    elif "@" in raw and "." in raw.split("@", 1)[-1]:
-        email = raw.lower()
-        ident = (
-            await session.execute(select(Identity).where(func.lower(Identity.email) == email).limit(1))
-        ).scalar_one_or_none()
-
-        if ident is None:
-            await message.answer(
-                text="🚫 Пользователь с указанным Email не найден!",
-                reply_markup=kb,
-            )
-            return
-
-        if ident.tg_id is not None:
-            tg_id = ident.tg_id
-        else:
-            user_id = (
-                await session.execute(select(User.id).where(User.identity_id == ident.id).limit(1))
-            ).scalar_one_or_none()
-            if user_id is None:
-                await message.answer(
-                    text=f"🚫 Веб-аккаунт <code>{ident.email}</code> не имеет биллинг-профиля.",
-                    reply_markup=kb,
-                )
-                return
-            tg_id = user_id
-    else:
-        username = raw.lstrip("@").replace("https://t.me/", "")
-
-        stmt = (
-            select(User.tg_id)
-            .where(func.lower(User.username) == func.lower(username))
-            .order_by(User.updated_at.desc())
-            .limit(1)
+        fwd = message.forward_from
+        raw = (
+            (f"@{fwd.username}" if fwd.username else None)
+            or " ".join(p for p in (fwd.first_name, fwd.last_name) if p)
+            or str(fwd.id)
         )
-        tg_id = (await session.execute(stmt)).scalar_one_or_none()
+        results = await search_from_forward(session, fwd)
+    elif message.forward_sender_name:
+        raw = message.forward_sender_name.strip()
+        results = await smart_user_search(session, raw)
+    elif message.text:
+        raw = message.text.strip()
+        results = await smart_user_search(session, raw)
+    else:
+        await message.answer(text="🚫 Отправьте текст или перешлите сообщение пользователя.", reply_markup=kb)
+        return
 
-        if tg_id is None:
-            await message.answer(
-                text="🚫 Пользователь с указанным Username не найден!",
-                reply_markup=kb,
-            )
-            return
+    if not results:
+        await message.answer(text="🚫 Ничего не найдено.", reply_markup=kb)
+        return
 
-    await process_user_search(message, state, session, tg_id, actor_tg_id=message.from_user.id)
+    if len(results) == 1:
+        await process_user_search(message, state, session, results[0]["ref"], actor_tg_id=message.from_user.id)
+        return
+
+    await state.update_data(search_results=results, search_query=raw)
+    await _render_search_results(message, results, raw, page=1, edit=False)
+
+
+@router.callback_query(
+    AdminPanelCallback.filter(F.action == "search_page"),
+    IsAdminFilter(),
+)
+async def handle_search_page(
+    callback_query: CallbackQuery,
+    callback_data: AdminPanelCallback,
+    state: FSMContext,
+):
+    data = await state.get_data()
+    results = data.get("search_results")
+    query = data.get("search_query", "")
+    if not results:
+        await callback_query.answer("Список устарел, повторите поиск.", show_alert=True)
+        return
+    await _render_search_results(callback_query.message, results, query, page=callback_data.page, edit=True)
+    await callback_query.answer()
 
 
 @router.callback_query(
@@ -566,7 +680,10 @@ async def process_user_search(
         f"🎁 Триал: {trial_status}\n",
     )
 
-    body += Text("🌐 Кабинет: ", Code(f"https://t.me/{USERNAME_BOT}?start=tab_keys"), "\n")
+    from core.settings.web_config import get_site_url, is_web_enabled
+
+    if is_web_enabled() and get_site_url():
+        body += Text("🌐 Кабинет: ", Code(f"https://t.me/{USERNAME_BOT}?start=tab_keys"), "\n")
 
     if referrer_text:
         body += Text(referrer_text, "\n")
@@ -687,7 +804,7 @@ async def handle_users_site_send(callback: CallbackQuery, callback_data: AdminUs
     from core.settings.web_config import get_site_url, is_web_enabled, is_web_open_in_browser
 
     if not is_web_enabled():
-        await callback.answer("Веб-кабинет отключён", show_alert=True)
+        await callback.answer("Веб-кабинет отключен", show_alert=True)
         return
     site_url = get_site_url()
     if not site_url:

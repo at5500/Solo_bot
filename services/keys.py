@@ -55,13 +55,12 @@ class RenewalPricing:
 
 @dataclass
 class RenewalQuote:
-    """Единый расчёт продления/смены тарифа для бота и веба.
+    """Расчет продления/смены тарифа.
 
-    Модель «остаток → баланс»: при смене тарифа неиспользованный остаток прежней
-    подписки целиком возвращается на баланс, а новый тариф — обычная покупка по
-    полной цене. net_cost_rub = new_full_price_rub − credit_rub (со знаком):
-      >0 — столько списать с баланса (с доплатой при нехватке);
-      <0 — на баланс вернётся |net|, оплата не нужна.
+    Смена тарифа, остаток → баланс: net_cost_rub = new_full_price_rub − credit_rub
+    (>0 списать, <0 вернуть на баланс).
+    Смена тарифа, остаток → дни (RENEWAL_CREDIT_AS_DAYS): credit_rub=0,
+    net_cost_rub=полная цена, бонус-дни new_expiry_ms (credit_days).
     """
 
     is_switch: bool
@@ -76,6 +75,8 @@ class RenewalQuote:
     new_expiry_ms: int
     coupon_id: int | None = None
     applied_coupon_code: str | None = None
+    credit_days: int = 0
+    credit_value_rub: int = 0
 
 
 @dataclass
@@ -272,10 +273,7 @@ async def compute_remaining_credit(
     current_selected_device: int | None,
     current_selected_traffic: int | None,
 ) -> float:
-    """Стоимость остатка текущей подписки в рублях — единый источник пересчёта.
-
-    При смене тарифа этот остаток целиком возвращается на баланс пользователя.
-    """
+    """Стоимость остатка текущей подписки в рублях."""
     if current_tariff_id is None:
         return 0.0
     remaining_ms = max(0, int(current_expiry_ms) - int(now_ms))
@@ -300,30 +298,35 @@ async def compute_remaining_credit(
     return round(remaining_days * (old_price / old_duration), 2)
 
 
-def _is_same_subscription(
+async def _is_same_config(
+    session: AsyncSession,
     *,
     current_tariff_id: int | None,
-    new_tariff_id: int,
-    new_tariff_configurable: bool,
     current_selected_device: int | None,
-    new_selected_device: int | None,
     current_selected_traffic: int | None,
+    new_tariff_id: int,
+    new_selected_device: int | None,
     new_selected_traffic: int | None,
 ) -> bool:
-    """Продление того же тарифа (не смена). Для неконфигурируемых тарифов
-    лимиты устройств/трафика фиксированы тарифом и не выбираются пользователем —
-    их сравнивать нельзя (новые значения приходят как None), достаточно совпадения тарифа."""
-    if current_tariff_id is None or int(current_tariff_id) != int(new_tariff_id):
+    """Совпадают ли эффективные лимиты (устройства+трафик); tariff_id/длительность не учитываются."""
+    if current_tariff_id is None:
         return False
-    if not new_tariff_configurable:
-        return True
 
-    def _opt(value: Any) -> int | None:
-        return int(value) if value is not None else None
+    from services.tariffs.tariff_display import get_effective_limits_for_key
 
-    return _opt(current_selected_device) == _opt(new_selected_device) and _opt(current_selected_traffic) == _opt(
-        new_selected_traffic
+    old_dev, old_trf = await get_effective_limits_for_key(
+        session,
+        tariff_id=int(current_tariff_id),
+        selected_device_limit=current_selected_device,
+        selected_traffic_gb=current_selected_traffic,
     )
+    new_dev, new_trf = await get_effective_limits_for_key(
+        session,
+        tariff_id=int(new_tariff_id),
+        selected_device_limit=new_selected_device,
+        selected_traffic_gb=new_selected_traffic,
+    )
+    return old_dev == new_dev and old_trf == new_trf
 
 
 async def compute_renewal_expiry(
@@ -339,12 +342,7 @@ async def compute_renewal_expiry(
     new_selected_traffic: int | None,
     new_duration_days: int | None = None,
 ) -> int:
-    """Новая дата окончания подписки при продлении.
-
-    Тот же тариф/конфиг (или истёкший ключ) — срок прибавляется к остатку.
-    Другой тариф (смена) — только новый период от now: остаток прежней подписки
-    возвращается на баланс деньгами, а не временем.
-    """
+    """Новый expiry: та же конфигурация или истекший ключ — стек к остатку, иначе период от now."""
     now_ms = int(now_ms)
     current_expiry_ms = int(current_expiry_ms)
     new_tariff = await get_tariff_by_id(session, int(new_tariff_id))
@@ -357,16 +355,16 @@ async def compute_renewal_expiry(
     if remaining_ms <= 0:
         return now_ms + new_dur_ms
 
-    same_subscription = _is_same_subscription(
+    same_config = await _is_same_config(
+        session,
         current_tariff_id=current_tariff_id,
-        new_tariff_id=new_tariff_id,
-        new_tariff_configurable=bool((new_tariff or {}).get("configurable")),
         current_selected_device=current_selected_device,
-        new_selected_device=new_selected_device,
         current_selected_traffic=current_selected_traffic,
+        new_tariff_id=new_tariff_id,
+        new_selected_device=new_selected_device,
         new_selected_traffic=new_selected_traffic,
     )
-    if same_subscription:
+    if same_config:
         return current_expiry_ms + new_dur_ms
 
     return now_ms + new_dur_ms
@@ -402,14 +400,14 @@ async def compute_renewal_quote(
     eff_dev = pricing.selected_device_limit
     eff_trf = pricing.selected_traffic_limit
 
-    def _opt(value: Any) -> int | None:
-        return int(value) if value is not None else None
-
-    is_switch = not (
-        current_tariff_id is not None
-        and int(current_tariff_id) == int(new_tariff_id)
-        and _opt(current_selected_device) == _opt(eff_dev)
-        and _opt(current_selected_traffic) == _opt(eff_trf)
+    is_switch = not await _is_same_config(
+        session,
+        current_tariff_id=current_tariff_id,
+        current_selected_device=current_selected_device,
+        current_selected_traffic=current_selected_traffic,
+        new_tariff_id=new_tariff_id,
+        new_selected_device=eff_dev,
+        new_selected_traffic=eff_trf,
     )
 
     new_expiry = await compute_renewal_expiry(
@@ -455,6 +453,29 @@ async def compute_renewal_quote(
             )
         )
     )
+    from core.bootstrap import MODES_CONFIG
+
+    credit_as_days = bool(MODES_CONFIG.get("RENEWAL_CREDIT_AS_DAYS", False))
+    if credit_as_days and credit > 0 and full_price > 0 and duration_days > 0:
+        extra_days = int(credit * duration_days // full_price)
+        if extra_days > 0:
+            return RenewalQuote(
+                is_switch=True,
+                duration_days=duration_days,
+                selected_device_limit=eff_dev,
+                selected_traffic_limit=eff_trf,
+                total_gb=pricing.total_gb,
+                new_full_price_rub=full_price,
+                credit_rub=0,
+                net_cost_rub=full_price,
+                refund_to_balance_rub=0,
+                new_expiry_ms=new_expiry + extra_days * _DAY_MS,
+                coupon_id=pricing.coupon_id,
+                applied_coupon_code=pricing.applied_coupon_code,
+                credit_days=extra_days,
+                credit_value_rub=credit,
+            )
+
     net_cost = full_price - credit
 
     return RenewalQuote(
@@ -470,6 +491,7 @@ async def compute_renewal_quote(
         new_expiry_ms=new_expiry,
         coupon_id=pricing.coupon_id,
         applied_coupon_code=pricing.applied_coupon_code,
+        credit_value_rub=credit,
     )
 
 

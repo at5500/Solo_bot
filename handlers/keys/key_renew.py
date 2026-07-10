@@ -42,6 +42,7 @@ from handlers.texts import (
     KEY_NOT_FOUND_MSG,
     PLAN_SELECTION_MSG,
     get_renewal_message,
+    renewal_switch_text,
 )
 from handlers.utils import edit_or_send_message, format_discount_time_left, get_russian_month
 from hooks.hook_buttons import insert_hook_buttons
@@ -830,6 +831,19 @@ async def handle_renew_config_confirm(callback_query: CallbackQuery, state: FSMC
         await callback_query.message.answer("❌ Произошла ошибка при продлении. Попробуйте позже.")
 
 
+def _tariff_config_label(duration_days: int, device_limit: int | None, addon_devices: int = 0) -> str:
+    from handlers.tariffs.addons.utils import format_devices_label
+    from services.formatting import format_duration_days
+
+    parts = [format_duration_days(int(duration_days or 0))]
+    if device_limit is not None:
+        dev = format_devices_label(device_limit)
+        if addon_devices > 0:
+            dev = f"{dev} + {addon_devices} докуплено"
+        parts.append(dev)
+    return ", ".join(parts)
+
+
 async def _maybe_show_switch_confirm(
     callback_query: CallbackQuery,
     state: FSMContext,
@@ -860,7 +874,7 @@ async def _maybe_show_switch_confirm(
         new_selected_device=selected_device,
         new_selected_traffic=selected_traffic,
     )
-    if not quote.is_switch or quote.credit_rub <= 0:
+    if not quote.is_switch or (quote.credit_rub <= 0 and quote.credit_days <= 0):
         return False
 
     await state.update_data(
@@ -871,16 +885,36 @@ async def _maybe_show_switch_confirm(
         renew_sw_selected_traffic=selected_traffic,
     )
 
-    if quote.net_cost_rub > 0:
-        pay_line = f"💳 К оплате: <b>{quote.net_cost_rub} ₽</b>."
-    else:
-        pay_line = f"✅ Доплачивать не нужно, на баланс вернётся <b>{quote.refund_to_balance_rub} ₽</b>."
+    old_tariff = await get_tariff_by_id(session, int(record.get("tariff_id"))) if record.get("tariff_id") else None
+    new_tariff = await get_tariff_by_id(session, int(new_tariff_id))
 
-    text = (
-        "🔄 <b>Смена тарифа</b>\n\n"
-        f"Неиспользованный остаток прежней подписки — <b>{quote.credit_rub} ₽</b> — вернём на баланс.\n"
-        f"Новый тариф — <b>{quote.new_full_price_rub} ₽</b>.\n\n"
-        f"{pay_line}"
+    old_dev = record.get("selected_device_limit") if (old_tariff and old_tariff.get("configurable")) else None
+    new_dev = quote.selected_device_limit if (new_tariff and new_tariff.get("configurable")) else None
+
+    old_addon = 0
+    if old_dev is not None:
+        cur_dev = record.get("current_device_limit")
+        if cur_dev is not None:
+            old_addon = max(0, int(cur_dev) - int(old_dev))
+
+    old_label = _tariff_config_label(
+        int(old_tariff.get("duration_days") or 0) if old_tariff else 0,
+        int(old_dev) if old_dev is not None else None,
+        old_addon,
+    )
+    new_label = _tariff_config_label(
+        quote.duration_days,
+        int(new_dev) if new_dev is not None else None,
+    )
+
+    text = renewal_switch_text(
+        old_label=old_label,
+        new_label=new_label,
+        net_cost_rub=quote.net_cost_rub,
+        credit_days=quote.credit_days,
+        credit_value_rub=quote.credit_value_rub,
+        credit_rub=quote.credit_rub,
+        refund_to_balance_rub=quote.refund_to_balance_rub,
     )
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="✅ Подтвердить смену", callback_data="renew_sw_confirm"))
@@ -1092,7 +1126,7 @@ async def complete_key_renewal(
         key_info = await get_key_details(session, email)
         if not key_info:
             logger.error(f"[Error] Ключ с client_id={client_id} не найден в БД.")
-            return
+            return False
 
         server_or_cluster = key_info["server_id"]
 
@@ -1134,7 +1168,7 @@ async def complete_key_renewal(
                     await bot.send_message(tg_notify, err_text, reply_markup=err_markup)
             except Exception as notify_err:
                 logger.warning(f"[Renew] Не удалось показать ошибку продления: {notify_err}")
-            return
+            return False
 
         tariff = await get_tariff_by_id(session, tariff_id)
         tariff_name = tariff["name"] if tariff else ""
@@ -1211,6 +1245,8 @@ async def complete_key_renewal(
                 await bot.send_message(tg_notify, response_message, reply_markup=builder.as_markup())
 
         logger.info(f"[Info] Продление ключа {client_id} завершено успешно (User: {tg_id})")
+        return True
 
     except Exception as e:
         logger.error(f"[Error] Ошибка в complete_key_renewal: {e}")
+        return False

@@ -54,6 +54,7 @@ from handlers.texts import (
     NO_SUBSCRIPTIONS_MSG,
     RENAME_KEY_PROMPT,
     key_message,
+    single_subscription_profile_text,
 )
 from handlers.utils import (
     edit_or_send_message,
@@ -76,7 +77,7 @@ from panels.remnawave_runtime import (
     resolve_remnawave_api_url,
     with_remnawave_api,
 )
-from services.tariffs.tariff_display import GB, get_key_tariff_addons_state
+from services.tariffs.tariff_display import GB, get_key_tariff_addons_state, get_key_tariff_display
 
 
 router = Router()
@@ -528,6 +529,117 @@ async def render_key_info(message: Message, session: AsyncSession, key_ref_or_em
     )
 
 
+async def _build_single_subscription_text(
+    session: AsyncSession,
+    tg_id: int,
+    key,
+    username: str,
+    balance_text: str,
+) -> str:
+    tariff_name = ""
+    subgroup_title = ""
+    traffic_limit = 0
+    device_limit = 0
+    base_device_limit = 0
+    used_traffic_gb = None
+    hwid_count = 0
+
+    key_record = await get_key_details(session, key.email)
+
+    if getattr(key, "tariff_id", None) and key_record:
+        try:
+            tariff_name, subgroup_title, traffic_limit, device_limit, _, tariff = await get_key_tariff_display(
+                session=session,
+                key_record=key_record,
+            )
+            current_device_limit = key_record.get("current_device_limit")
+            if current_device_limit:
+                try:
+                    current_device_limit = int(current_device_limit)
+                    if current_device_limit > device_limit:
+                        device_limit = current_device_limit
+                except (TypeError, ValueError):
+                    pass
+            if tariff:
+                tariff_default_device_limit = int(tariff.get("device_limit") or 0)
+                selected = key_record.get("selected_device_limit")
+                if selected is not None:
+                    try:
+                        base_device_limit = int(selected)
+                    except (TypeError, ValueError):
+                        base_device_limit = tariff_default_device_limit
+                else:
+                    base_device_limit = tariff_default_device_limit
+        except Exception as e:
+            logger.error(f"[single_sub] Ошибка тарифа для {key.email}: {e}")
+
+    hwid_reset_enabled = bool(BUTTONS_CONFIG.get("HWID_RESET_BUTTON_ENABLE", HWID_RESET_BUTTON))
+    if getattr(key, "client_id", None):
+        try:
+            if await is_full_remnawave_cluster(key.server_id, session):
+                profile = await get_remnawave_profile(session, str(key.server_id), key.client_id)
+                if isinstance(profile, dict):
+                    hwid_count = int(profile.get("hwid_count") or 0)
+                    used_traffic_gb = profile.get("used_gb")
+        except Exception as e:
+            logger.error(f"[single_sub] Ошибка профиля Remnawave для {key.email}: {e}")
+
+    hwid_info = f"🔄 <b>Привязанных устройств:</b> {hwid_count}" if hwid_reset_enabled else ""
+
+    expiry_date = "Неизвестно"
+    is_expired = False
+    if getattr(key, "expiry_time", None):
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        is_expired = key.expiry_time <= now_ms
+        if is_expired:
+            expiry_date = "❌ Подписка истекла"
+        else:
+            exp = datetime.fromtimestamp(key.expiry_time / 1000, tz=moscow_tz)
+            expiry_date = exp.strftime(f"%d {get_russian_month(exp)} %Y года, %H:%M (МСК)")
+
+    key_link = (
+        getattr(key, "key", None)
+        or getattr(key, "remnawave_link", None)
+        or (key_record.get("link") if key_record else None)
+        or "Неизвестно"
+    )
+
+    return single_subscription_profile_text(
+        username=username,
+        tg_id=tg_id,
+        balance=balance_text,
+        key=key_link,
+        subgroup_title=subgroup_title,
+        tariff_name=tariff_name,
+        traffic_limit=traffic_limit,
+        used_traffic_gb=used_traffic_gb,
+        device_limit=device_limit,
+        base_device_limit=base_device_limit,
+        hwid_info=hwid_info,
+        expiry_date=expiry_date,
+        is_expired=is_expired,
+    )
+
+
+async def build_single_subscription_profile(session: AsyncSession, tg_id: int, username: str, balance_text: str):
+    records = await get_keys(session, tg_id)
+    if len(records) != 1:
+        return None
+
+    key = records[0]
+    key_ref = build_key_ref(key.client_id, key.email)
+    _, markup, _ = await build_key_view_payload(session, tg_id, key_ref)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in markup.inline_keyboard:
+        filtered = [btn for btn in row if getattr(btn, "callback_data", None) not in ("profile", "view_keys")]
+        if filtered:
+            rows.append(filtered)
+
+    text = await _build_single_subscription_text(session, tg_id, key, username, balance_text)
+    return text, rows
+
+
 DEVICES_PER_PAGE = 3
 
 
@@ -539,12 +651,15 @@ def _format_device_block(idx: int, device: dict) -> str:
     user_agent = html.escape(str(device.get("userAgent") or "—"))
     created_raw = str(device.get("createdAt") or "")[:19].replace("T", " ")
     created = html.escape(created_raw or "—")
+    updated_raw = str(device.get("updatedAt") or "")[:19].replace("T", " ")
+    updated = html.escape(updated_raw or "—")
     return (
         f"<blockquote expandable><b>#{idx} · {model}</b>\n"
         f"📟 <code>{hwid}</code>\n"
         f"🧠 {platform} · {os_version}\n"
         f"🌐 <i>{user_agent}</i>\n"
-        f"🕓 {created}</blockquote>"
+        f"🕓 Добавлено: {created}\n"
+        f"🔄 Обновлено: {updated}</blockquote>"
     )
 
 
@@ -576,7 +691,8 @@ def _build_devices_keyboard(
         nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"my_devices|{key_ref}|{page + 1}"))
     if nav_buttons:
         builder.row(*nav_buttons)
-    builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}"))
+    back_cb = "profile" if bool(MODES_CONFIG.get("SINGLE_SUBSCRIPTION_MODE", False)) else f"view_key|{key_ref}"
+    builder.row(InlineKeyboardButton(text=BACK, callback_data=back_cb))
     return builder
 
 
@@ -613,7 +729,8 @@ async def _render_my_devices(
     if total == 0:
         text = "💻 <b>Мои устройства</b>\n\n🔌 Нет привязанных устройств."
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text=BACK, callback_data=f"view_key|{key_ref}"))
+        empty_back_cb = "profile" if bool(MODES_CONFIG.get("SINGLE_SUBSCRIPTION_MODE", False)) else f"view_key|{key_ref}"
+        builder.row(InlineKeyboardButton(text=BACK, callback_data=empty_back_cb))
         await edit_or_send_message(
             target_message=callback_query.message,
             text=text,

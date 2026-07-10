@@ -399,7 +399,7 @@ async def request_password_reset(
     if not smtp_configured() or not await pwd_reset.redis_ready():
         return _RESET_OK_MESSAGE
     identity = await idb.get_identity_by_email(session, email_norm)
-    if not identity or not identity.password_hash:
+    if not identity:
         return _RESET_OK_MESSAGE
     ip = _client_ip(request)
     if not await pwd_reset.try_consume_ip_budget(ip):

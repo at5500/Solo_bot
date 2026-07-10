@@ -115,6 +115,8 @@ class AccountKeyRenewResponse(AccountKeyActionResponse):
     is_switch: bool = False
     credit_to_balance_rub: int = 0
     refund_to_balance_rub: int = 0
+    credit_days: int = 0
+    credit_value_rub: int = 0
     new_device_limit: int | None = None
     new_traffic_gb: int | None = None
 

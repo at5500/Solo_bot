@@ -201,6 +201,12 @@ async def process_intercept_key_creation_message(
     **kwargs,
 ) -> bool:
     """Обрабатывает хук intercept_key_creation_message и решает, перехватывать ли сообщение."""
+    from .single_subscription import is_single_sub_enabled, open_single_sub_profile
+
+    if is_single_sub_enabled():
+        if await open_single_sub_profile(target_message, session, admin=bool(kwargs.get("admin", False))):
+            return True
+
     results = await run_hooks(
         "intercept_key_creation_message",
         chat_id=chat_id,
@@ -246,6 +252,10 @@ async def process_process_callback_renew_key(
         session=session,
         **kwargs,
     )
+    from .single_subscription import is_single_sub_enabled, single_sub_back_to_profile
+
+    if is_single_sub_enabled():
+        return list(results) + single_sub_back_to_profile()
     return results if results else []
 
 
@@ -311,6 +321,10 @@ async def process_renew_tariffs(
         session=session,
         **kwargs,
     )
+    from .single_subscription import is_single_sub_enabled, single_sub_back_to_profile
+
+    if is_single_sub_enabled():
+        return list(results) + single_sub_back_to_profile()
     return results if results else []
 
 
@@ -332,6 +346,10 @@ async def process_renewal_complete(
         client_id=client_id,
         **kwargs,
     )
+    from .single_subscription import is_single_sub_enabled, single_sub_back_to_profile
+
+    if is_single_sub_enabled():
+        return list(results) + single_sub_back_to_profile()
     return results if results else []
 
 
@@ -442,6 +460,10 @@ async def process_addons_menu(
         session=session,
         **kwargs,
     )
+    from .single_subscription import is_single_sub_enabled, single_sub_back_to_profile
+
+    if is_single_sub_enabled():
+        return list(results) + single_sub_back_to_profile()
     return results if results else []
 
 
@@ -459,6 +481,10 @@ async def process_connect_device_menu(
         session=session,
         **kwargs,
     )
+    from .single_subscription import is_single_sub_enabled, single_sub_back_to_profile
+
+    if is_single_sub_enabled():
+        return list(results) + single_sub_back_to_profile()
     return results if results else []
 
 
@@ -471,6 +497,12 @@ async def process_addon_purchase_complete(
     **kwargs,
 ) -> bool:
     """Обрабатывает хук addon_purchase_complete. True = caller пропускает render_key_info."""
+    from .single_subscription import is_single_sub_enabled, open_single_sub_profile
+
+    if is_single_sub_enabled():
+        if await open_single_sub_profile(message, session, admin=admin):
+            return True
+
     results = await run_hooks(
         "addon_purchase_complete",
         chat_id=chat_id,

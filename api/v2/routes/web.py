@@ -2121,6 +2121,36 @@ async def delete_error_report(
     return {"ok": True}
 
 
+@router.post("/api/web/error-reports/resolve-all")
+@router.post("/error-reports/resolve-all")
+async def resolve_all_error_reports(
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    from sqlalchemy import update as sa_update
+
+    res = await session.execute(
+        sa_update(WebErrorReport).where(WebErrorReport.resolved.is_(False)).values(resolved=True)
+    )
+    return {"ok": True, "updated": int(res.rowcount or 0)}
+
+
+@router.delete("/api/web/error-reports")
+@router.delete("/error-reports")
+async def delete_error_reports_bulk(
+    resolved: bool | None = Query(None),
+    session: AsyncSession = Depends(get_session),
+    _identity=Depends(verify_identity_admin),
+):
+    from sqlalchemy import delete as sa_delete
+
+    stmt = sa_delete(WebErrorReport)
+    if resolved is not None:
+        stmt = stmt.where(WebErrorReport.resolved.is_(resolved))
+    res = await session.execute(stmt)
+    return {"ok": True, "deleted": int(res.rowcount or 0)}
+
+
 @router.post("/api/web/install-default-design")
 async def install_default_design(
     session: AsyncSession = Depends(get_session),

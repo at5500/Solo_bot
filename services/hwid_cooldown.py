@@ -34,7 +34,6 @@ def _cfg(key: str, max_value: float | None = None) -> float:
 
 
 def _penalty() -> float:
-    # Штраф в баллах доверия — шкала 0..100.
     return _cfg("HWID_DELETE_PENALTY", _INITIAL_TRUST)
 
 
@@ -43,7 +42,6 @@ def _recovery_per_day() -> float:
 
 
 def _min_trust() -> float:
-    # Порог не может быть выше максимума доверия, иначе он недостижим (вечная блокировка).
     return _cfg("HWID_MIN_TRUST_TO_DELETE", _INITIAL_TRUST)
 
 

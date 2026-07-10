@@ -14,6 +14,7 @@ TARIFFS_CONFIG: dict[str, Any] = {
     "ALLOW_DOWNGRADE": True,
     "KEY_ADDONS_PACK_MODE": "all",
     "KEY_ADDONS_PRICE_BASE_MODE": "current",
+    "KEY_ADDONS_RECALC_PRICE": False,
 }
 register_runtime_config("TARIFFS_CONFIG", TARIFFS_CONFIG)
 

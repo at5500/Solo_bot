@@ -108,6 +108,17 @@ async def process_callback_view_profile(
     if text_hooks:
         profile_message = text_hooks[0]
 
+    single_sub_mode = bool(MODES_CONFIG.get("SINGLE_SUBSCRIPTION_MODE", False))
+    single_sub_rows = None
+    if single_sub_mode and key_count == 1:
+        from handlers.keys.key_view import build_single_subscription_profile
+
+        single_sub_payload = await build_single_subscription_profile(
+            session, chat_id, username, balance_text
+        )
+        if single_sub_payload:
+            profile_message, single_sub_rows = single_sub_payload
+
     builder = InlineKeyboardBuilder()
 
     from core.settings.web_config import (
@@ -136,7 +147,10 @@ async def process_callback_view_profile(
 
     trial_time_disabled = bool(MODES_CONFIG.get("TRIAL_TIME_DISABLED", TRIAL_TIME_DISABLE))
 
-    if key_count > 0:
+    if single_sub_rows is not None:
+        for row in single_sub_rows:
+            builder.row(*row)
+    elif key_count > 0:
         subscriptions_button_text = MY_SUB if key_count == 1 else MY_SUBS
         builder.row(InlineKeyboardButton(text=subscriptions_button_text, callback_data="view_keys"))
     elif trial_status == 0 and not trial_time_disabled:
