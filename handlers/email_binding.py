@@ -38,7 +38,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from core.settings.web_config import is_email_binding_enabled
-from database.identities import get_identity_by_email, get_or_create_identity_for_tg
+from database.identities import attach_email, get_identity_by_email, get_or_create_identity_for_tg
 from handlers.buttons import BACK
 from handlers.utils import edit_or_send_message
 from logger import logger
@@ -111,23 +111,22 @@ async def receive_email(message: Message, state: FSMContext, session) -> None:
     existing = await get_identity_by_email(session, email_norm)
     identity = await get_or_create_identity_for_tg(session, message.from_user.id)
     if existing and existing.id != identity.id:
-        # Collision: either another TG owns it, or it's an email-only
-        # identity already in the DB — same rule as webapp
+        # Refuse only when another LIVE Telegram account owns this email.
+        # An email-only leftover (existing.tg_id is None — e.g. a web account
+        # whose key was later deleted) is mergeable: fall through and send the
+        # OTP. The actual merge happens in receive_code via attach_email,
+        # after the user proves ownership with the code — so the F-NEW-tg-03
+        # anti-squat property is preserved. Mirrors webapp
         # /auth/link-email/send-code.
         if existing.tg_id is not None and int(existing.tg_id) != int(message.from_user.id):
             await message.answer("❌ Этот email уже занят другим пользователем.")
             return
-        logger.warning(
-            "email_binding: identity collision tg_id=%s wants email=%s already on identity_id=%s",
+        logger.info(
+            "email_binding: mergeable email collision tg_id=%s email=%s leftover identity_id=%s",
             message.from_user.id,
             email_norm,
             existing.id,
         )
-        await message.answer(
-            "❌ Этот email уже привязан к другому аккаунту. "
-            "Войдите на сайт с этим адресом и перенесите Telegram оттуда."
-        )
-        return
 
     if not smtp_configured():
         await message.answer(
@@ -226,14 +225,15 @@ async def receive_code(message: Message, state: FSMContext, session) -> None:
         await message.answer("ℹ️ Почта уже была привязана.")
         return
 
-    existing = await get_identity_by_email(session, email_norm)
-    if existing and existing.id != identity.id:
+    # Attach — merging an email-only leftover account if one holds this
+    # address (transfers its keys/balance/trial, deletes the empty
+    # identity). Returns None only when the email belongs to a DIFFERENT
+    # live account. Mirrors webapp /auth/link-email/confirm.
+    result = await attach_email(session, identity.id, email_norm)
+    if not result:
         await state.clear()
         await message.answer("❌ Этот email уже занят другим пользователем.")
         return
-
-    identity.email = email_norm
-    await session.flush()
     await state.clear()
 
     builder = InlineKeyboardBuilder()
