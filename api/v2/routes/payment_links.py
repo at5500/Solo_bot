@@ -377,12 +377,15 @@ async def get_link_status_public(
     except Exception:
         pass
 
-    # ``payment_id`` from the guest flow is an opaque public ref — resolve it
-    # to the real provider id server-side; fall back to treating it as a raw
-    # id for backward compat (links issued before this change / Redis miss).
+    # ``payment_id`` from the guest flow is an opaque public ref. Resolve it to
+    # the real provider id server-side; a raw/guessed provider id is NOT
+    # accepted — that predictable ``<ts>_<user_id>`` is exactly what let anyone
+    # poll a stranger's payment status (F-001). Unknown/expired token -> 404.
     from utils.public_payment_ref import resolve_public_ref
 
-    internal_pid = await resolve_public_ref(payment_id) or payment_id
+    internal_pid = await resolve_public_ref(payment_id)
+    if internal_pid is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
     payment = await get_payment_from_db_by_payment_id(session, internal_pid)
     if payment is None:
         payment = await get_payment_by_payment_id(session, internal_pid)
