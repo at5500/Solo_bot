@@ -65,9 +65,13 @@ class ReferralsResolutionTests(unittest.IsolatedAsyncioTestCase):
             result = await apply_referral(body, session=session, identity=identity)
 
         self.assertTrue(result.ok)
-        self.assertEqual(result.referrer_code, "321")
-        self.assertEqual(result.referrer_user_id, 321)
-        self.assertEqual(result.referred_user_id, 555)
+        # F-015: the response exposes only an opaque code, never the raw
+        # sequential user.id (which "321" was) nor a synthetic tg_id.
+        self.assertTrue(result.referrer_code.startswith("r1_"))
+        self.assertNotEqual(result.referrer_code, "321")
+        self.assertFalse(hasattr(result, "referrer_user_id"))
+        self.assertFalse(hasattr(result, "referred_user_id"))
+        # Resolution itself is still verified via the add_referral call.
         add_referral_mock.assert_awaited_once_with(session, 555, 321)
 
 

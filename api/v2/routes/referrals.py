@@ -117,11 +117,8 @@ async def apply_referral(
     return ReferralApplyResponse(
         ok=True,
         message="Приглашение применено",
-        referrer_code=str(referrer_u.id),
-        referrer_user_id=int(referrer_u.id),
-        referrer_tg_id=referrer_u.tg_id,
-        referred_user_id=int(billing_uid),
-        referred_tg_id=referred_u.tg_id if referred_u is not None else None,
+        # Opaque HMAC code, not the raw user.id — see F-015 in the schema.
+        referrer_code=encode_referral_code(int(referrer_u.id)),
     )
 
 
@@ -147,7 +144,6 @@ async def referral_top(
         top.append(
             ReferralTopEntryResponse(
                 position=index,
-                referrer_user_id=referrer_user_id,
                 referrals_count=referrals_count,
                 display_id=display_id,
             )
@@ -173,8 +169,6 @@ async def referral_list(
     rows = result.scalars().all()
     items = [
         ReferralListEntry(
-            referred_user_id=int(r.referred_user_id),
-            referred_tg_id=int(r.referred_tg_id) if r.referred_tg_id is not None else None,
             display_id=encode_referral_code(int(r.referred_user_id)),
             reward_issued=bool(r.reward_issued),
         )

@@ -415,17 +415,16 @@ class ReferralApplyRequest(BaseModel):
 class ReferralApplyResponse(BaseModel):
     ok: bool = True
     message: str = ""
+    # Opaque HMAC code only — raw sequential user.id / synthetic (negative)
+    # tg_id fields were removed so the response can't be used to enumerate
+    # accounts or read registration order (audit F-015).
     referrer_code: str = ""
-    referrer_user_id: int = 0
-    referrer_tg_id: int | None = None
-    referred_user_id: int = 0
-    referred_tg_id: int | None = None
 
 
 class ReferralTopEntryResponse(BaseModel):
     position: int
-    referrer_user_id: int
     referrals_count: int
+    # Opaque masked id only — raw referrer_user_id was removed (F-015).
     display_id: str
 
 
@@ -436,8 +435,8 @@ class ReferralTopResponse(BaseModel):
 
 
 class ReferralListEntry(BaseModel):
-    referred_user_id: int
-    referred_tg_id: int | None = None
+    # Opaque masked id only — raw referred_user_id / synthetic (negative)
+    # referred_tg_id were removed so the list can't enumerate accounts (F-015).
     display_id: str = ""
     reward_issued: bool = False
 
@@ -495,12 +494,11 @@ class PartnerApplyRequest(BaseModel):
 class PartnerApplyResponse(BaseModel):
     ok: bool = True
     message: str = ""
+    # Opaque partner code only. The sequential user.id columns
+    # (partner_user_id / joined_user_id) AND the synthetic (negative) tg_id
+    # columns (partner_tg_id / joined_tg_id, which are just -user.id) were all
+    # removed — either leaks row counts and registration order (audit F-015).
     partner_code: str = ""
-    # Internal sequential user.id columns (partner_user_id /
-    # joined_user_id) were stripped to avoid leaking row counts and
-    # registration order — audit F-015.
-    partner_tg_id: int | None = None
-    joined_tg_id: int | None = None
 
 
 class PartnerTopEntryResponse(BaseModel):

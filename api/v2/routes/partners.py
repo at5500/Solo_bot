@@ -267,8 +267,6 @@ async def partner_apply(
         ok=True,
         message="Партнерский код применен",
         partner_code=code_value,
-        partner_tg_id=int(referrer_tg_id),
-        joined_tg_id=int(joined_tg_id),
     )
 
 
