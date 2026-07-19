@@ -149,6 +149,24 @@ def abandoned_checkout_reminder_process_runner() -> None:
     asyncio.run(abandoned_checkout_reminder_job())
 
 
+async def guest_cleanup_job() -> None:
+    """Удаляет брошенные, ни разу не оплаченные гостевые identity (см. F-010)."""
+    from services.guest_cleanup import cleanup_abandoned_guest_identities
+
+    async with async_session_maker() as session:
+        try:
+            deleted = await cleanup_abandoned_guest_identities(session)
+            await session.commit()
+            if deleted:
+                logger.info("[GuestCleanup] Удалено брошенных гостевых identity: {}", deleted)
+        except Exception as error:
+            logger.error("[GuestCleanup] Ошибка очистки: {}", error)
+
+
+def guest_cleanup_process_runner() -> None:
+    asyncio.run(guest_cleanup_job())
+
+
 async def snapshot_key_traffic_job() -> None:
     """Дневной снапшот использованного трафика по ключам (для графиков использования)."""
     from services.traffic_history import snapshot_all_key_traffic
@@ -303,6 +321,7 @@ STALE_PAYMENTS_SWEEP_TRIGGER = CronTrigger(minute=0, timezone="Europe/Moscow")
 EXPIRED_GIFTS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=0, timezone="Europe/Moscow")
 WEB_ANALYTICS_CLEANUP_TRIGGER = CronTrigger(hour=3, minute=30, timezone="Europe/Moscow")
 ABANDONED_CHECKOUT_TRIGGER = CronTrigger(minute=20, timezone="Europe/Moscow")
+GUEST_CLEANUP_TRIGGER = CronTrigger(hour=4, minute=0, timezone="Europe/Moscow")
 KEY_TRAFFIC_SNAPSHOT_TRIGGER = CronTrigger(hour=0, minute=10, timezone="Europe/Moscow")
 KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER = CronTrigger(minute=5, timezone="Europe/Moscow")
 SUBSCRIPTION_METRICS_SNAPSHOT_TRIGGER = CronTrigger(hour=0, minute=20, timezone="Europe/Moscow")

@@ -5,6 +5,7 @@ from core.tasks.cron_tasks import (
     DAILY_STATS_REPORT_TRIGGER,
     DB_POOL_STATUS_TRIGGER,
     EXPIRED_GIFTS_CLEANUP_TRIGGER,
+    GUEST_CLEANUP_TRIGGER,
     KEY_TRAFFIC_HOURLY_SNAPSHOT_TRIGGER,
     KEY_TRAFFIC_SNAPSHOT_TRIGGER,
     MONTHLY_STATS_REPORT_TRIGGER,
@@ -19,6 +20,8 @@ from core.tasks.cron_tasks import (
     cleanup_expired_gifts_process_runner,
     cleanup_web_analytics_job,
     cleanup_web_analytics_process_runner,
+    guest_cleanup_job,
+    guest_cleanup_process_runner,
     log_db_pool_status,
     scheduled_audit_drain,
     scheduled_audit_drain_process_runner,
@@ -167,6 +170,20 @@ def register_periodic_tasks() -> None:
             "abandoned_checkout_reminder",
             abandoned_checkout_reminder_job,
             ABANDONED_CHECKOUT_TRIGGER,
+        )
+
+    if process_budget > 0:
+        periodic_task_manager.register_cron_task(
+            "guest_cleanup",
+            guest_cleanup_process_runner,
+            GUEST_CLEANUP_TRIGGER,
+            execution_mode="process",
+        )
+    else:
+        periodic_task_manager.register_cron_task(
+            "guest_cleanup",
+            guest_cleanup_job,
+            GUEST_CLEANUP_TRIGGER,
         )
 
     if process_budget > 0:
