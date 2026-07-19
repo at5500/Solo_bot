@@ -18,7 +18,11 @@ from core.redis_cache import cache_delete, cache_get, cache_set
 
 _TTL_SEC = 30 * 60  # 30 minutes — enough to switch apps and finish OTP / /start.
 _ALPHABET = string.ascii_letters + string.digits
-_TOKEN_LEN = 8
+# This token is a bearer capability: whoever presents it attaches their
+# Telegram to the token's web identity. Its secrecy IS the security boundary,
+# so it must stay unguessable. 22 base62 chars ≈ 131 bits. Do NOT shorten —
+# F-NEW-tg-01 had it at 8 (~48 bits), brute-forceable via the info endpoint.
+_TOKEN_LEN = 22
 
 # Kind discriminators. The matching client flow is described in the linked
 # Mini App endpoints (`/auth/link-tokens/{web|telegram}`).
@@ -31,7 +35,7 @@ def _key(kind: str, token: str) -> str:
 
 
 def generate_token() -> str:
-    """Returns a fresh random 8-char base62 token."""
+    """Returns a fresh random high-entropy base62 token (see ``_TOKEN_LEN``)."""
     return "".join(secrets.choice(_ALPHABET) for _ in range(_TOKEN_LEN))
 
 

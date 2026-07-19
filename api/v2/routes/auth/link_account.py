@@ -228,7 +228,10 @@ async def link_token_info(
         ``remote_email_masked`` is empty for identities without an email
         — the frontend hides the field in that case.
     """
-    del identity  # caller must be authenticated, identity itself unused
+    # Rate-limit token probing: /info discloses a masked email + created_at for
+    # a valid token and helps brute-force the attach, so cap it per caller like
+    # minting does (F-NEW-tg-01 — 20 random tokens went through without a 429).
+    await _enforce_link_rate_limit(str(identity.id))
     token = (body.link_token or "").strip()
     if not token:
         return LinkTokenInfoResult(valid=False)
@@ -282,10 +285,16 @@ async def consume_miniapp_link(
     if not token:
         raise HTTPException(status_code=400, detail="Токен обязателен")
     if not body.confirmed:
-        # Consent gate ([audit F-NEW-tg-01]): the Mini App must show a
+        # UX gate only ([audit F-NEW-tg-01]): the Mini App must show a
         # confirmation dialog using /auth/link-tokens/info before this
-        # endpoint will perform the attach.
+        # endpoint will perform the attach. NOTE: ``confirmed`` is a
+        # client-set flag and is NOT a security boundary — the real guard is
+        # the unguessable bearer token plus the rate limit below.
         raise HTTPException(status_code=400, detail="Привязка требует подтверждения")
+
+    # Cap attach attempts per caller so a leaked/guessed token can't be
+    # replayed at scale (F-NEW-tg-01).
+    await _enforce_link_rate_limit(str(identity.id))
 
     tg_id = getattr(identity, "tg_id", None)
     if tg_id is None:
