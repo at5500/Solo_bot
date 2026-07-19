@@ -252,7 +252,10 @@ def validate_redirect_url(url: str, base_url: str) -> str:
     url = url.strip()
     if not url:
         return base_url
-    if url.startswith("/"):
+    # A single-slash path is safe, but reject protocol-relative («//evil.com»)
+    # and backslash tricks («/\\evil.com») — browsers resolve both to another
+    # origin, so a naive startswith("/") is an open-redirect hole (F-H06).
+    if url.startswith("/") and not url.startswith(("//", "/\\")):
         return url
     try:
         parsed = urlparse(url)
