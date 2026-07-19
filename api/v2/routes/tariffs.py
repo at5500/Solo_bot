@@ -380,9 +380,14 @@ async def purchase_tariff_by_email(
                 "coupon_id": int(coupon_id) if coupon_id is not None else None,
             },
         )
+        # Hand the guest an opaque token, NOT the raw ``<ts>_<user_id>``
+        # payment_id — the id leaks the account id and user counter (F-010).
+        from utils.public_payment_ref import issue_public_ref
+
+        public_ref = await issue_public_ref(payment_result.payment_id)
         logger.info(
-            f"[PurchaseByEmail] returning payment_id={payment_result.payment_id} "
-            f"to user_id={tg_id} provider={provider_id} amount={required_amount}"
+            f"[PurchaseByEmail] returning public_ref to user_id={tg_id} "
+            f"provider={provider_id} amount={required_amount}"
         )
         return TariffPurchaseResponse(
             ok=True,
@@ -395,7 +400,7 @@ async def purchase_tariff_by_email(
             applied_coupon_code=applied_coupon_code,
             payment_required=True,
             required_amount_rub=required_amount,
-            payment_id=payment_result.payment_id,
+            payment_id=public_ref,
             payment_url=payment_result.payment_url,
         )
     moscow_tz = tz_moscow("Europe/Moscow")

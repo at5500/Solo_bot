@@ -377,9 +377,15 @@ async def get_link_status_public(
     except Exception:
         pass
 
-    payment = await get_payment_from_db_by_payment_id(session, payment_id)
+    # ``payment_id`` from the guest flow is an opaque public ref — resolve it
+    # to the real provider id server-side; fall back to treating it as a raw
+    # id for backward compat (links issued before this change / Redis miss).
+    from utils.public_payment_ref import resolve_public_ref
+
+    internal_pid = await resolve_public_ref(payment_id) or payment_id
+    payment = await get_payment_from_db_by_payment_id(session, internal_pid)
     if payment is None:
-        payment = await get_payment_by_payment_id(session, payment_id)
+        payment = await get_payment_by_payment_id(session, internal_pid)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     status = str(payment.get("status") or "").lower() or None
