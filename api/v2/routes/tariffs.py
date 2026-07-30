@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from math import ceil
 from urllib.parse import urlsplit
 
@@ -8,13 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.depends import get_session, validate_redirect_url, verify_identity_token
+from api.depends import get_request_actor, get_session, validate_redirect_url, verify_identity_token
 from api.v2.base_crud import generate_crud_router
 from api.v2.routes.auth._common import _client_ip
 from api.v2.routes.coupon_pricing import resolve_percent_coupon_pricing
 from api.v2.schemas import TariffBase, TariffResponse, TariffUpdate
 from api.v2.schemas.tariffs import TariffGroup, TariffPublic
 from api.v2.schemas.web_public import (
+    AccountKeyRenewRequest,
     TariffConfigPriceResponse,
     TariffPurchaseByEmailRequest,
     TariffPurchaseRequest,
@@ -29,7 +30,7 @@ from database import (
 )
 from database.coupons import mark_coupon_used
 from database.keys import get_blocking_paid_subscription_state
-from database.models import Server, Tariff
+from database.models import Key, Server, Tariff
 from database.tariffs import get_tariff_by_id
 from database.temporary_data import create_temporary_data
 from handlers.texts import TARIFF_COOLDOWN_MESSAGE
@@ -219,6 +220,191 @@ async def get_tariff_config_price(
 # IPs behind CGNAT / public Wi-Fi, so a low per-IP ceiling would reject
 # legitimate customers; the limit here is deliberately higher.
 _PURCHASE_EMAIL_RATE_PER_HOUR = 30
+# Renewal targets are few — only lapsed subscriptions of the group being
+# bought are eligible, and a buyer rarely has several.
+_RENEW_CANDIDATE_LIMIT = 10
+
+
+async def _renew_instead_of_creating(
+    *,
+    session: AsyncSession,
+    request: Request,
+    identity,
+    billing_user_id: int,
+    tariff: dict,
+    tariff_group_code: str,
+    body: TariffPurchaseByEmailRequest,
+) -> TariffPurchaseResponse | None:
+    """Revives the buyer's lapsed subscription instead of issuing a second key.
+
+    Delegates to the cabinet renewal endpoint rather than repeating it. That
+    endpoint raises once it has started writing, so every condition it would
+    reject on is re-checked here first, while nothing has been written yet —
+    a rejection has to become a fallback to the create path, not an error.
+
+    Only an expired subscription is ever touched. Nobody proves ownership of
+    the email on this route, so anything still running — a paid key the
+    blocking check let through, a trial in progress — has to be left exactly
+    as it is: renewal resets traffic, re-plans the key and can move it to
+    another server.
+
+    @param identity: Buyer identity resolved from the purchase email.
+    @param billing_user_id: ``users.id`` of that identity.
+    @param tariff: Tariff being bought, already validated by the caller.
+    @param tariff_group_code: Group of that tariff.
+    @return: Response mirroring the renewal, or ``None`` when the purchase
+        should go through the create path instead.
+    """
+    from api.v2.routes.keys.user.renew import FORBIDDEN_RENEWAL_GROUPS, user_key_renew
+    from services.keys import normalize_expiry_ms
+
+    if tariff_group_code in FORBIDDEN_RENEWAL_GROUPS:
+        return None
+    # Renewal pricing refuses an unusable coupon outright, and validates the
+    # device/traffic options where the create path just prices whatever it is
+    # given. Both would turn a purchase that works today into an error, so
+    # requests carrying either stay on the create path.
+    if body.coupon_code or body.selected_device_limit is not None or body.selected_traffic_gb is not None:
+        return None
+
+    # This route binds no identity, so there is normally no actor on the
+    # request. Should one ever appear, the cabinet endpoint prefers it over the
+    # identity handed to it and would renew whoever the request is signed as.
+    actor = get_request_actor(request)
+    actor_user_id = getattr(actor, "billing_user_id", None) if actor is not None else None
+    if actor_user_id is not None and int(actor_user_id) != billing_user_id:
+        return None
+
+    # A subscription can only be renewed within the tariff group of the server
+    # it lives on. Matching the group in SQL keeps keys of other groups from
+    # filling the candidate list and hiding the one that can be renewed; the
+    # expiry bound is a coarse prefilter, the exact one runs below.
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    candidates = (
+        (
+            await session.execute(
+                select(Key)
+                .join(
+                    Server,
+                    (Server.server_name == Key.server_id) | (Server.cluster_name == Key.server_id),
+                )
+                .where(
+                    Key.user_id == billing_user_id,
+                    Key.is_frozen.isnot(True),
+                    Key.tariff_id.isnot(None),
+                    Key.expiry_time.isnot(None),
+                    Key.expiry_time <= now_ms,
+                    Key.email.isnot(None),
+                    Key.email != "",
+                    Server.tariff_group == tariff_group_code,
+                    Server.enabled.is_(True),
+                )
+                .order_by(Key.expiry_time.desc())
+                .distinct()
+                .limit(_RENEW_CANDIDATE_LIMIT)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Renewal prices the key's own device/traffic configuration rather than the
+    # bare tariff, and the paid site quotes the bare tariff. A key configured
+    # above the plan would be billed over the amount the buyer was shown. The
+    # ordinary case — a past renewal having stamped the tariff's own limits
+    # onto the key — prices identically and stays eligible.
+    advertised_price = int(calculate_config_price(tariff, None, None))
+    target = None
+    for candidate in candidates:
+        candidate_price = int(
+            calculate_config_price(tariff, candidate.selected_device_limit, candidate.selected_traffic_limit)
+        )
+        if candidate_price != advertised_price:
+            continue
+        # Legacy rows store expiry in seconds or microseconds; the cabinet code
+        # normalizes before judging, so the same value has to be judged here.
+        # An expired key is always inside the renewal window, which is why that
+        # window is not checked separately.
+        if int(normalize_expiry_ms(candidate.expiry_time) or 0) > now_ms:
+            continue
+        target = candidate
+        break
+    if target is None:
+        return None
+
+    # The join above accepts any server of the key's cluster, while the cabinet
+    # endpoint resolves exactly one and refuses the tariff when its group
+    # differs — ask the same way it does before handing the purchase over.
+    target_group = (
+        await session.scalar(
+            select(Server.tariff_group)
+            .where((Server.server_name == target.server_id) | (Server.cluster_name == target.server_id))
+            .limit(1)
+        )
+        or ""
+    ).strip()
+    if target_group != tariff_group_code:
+        return None
+
+    logger.info(f"[PurchaseByEmail] renewing client_id={target.client_id} for user_id={billing_user_id}")
+    try:
+        result = await user_key_renew(
+            client_id=str(target.client_id),
+            body=AccountKeyRenewRequest(
+                tariff_id=int(body.tariff_id),
+                provider_id=body.provider_id,
+                success_url=body.success_url,
+                failure_url=body.failure_url,
+                coupon_code=body.coupon_code,
+                selected_device_limit=body.selected_device_limit,
+                selected_traffic_limit=body.selected_traffic_gb,
+            ),
+            request=request,
+            # The renew switch in settings governs the cabinet button; turning
+            # it off must not turn a purchase into an error.
+            force_web=True,
+            preview=False,
+            session=session,
+            identity=identity,
+        )
+    except HTTPException as exc:
+        # The cabinet endpoint carries its own renewal rate limit, shared with
+        # the cabinet itself and counted per IP for a guest. It trips before
+        # anything is written, so a purchase that runs into it gets a new key
+        # rather than an error.
+        if exc.status_code != 429:
+            raise
+        return None
+    if result.requires_tariff_selection:
+        # Answered before anything was priced or written — safe to fall back.
+        return None
+
+    payment_id = result.payment_id
+    if payment_id:
+        # The raw id spells out the account id and user counter (F-010).
+        from utils.public_payment_ref import issue_public_ref
+
+        payment_id = await issue_public_ref(payment_id)
+    return TariffPurchaseResponse(
+        ok=True,
+        # Deliberately the wording of the create path rather than the renewal's
+        # own: anyone can post any email here, and a reply that says "renewed"
+        # tells a stranger the address has a subscription behind it.
+        message=(
+            "Требуется оплата для оформления подписки"
+            if result.payment_required
+            else "Подписка оформлена. Ключ в разделе «Мои ключи»."
+        ),
+        key_email=None,
+        charged_rub=result.charged_rub,
+        base_price_rub=result.base_price_rub,
+        discount_rub=result.discount_rub,
+        final_price_rub=result.final_price_rub,
+        applied_coupon_code=result.applied_coupon_code,
+        payment_required=result.payment_required,
+        required_amount_rub=result.required_amount_rub,
+        payment_id=payment_id,
+        payment_url=result.payment_url,
+    )
 
 
 @public_router.post("/purchase-by-email", response_model=TariffPurchaseResponse)
@@ -232,7 +418,9 @@ async def purchase_tariff_by_email(
     The buyer identity is resolved (or created) from ``body.email`` instead of
     a cookie, then the flow is identical to ``purchase_tariff_with_balance``.
     A purchase is refused when the user already owns a live paid subscription
-    (``already_active`` / frozen). Trial keys never block.
+    (``already_active`` / frozen). Trial keys never block. An expired
+    subscription is revived rather than duplicated — see
+    ``_renew_instead_of_creating``.
 
     IMPORTANT: the create path below is a verbatim copy of
     ``purchase_tariff_with_balance`` (the ``preview`` branch removed). If the
@@ -319,6 +507,23 @@ async def purchase_tariff_by_email(
                 left=format_cooldown_left(cooldown_left),
             ),
         )
+
+    # The paid site sells to an account, not to a browser: a returning buyer
+    # gets their old subscription back rather than a second key beside the
+    # dead one. Anything that cannot be renewed falls through and gets a new
+    # key, as before.
+    renewed = await _renew_instead_of_creating(
+        session=session,
+        request=request,
+        identity=identity,
+        billing_user_id=int(tg_id),
+        tariff=tariff,
+        tariff_group_code=tariff_group_code,
+        body=body,
+    )
+    if renewed is not None:
+        return renewed
+
     price = int(calculate_config_price(tariff, body.selected_device_limit, body.selected_traffic_gb))
     if price <= 0:
         raise HTTPException(status_code=400, detail="Некорректная цена тарифа")

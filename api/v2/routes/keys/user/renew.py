@@ -18,6 +18,13 @@ from .._common import (
     user_router,
 )
 
+# Groups a subscription cannot be renewed into: a trial is not a plan, and the
+# discount/gift groups are handed out, not sold. Shared with the guest
+# email-purchase route, which decides between renewing and creating a key.
+FORBIDDEN_RENEWAL_GROUPS = frozenset(
+    {"trial", "discounts", "discounts_max", "cold_discounts", "cold_discounts_max", "gifts"}
+)
+
 
 @user_router.post("/{client_id}/renew", response_model=AccountKeyRenewResponse)
 async def user_key_renew(
@@ -66,7 +73,6 @@ async def user_key_renew(
     key_email = str(getattr(db_key, "email", "") or "")
     key_server_id = str(getattr(db_key, "server_id", "") or "")
 
-    forbidden_renewal_groups = {"trial", "discounts", "discounts_max", "cold_discounts", "cold_discounts_max", "gifts"}
     server_tariff_group_row = await session.execute(
         select(Server.tariff_group)
         .where((Server.server_name == key_server_id) | (Server.cluster_name == key_server_id))
@@ -81,7 +87,7 @@ async def user_key_renew(
         chosen_group_code = (chosen_tariff.get("group_code") or "").strip()
         if (
             not chosen_group_code
-            or chosen_group_code in forbidden_renewal_groups
+            or chosen_group_code in FORBIDDEN_RENEWAL_GROUPS
             or (server_tariff_group and chosen_group_code != server_tariff_group)
         ):
             raise HTTPException(status_code=400, detail="Тариф недоступен для этой подписки")
@@ -89,7 +95,7 @@ async def user_key_renew(
     else:
         key_tariff = await get_tariff_by_id(session, int(tariff_id))
         key_tariff_group = (key_tariff.get("group_code") or "").strip() if key_tariff else ""
-        if not key_tariff_group or key_tariff_group in forbidden_renewal_groups:
+        if not key_tariff_group or key_tariff_group in FORBIDDEN_RENEWAL_GROUPS:
             return AccountKeyRenewResponse(
                 ok=True,
                 message="Для продления выберите тариф",
