@@ -486,7 +486,12 @@ async def get_blocking_paid_subscription_state(session: AsyncSession, user_id: i
             exists().where(
                 Key.user_id == int(user_id),
                 Key.expiry_time > now_ms,
-                Key.is_frozen.is_(False),
+                # ``IS NOT TRUE`` rather than ``IS FALSE``: rows written before
+                # freezing existed hold NULL, and ``IS FALSE`` skips them — a
+                # live paid subscription would pass as if it were not there, and
+                # the buyer would get a second key beside it. Every Python reader
+                # of this column already coerces NULL to "not frozen".
+                Key.is_frozen.isnot(True),
                 non_trial,
             )
         )
