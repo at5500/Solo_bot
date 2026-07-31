@@ -4,7 +4,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pytz import timezone as tz_moscow
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -225,6 +225,55 @@ _PURCHASE_EMAIL_RATE_PER_HOUR = 30
 _RENEW_CANDIDATE_LIMIT = 10
 
 
+async def _renewal_has_servers(
+    session: AsyncSession,
+    *,
+    key_server_id: str,
+    tariff_id: int,
+    target_subgroup: str | None,
+) -> bool:
+    """Answers whether renewal would find a server to run this tariff on.
+
+    Renewal keeps the key on its own cluster and narrows that cluster by the
+    tariff's bindings; when nothing survives it fails — after the purchase has
+    already been accepted, and identically on every retry. The create path has
+    no such constraint, it picks a cluster that fits, so a purchase this cluster
+    cannot serve belongs there instead.
+
+    Mirrors the filtering in ``renew_key_in_cluster`` step for step, including
+    the identity test that tells "narrowed to these" apart from "no bindings,
+    use everything" — the two look alike but only the first ends the filtering.
+    """
+    from database.servers import filter_cluster_by_subgroup, filter_cluster_by_tariff
+
+    cluster = [
+        {"server_name": name}
+        for name in (
+            await session.execute(
+                select(Server.server_name).where(
+                    Server.cluster_name == key_server_id,
+                    Server.enabled.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    ]
+    # Not a cluster name, so the key is pinned to a single server: renewal uses
+    # that server directly and applies no filtering at all.
+    if not cluster:
+        return True
+
+    filtered = await filter_cluster_by_tariff(session, cluster, tariff_id, key_server_id)
+    if filtered is not cluster:
+        return bool(filtered)
+    if target_subgroup:
+        return bool(
+            await filter_cluster_by_subgroup(session, cluster, target_subgroup, key_server_id, tariff_id=tariff_id)
+        )
+    return True
+
+
 async def _renew_instead_of_creating(
     *,
     session: AsyncSession,
@@ -242,10 +291,12 @@ async def _renew_instead_of_creating(
     reject on is re-checked here first, while nothing has been written yet —
     a rejection has to become a fallback to the create path, not an error.
 
-    Only an expired subscription is ever touched. Nobody proves ownership of
-    the email on this route, so anything still running — a paid key the
-    blocking check let through, a trial in progress — has to be left exactly
-    as it is: renewal resets traffic, re-plans the key and can move it to
+    Only an expired subscription is ever touched, and only where renewing it
+    changes nothing the buyer already relies on. Nobody proves ownership of the
+    email on this route, so anything still running — a paid key the blocking
+    check let through, a trial in progress — has to be left exactly as it is,
+    and a renewal that would rewrite the subscription link is declined even on
+    an expired key: renewal resets traffic, re-plans the key and can move it to
     another server.
 
     @param identity: Buyer identity resolved from the purchase email.
@@ -275,32 +326,45 @@ async def _renew_instead_of_creating(
     if actor_user_id is not None and int(actor_user_id) != billing_user_id:
         return None
 
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    # Legacy rows store expiry in seconds or microseconds. Mirrors
+    # ``normalize_expiry_ms`` so that both the bound and the ordering speak
+    # milliseconds — comparing the raw column would drop the odd rows from the
+    # candidate list and hand the buyer the second key this whole branch exists
+    # to avoid. The exact judgement still runs through the helper itself.
+    expiry_ms = case(
+        (Key.expiry_time > 10**13, Key.expiry_time / 1000),
+        (Key.expiry_time < 10**10, Key.expiry_time * 1000),
+        else_=Key.expiry_time,
+    )
     # A subscription can only be renewed within the tariff group of the server
     # it lives on. Matching the group in SQL keeps keys of other groups from
-    # filling the candidate list and hiding the one that can be renewed; the
-    # expiry bound is a coarse prefilter, the exact one runs below.
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    # filling the candidate list and hiding the one that can be renewed.
+    serves_tariff_group = (
+        select(Server.id)
+        .where(
+            (Server.server_name == Key.server_id) | (Server.cluster_name == Key.server_id),
+            Server.tariff_group == tariff_group_code,
+            Server.enabled.is_(True),
+        )
+        .correlate(Key)
+        .exists()
+    )
     candidates = (
         (
             await session.execute(
                 select(Key)
-                .join(
-                    Server,
-                    (Server.server_name == Key.server_id) | (Server.cluster_name == Key.server_id),
-                )
                 .where(
                     Key.user_id == billing_user_id,
                     Key.is_frozen.isnot(True),
                     Key.tariff_id.isnot(None),
                     Key.expiry_time.isnot(None),
-                    Key.expiry_time <= now_ms,
+                    expiry_ms <= now_ms,
                     Key.email.isnot(None),
                     Key.email != "",
-                    Server.tariff_group == tariff_group_code,
-                    Server.enabled.is_(True),
+                    serves_tariff_group,
                 )
-                .order_by(Key.expiry_time.desc())
-                .distinct()
+                .order_by(expiry_ms.desc())
                 .limit(_RENEW_CANDIDATE_LIMIT)
             )
         )
@@ -313,6 +377,9 @@ async def _renew_instead_of_creating(
     # ordinary case — a past renewal having stamped the tariff's own limits
     # onto the key — prices identically and stays eligible.
     advertised_price = int(calculate_config_price(tariff, None, None))
+    # Kept raw: the renewal compares subgroups verbatim, and trimming here would
+    # call two titles the same that it will call different.
+    target_subgroup = tariff.get("subgroup_title")
     target = None
     for candidate in candidates:
         candidate_price = int(
@@ -320,29 +387,43 @@ async def _renew_instead_of_creating(
         )
         if candidate_price != advertised_price:
             continue
-        # Legacy rows store expiry in seconds or microseconds; the cabinet code
-        # normalizes before judging, so the same value has to be judged here.
-        # An expired key is always inside the renewal window, which is why that
-        # window is not checked separately.
+        # The bound above normalizes legacy units inline; this is the same
+        # judgement made by the code that will act on the key. An expired key is
+        # always inside the renewal window, which is why that window is not
+        # checked separately.
         if int(normalize_expiry_ms(candidate.expiry_time) or 0) > now_ms:
+            continue
+        # Renewing into another subgroup deletes the panel client, mints a new
+        # one and rewrites the subscription link — the profile already installed
+        # on the buyer's devices stops working. Nobody proves ownership of the
+        # email here, so that is never worth doing: the purchase gets its own new
+        # key instead.
+        candidate_tariff = await get_tariff_by_id(session, int(candidate.tariff_id))
+        if ((candidate_tariff or {}).get("subgroup_title") or "") != (target_subgroup or ""):
+            continue
+        # The candidate query accepts any server of the key's cluster, while the
+        # renewal resolves exactly one and refuses the tariff when its group
+        # differs — ask the same way it does before handing the purchase over.
+        candidate_group = (
+            await session.scalar(
+                select(Server.tariff_group)
+                .where((Server.server_name == candidate.server_id) | (Server.cluster_name == candidate.server_id))
+                .limit(1)
+            )
+            or ""
+        ).strip()
+        if candidate_group != tariff_group_code:
+            continue
+        if not await _renewal_has_servers(
+            session,
+            key_server_id=str(candidate.server_id),
+            tariff_id=int(body.tariff_id),
+            target_subgroup=target_subgroup,
+        ):
             continue
         target = candidate
         break
     if target is None:
-        return None
-
-    # The join above accepts any server of the key's cluster, while the cabinet
-    # endpoint resolves exactly one and refuses the tariff when its group
-    # differs — ask the same way it does before handing the purchase over.
-    target_group = (
-        await session.scalar(
-            select(Server.tariff_group)
-            .where((Server.server_name == target.server_id) | (Server.cluster_name == target.server_id))
-            .limit(1)
-        )
-        or ""
-    ).strip()
-    if target_group != tariff_group_code:
         return None
 
     logger.info(f"[PurchaseByEmail] renewing client_id={target.client_id} for user_id={billing_user_id}")
@@ -371,6 +452,14 @@ async def _renew_instead_of_creating(
         # the cabinet itself and counted per IP for a guest. It trips before
         # anything is written, so a purchase that runs into it gets a new key
         # rather than an error.
+        #
+        # Nothing else is swallowed. Every condition this endpoint rejects on by
+        # configuration is pre-checked above, so what is left is a real failure —
+        # an unreachable panel, a client deleted on the panel, or server bindings
+        # re-pointed within the cluster after the key was created, which no
+        # column records and no pre-check can see. The panel may already have
+        # been touched by then. Handing out a second key on top of that would
+        # hide the outage and leave the account in a state nobody can read.
         if exc.status_code != 429:
             raise
         return None

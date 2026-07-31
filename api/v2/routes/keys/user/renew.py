@@ -137,7 +137,10 @@ async def user_key_renew(
         coupon_code=body.coupon_code,
     )
     net_cost = quote.net_cost_rub
-    required_amount = max(0, int(round(net_cost - pricing.balance)))
+    # Rounding to nearest asks the provider for less than the debit needs when
+    # the balance is fractional, and the renewal then fails on money already
+    # taken. Every other purchase path rounds the top-up up for that reason.
+    required_amount = int(max(0, ceil(float(net_cost) - pricing.balance)))
     payment_required = required_amount > 0
 
     if preview:
